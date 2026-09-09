@@ -1,0 +1,36 @@
+# ---- Secrets / env ----
+.env
+*.local
+
+# ---- Java / Maven ----
+target/
+!.mvn/wrapper/maven-wrapper.jar
+*.class
+*.jar
+*.war
+hs_err_pid*
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ---- IDE ----
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+
+# ---- Data / uploads ----
+uploads/
+data/
+*.log
