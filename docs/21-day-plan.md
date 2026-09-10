@@ -12,7 +12,7 @@
 - [ ] 装 **Docker Desktop**,Settings 里确认 Backend = WSL2
 - [ ] 验证:`docker run hello-world` 能看到成功信息
 - [x] JDK:已有 Java 25(比大纲的 21 新,兼容,跳过装 21)
-- [ ] Python 环境:`python3 -m venv .venv` → 激活 → `pip install --upgrade pip`
+- [ ] Python 环境:`uv python install 3.12` → `cd llm-service && uv venv && uv pip install -r requirements.txt`(版本锁 3.12,3.14 太新装不上原生扩展包)
 - [x] 建项目仓库结构(本仓库已搭好:backend-service / llm-service / docker-compose.yml / README)
 - [ ] 【学】30 分钟看一篇 "Docker 核心概念":image / container / volume / docker-compose 分别是什么
 

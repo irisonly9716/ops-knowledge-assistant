@@ -80,6 +80,7 @@ ops-knowledge-assistant/
 1. **WSL2**:管理员打开 PowerShell → `wsl --install` → 重启
 2. **Docker Desktop**:装完在 Settings 里确认 "Use the WSL 2 based engine" 打勾
 3. JDK 已有(Java 25);Maven 用项目自带的 wrapper,不用装
+4. Python 用 `uv`(已装),版本锁 3.12,见 [llm-service/README.md](llm-service/README.md)
 
 ### 起中间件
 
