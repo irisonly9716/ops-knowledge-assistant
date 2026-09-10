@@ -7,14 +7,13 @@
 
 ## 第 1 周:环境搭建 + 数据层基础
 
-### Day 1 — 开发环境搭建
-- [ ] 装 **WSL2**:管理员 PowerShell → `wsl --install` → 重启,确认 Ubuntu 已装
-- [ ] 装 **Docker Desktop**,Settings 里确认 Backend = WSL2
-- [ ] 验证:`docker run hello-world` 能看到成功信息
+### Day 1 — 开发环境搭建  ✅ 完成
+- [x] 装 **WSL2**:管理员 PowerShell → `wsl --install` → 重启;实际要再跑一次 `wsl --install -d Ubuntu` 才装上发行版
+- [x] 装 **Docker Desktop**(装在 `%LOCALAPPDATA%\Programs\DockerDesktop`),`docker run hello-world` 通过
 - [x] JDK:已有 Java 25(比大纲的 21 新,兼容,跳过装 21)
-- [ ] Python 环境:`uv python install 3.12` → `cd llm-service && uv venv && uv pip install -r requirements.txt`(版本锁 3.12,3.14 太新装不上原生扩展包)
-- [x] 建项目仓库结构(本仓库已搭好:backend-service / llm-service / docker-compose.yml / README)
-- [ ] 【学】30 分钟看一篇 "Docker 核心概念":image / container / volume / docker-compose 分别是什么
+- [x] Python 环境:用 `uv`(机器上的 `python` 是坏的商店占位符),版本锁 3.12 —— `uv python install 3.12` → `cd llm-service && uv venv && uv pip install -r requirements.txt`;`uv run uvicorn app.main:app --port 8000` → /health 返回 ok
+- [x] 建项目仓库结构 + 推到 GitHub
+- [x] 【学】Docker 核心概念:image=只读模板 / container=运行实例(用完即弃)/ volume=容器外持久化存储 / docker-compose=一个 yml 声明多容器一键起。用容器而非本机装:隔离、版本可控、一键复现
 
 ### Day 2 — Docker Compose 跑通基础中间件
 - [ ] 【学】docker-compose.yml 结构:services / ports / volumes / environment
