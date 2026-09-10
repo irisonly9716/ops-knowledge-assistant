@@ -101,7 +101,7 @@ docker compose exec postgres psql -U ops -d ops_assistant -c "SELECT extname FRO
 docker compose exec redis redis-cli ping        # 返回 PONG
 
 # Kafka:列出 topic
-docker compose exec kafka /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
 ```
 
 ---
