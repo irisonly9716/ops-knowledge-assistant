@@ -15,16 +15,19 @@
 - [x] 建项目仓库结构 + 推到 GitHub
 - [x] 【学】Docker 核心概念:image=只读模板 / container=运行实例(用完即弃)/ volume=容器外持久化存储 / docker-compose=一个 yml 声明多容器一键起。用容器而非本机装:隔离、版本可控、一键复现
 
-### Day 2 — Docker Compose 跑通基础中间件
-- [ ] 【学】docker-compose.yml 结构:services / ports / volumes / environment
-- [x] 写 docker-compose.yml(本仓库已含 Postgres+pgvector / Redis / Kafka)
-- [ ] `docker compose up -d`,用 DBeaver 连上 Postgres,`redis-cli` 连上 Redis
-- [x] Postgres 装 pgvector(用 pgvector/pgvector 镜像 + sql/01_init.sql 里 `CREATE EXTENSION vector`)
+### Day 2 — Docker Compose 跑通基础中间件  ✅ 完成
+- [x] 【学】docker-compose.yml 结构:services / ports / volumes / environment(+ image tag / healthcheck / 具名卷 vs 绑定挂载)
+- [x] 写 docker-compose.yml(Postgres+pgvector / Redis / Kafka / kafka-ui)
+- [x] `cp .env.example .env`(密码不进 git,占位符从 .env 注入)
+- [x] `docker compose up -d`,`docker compose ps` 三个服务 healthy
+- [x] Postgres 装 pgvector:`vector 0.8.6`,`'[1,2,3]'::vector <-> '[4,5,6]'::vector = 5.196` 验证可用
+- [x] Redis:`ping` → PONG,set/get 正常
+- 备注:踩坑 —— `bitnami/kafka:3.7` 被 Bitnami 从 Docker Hub 撤了,改用 `apache/kafka:3.9.0`
 
 ### Day 3 — Kafka 环境 + 基础收发测试
 - [ ] 【学】Kafka 核心概念:topic / producer / consumer / partition,为什么要它(异步解耦)
 - [x] docker-compose 里加 Kafka(KRaft 模式,无需 Zookeeper)
-- [ ] 创建测试 topic `document-upload-events`
+- [x] 创建测试 topic `document-upload-events`(1 partition / 1 replica),console 收发一条 JSON 验证 round-trip
 - [ ] 写最简 Python producer + consumer 脚本,跑通"发消息 → 收消息"
 
 ### Day 4 — Spring Boot 骨架
