@@ -45,6 +45,15 @@ tests/
 └── test_health.py
 ```
 
+## 初始化 Kafka topic
+
+```bash
+uv run python scripts/init_topics.py
+```
+
+幂等:topic 已存在就跳过。项目需要哪些 topic,都集中列在这个脚本的 `TOPICS` 里 ——
+新机器 / `docker compose down -v` 重来后,跑一次这个,不用再手敲 `kafka-topics.sh`。
+
 ## 测试
 
 ```bash
