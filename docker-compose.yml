@@ -80,7 +80,9 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"     # 开发方便;生产会关掉
+      # 关掉自动建 topic:强制走 scripts/init_topics.py 显式创建,
+      # 避免拼错名字时 Kafka 悄悄用默认配置建一个没人管的 topic(生产标准做法)
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       KAFKA_LOG_DIRS: "/var/lib/kafka/data"
     volumes:
       - kafka_data:/var/lib/kafka/data
