@@ -24,11 +24,12 @@
 - [x] Redis:`ping` → PONG,set/get 正常
 - 备注:踩坑 —— `bitnami/kafka:3.7` 被 Bitnami 从 Docker Hub 撤了,改用 `apache/kafka:3.9.0`
 
-### Day 3 — Kafka 环境 + 基础收发测试
-- [ ] 【学】Kafka 核心概念:topic / producer / consumer / partition,为什么要它(异步解耦)
+### Day 3 — Kafka 环境 + 基础收发测试  ✅ 完成
+- [x] 【学】Kafka 核心概念:topic / producer / consumer / partition,为什么要它(异步解耦)
 - [x] docker-compose 里加 Kafka(KRaft 模式,无需 Zookeeper)
 - [x] 创建测试 topic `document-upload-events`(1 partition / 1 replica),console 收发一条 JSON 验证 round-trip
-- [ ] 写最简 Python producer + consumer 脚本,跑通"发消息 → 收消息"
+- [x] Python producer + consumer 脚本(`llm-service/scripts/kafka_{producer,consumer}_test.py`,confluent-kafka),验证发→收
+- 备注:踩坑 —— PowerShell 管道发的消息带 UTF-8 BOM,`json.loads` 解析报错;consumer 改用 `utf-8-sig` 解码更抗糙。顺带验证了 `finally: consumer.close()` 会触发 offset 提交(即使中途异常)
 
 ### Day 4 — Spring Boot 骨架
 - [ ] 用 Spring Initializr 建项目(Web / JPA / PostgreSQL Driver / Spring Kafka)
