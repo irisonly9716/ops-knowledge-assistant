@@ -4,10 +4,10 @@ uvicorn[standard]==0.34.0
 pydantic-settings==2.7.1
 python-dotenv==1.0.1
 
+# ---- Day 3  Kafka 收发验证(Day 8 真正的消费者服务也用它)----
+confluent-kafka==2.6.1
+
 # ---- 后面按天解开注释 ----
-# Day 3/8  Kafka
-# confluent-kafka==2.6.1
-#
 # Day 9    文档解析 + chunking
 # langchain==0.3.14
 # langchain-community==0.3.14
