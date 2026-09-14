@@ -1,18 +1,25 @@
 """Day 3 验证脚本:往 document-upload-events 发一条测试消息。
 
 跟 app/consumers/ 里"真正的"生产逻辑分开 —— 这里只是确认 Python 能连上 Kafka、
-消息能发出去,不接业务逻辑。跑法:
+消息能发出去,不接业务逻辑。跑法(注意是 -m,不是直接给文件路径,见下方说明):
 
     cd llm-service
-    uv run python scripts/kafka_producer_test.py
+    uv run python -m scripts.kafka_producer_test
+
+为什么用 `-m scripts.xxx` 而不是 `python scripts/xxx.py`:
+后者会把 sys.path[0] 设成 scripts/ 目录本身,`import app.config` 找不到 app 包;
+用 `-m` 时 Python 以当前目录(llm-service/)为根,app/ 和 scripts/ 都在同一层,
+才能正常 import。
 """
 import json
 import sys
 
 from confluent_kafka import Producer
 
-BOOTSTRAP_SERVERS = "localhost:9092"   # 宿主机上跑的脚本,连 EXTERNAL listener
-TOPIC = "document-upload-events"
+from app.config import settings
+
+BOOTSTRAP_SERVERS = settings.kafka_bootstrap_servers   # 宿主机上跑的脚本,连 EXTERNAL listener
+TOPIC = settings.doc_upload_topic
 
 
 def delivery_report(err, msg):

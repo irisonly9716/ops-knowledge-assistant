@@ -1,16 +1,18 @@
 """Day 3 验证脚本:从 document-upload-events 读消息,打印出来就退出。
 
-跑法(先跑 kafka_producer_test.py 发一条,再跑这个读):
+跑法(先跑 producer 发一条,再跑这个读;用 -m 的原因见 kafka_producer_test.py):
 
     cd llm-service
-    uv run python scripts/kafka_consumer_test.py
+    uv run python -m scripts.kafka_consumer_test
 """
 import json
 
 from confluent_kafka import Consumer
 
-BOOTSTRAP_SERVERS = "localhost:9092"
-TOPIC = "document-upload-events"
+from app.config import settings
+
+BOOTSTRAP_SERVERS = settings.kafka_bootstrap_servers
+TOPIC = settings.doc_upload_topic
 
 # 同一个 group.id 里的多个 consumer 会分摊 partition、共享消费进度(offset)。
 # 换一个新的 group.id 相当于"从头当一个新读者",不受之前消费到哪里的影响 ——

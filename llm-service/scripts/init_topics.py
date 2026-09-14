@@ -3,19 +3,21 @@
 新机器 / `docker compose down -v` 重来后,或者以后接 CI/部署,跑一次这个就把
 项目需要的 topic 都建好,不用再翻记录去手敲 kafka-topics.sh 的一堆参数。
 
-跑法:
+跑法(用 -m 的原因见 kafka_producer_test.py):
     cd llm-service
-    uv run python scripts/init_topics.py
+    uv run python -m scripts.init_topics
 
 新增 topic 只需要往下面 TOPICS 列表加一行,这里就是"这个项目一共有哪些事件流"的
-唯一权威清单。
+唯一权威清单;topic 名字统一从 app/config.py 的 settings 读,不在这里重新拼字符串。
 """
 from confluent_kafka.admin import AdminClient, NewTopic
 
-BOOTSTRAP_SERVERS = "localhost:9092"
+from app.config import settings
+
+BOOTSTRAP_SERVERS = settings.kafka_bootstrap_servers
 
 TOPICS = [
-    NewTopic("document-upload-events", num_partitions=1, replication_factor=1),
+    NewTopic(settings.doc_upload_topic, num_partitions=1, replication_factor=1),
     # 以后如果有语义上不同的事件种类,在这里加新的一行,比如:
     # NewTopic("document-processing-failed", num_partitions=1, replication_factor=1),
 ]

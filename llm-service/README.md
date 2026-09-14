@@ -48,7 +48,7 @@ tests/
 ## 初始化 Kafka topic
 
 ```bash
-uv run python scripts/init_topics.py
+uv run python -m scripts.init_topics
 ```
 
 幂等:topic 已存在就跳过。项目需要哪些 topic,都集中列在这个脚本的 `TOPICS` 里 ——
