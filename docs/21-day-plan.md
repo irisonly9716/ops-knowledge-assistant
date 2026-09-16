@@ -31,11 +31,12 @@
 - [x] Python producer + consumer 脚本(`llm-service/scripts/kafka_{producer,consumer}_test.py`,confluent-kafka),验证发→收
 - 备注:踩坑 —— PowerShell 管道发的消息带 UTF-8 BOM,`json.loads` 解析报错;consumer 改用 `utf-8-sig` 解码更抗糙。顺带验证了 `finally: consumer.close()` 会触发 offset 提交(即使中途异常)
 
-### Day 4 — Spring Boot 骨架
-- [ ] 用 Spring Initializr 建项目(Web / JPA / PostgreSQL Driver / Spring Kafka)
-- [ ] 写 `GET /health`,跑起来确认能访问
-- [ ] 配 application.yml 连 Postgres,写一个最简 Entity + Repository 测试读写
-- [ ] 【学】Spring Kafka:`KafkaTemplate` 发、`@KafkaListener` 收
+### Day 4 — Spring Boot 骨架  ✅ 完成
+- [x] 用 Spring Initializr 建项目(curl 调 start.spring.io:Web / JPA / PostgreSQL / Kafka / Actuator / Lombok),实际拿到 Spring Boot 4.1.1
+- [x] 写 `GET /health`,跑起来确认能访问;`/actuator/health` 也留着给基础设施用
+- [x] 配 application.yml 连 Postgres(默认值对齐 .env.example),`Department` Entity + Repository,`DepartmentStartupCheck`(CommandLineRunner)验证写入+读回
+- [ ] 【学】Spring Kafka:`KafkaTemplate` 发、`@KafkaListener` 收 —— 留到 Day 6 写生产者时再学,到时候直接对着代码讲
+- 备注:8080 被 kafka-ui 占了,backend 端口定为 8081;`ddl-auto: update` 只是 Day 4 临时验证用,Day 5 定稿 SQL DDL 后要改成 validate/none
 
 ### Day 5 — 数据 Schema 设计
 - [ ] 设计表:departments / users / anchors / campaigns / campaign_metrics / sop_documents / doc_chunks / doc_ingest_status(草案见 [data-schema.md](data-schema.md))

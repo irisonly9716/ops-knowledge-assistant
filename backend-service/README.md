@@ -2,8 +2,9 @@
 
 Spring Boot / Java。对外 REST API、文件上传、结构化业务表(JPA)、Kafka producer。
 
-> **Day 4 才正式创建这个项目**(用 Spring Initializr 生成)。这里先放生成配置,
-> 这样目录结构完整,Day 4 直接把生成的内容拷进来即可。
+Day 4 已生成(用下面的 Spring Initializr 配置,通过 `curl` 直接调 start.spring.io)。
+实际拿到的是 **Spring Boot 4.1.1**(比下面写的 3.3.x/3.4.x 新——start.spring.io 默认版本
+一直在往前走,不影响我们用的这几个 starter)。
 
 ## 用 Spring Initializr 生成
 
@@ -49,15 +50,17 @@ curl https://start.spring.io/starter.zip \
 如果 Day 4 真遇到 Spring Boot 对 Java 25 报兼容问题,再单独装一个 JDK 21 切过去即可
 (大纲原本就要求 JDK 21)。
 
-## 跑起来(Day 4)
+## 跑起来
 
 ```bash
 cd backend-service
-./mvnw spring-boot:run          # Windows: .\mvnw.cmd spring-boot:run
+.\mvnw.cmd spring-boot:run      # WSL/macOS/Linux: ./mvnw spring-boot:run
 ```
 
-- `application.yml` 配数据源指向 `localhost:5432 / ops / ops_dev_pw / ops_assistant`
-- 访问 `http://localhost:8081/actuator/health` → `{"status":"UP"}`
+- `application.yml` 数据源默认指向 `localhost:5432 / ops / ops_dev_pw / ops_assistant`(跟 `.env.example` 对齐),要先 `docker compose up -d` 把 Postgres 起起来
+- 访问 `http://localhost:8081/health` → `{"status":"ok","service":"backend-service"}`
+- 访问 `http://localhost:8081/actuator/health` → `{"status":"UP",...}`
+- 启动日志里应该能看到 `DepartmentStartupCheck` 打印"写入成功"/"读取成功"——证明 JPA 连库正常
 
 ## 计划中的接口
 
