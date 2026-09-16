@@ -1,0 +1,40 @@
+spring:
+  application:
+    name: backend-service
+
+  datasource:
+    # ${VAR:默认值} —— Spring 原生支持从"真实环境变量"读值,读不到就用冒号后面的默认值。
+    # 默认值刻意跟 .env.example 里 Postgres 那几项对齐,本地开发不用配就能连上。
+    # 注意:这跟 docker-compose 的 .env 机制不是一回事 —— Java 进程不会自动去读
+    # 项目根目录那个 .env 文件,只认操作系统真正 export 出来的环境变量。
+    # 所以这里的默认值其实是把 .env.example 的值"抄了一份"进代码,生产环境要覆盖它,
+    # 应该在部署环境里设真正的 POSTGRES_PASSWORD 环境变量,而不是继续用这个默认值。
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:ops_assistant}
+    username: ${POSTGRES_USER:ops}
+    password: ${POSTGRES_PASSWORD:ops_dev_pw}
+
+  jpa:
+    hibernate:
+      # Day 4 临时用 update 让 Hibernate 自己按 Entity 建表,图快验证连接。
+      # Day 5 定稿真正的 schema(sql/ 下的 DDL,含 department 权限字段、pgvector 等
+      # Hibernate 不擅长表达的东西)之后,这里要改成 validate 或 none ——
+      # 到那时"表长什么样"应该完全由 SQL 文件说了算,不能让 Hibernate 偷偷改表结构。
+      ddl-auto: update
+    properties:
+      hibernate:
+        format_sql: true
+    show-sql: true
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+server:
+  # 8080 是 Spring Boot 默认端口,但我们的 kafka-ui 已经占了 8080,
+  # 用 architecture.md 里规划好的 8081,避免端口冲突。
+  port: ${BACKEND_PORT:8081}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
