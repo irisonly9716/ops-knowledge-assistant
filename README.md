@@ -64,6 +64,7 @@ ops-knowledge-assistant/
 │   └── 01_init.sql         # 建库初始化(pgvector 扩展 + schema,schema 在 Day 5 填)
 ├── backend-service/        # Spring Boot,Java —— Day 4 用 Spring Initializr 生成
 ├── llm-service/            # Python FastAPI —— embedding / RAG / SQL agent / 路由
+├── sop_docs/               # 模拟 SOP 文档(markdown),Day 9 起被摄入 RAG 链路
 └── docs/
     ├── architecture.md     # 架构与运行时链路
     ├── data-schema.md      # 数据表设计(含 users / 权限字段)

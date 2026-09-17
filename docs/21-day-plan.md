@@ -38,12 +38,13 @@
 - [ ] 【学】Spring Kafka:`KafkaTemplate` 发、`@KafkaListener` 收 —— 留到 Day 6 写生产者时再学,到时候直接对着代码讲
 - 备注:8080 被 kafka-ui 占了,backend 端口定为 8081;`ddl-auto: update` 只是 Day 4 临时验证用,Day 5 定稿 SQL DDL 后要改成 validate/none
 
-### Day 5 — 数据 Schema 设计
-- [ ] 设计表:departments / users / anchors / campaigns / campaign_metrics / sop_documents / doc_chunks / doc_ingest_status(草案见 [data-schema.md](data-schema.md))
-- [ ] 写模拟数据生成脚本(Python + Faker),插入数据库
-- [ ] 定 SOP 文档结构:title / department / category / steps(jsonb) / responsible_team
-- [ ] 自己写 3-5 篇模拟 SOP(至少 1 篇通用 `ALL`),markdown 格式
-- [ ] **把 `department_id` / `users` / `role` 埋进 schema**(见 [permission-model.md](permission-model.md))
+### Day 5 — 数据 Schema 设计  ✅ 完成
+- [x] 设计表:departments / users / anchors / campaigns / campaign_metrics / sop_documents / doc_chunks / doc_ingest_status —— 真正的 DDL 落地在 [sql/02_schema.sql](../sql/02_schema.sql)(BIGSERIAL 主键对齐 Hibernate,doc_chunks 建了 HNSW 索引)
+- [x] 写模拟数据生成脚本(Python + Faker + psycopg,`llm-service/scripts/generate_mock_data.py`),插入数据库:4 部门 / 24 用户(含 1 admin)/ 15 主播 / 49 campaign / 1715 条每日指标
+- [x] 定 SOP 文档结构:frontmatter(title / department / category / responsible_team)+ markdown 正文,约定见 [sop_docs/README.md](../sop_docs/README.md)
+- [x] 写了 5 篇模拟 SOP(2 篇 `ALL` 通用 + 3 篇分部门),见 [sop_docs/](../sop_docs/)
+- [x] **`department_id` / `users` / `role` 已经埋进 schema**(见 [permission-model.md](permission-model.md)),`sop_documents.department` 故意用 TEXT 不用外键,为了能存 `ALL` 哨兵值
+- 备注:`backend-service` 的 `ddl-auto` 从 `update` 切到 `validate`,`DepartmentStartupCheck.java` 已删除(职责被 Faker 脚本取代)
 
 ### Day 6 — 文件上传 API + Kafka 生产者打通
 - [ ] Spring Boot `POST /documents/upload`,接收文件存到本地/临时目录(或 S3)
