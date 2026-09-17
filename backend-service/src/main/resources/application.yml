@@ -25,6 +25,18 @@ spring:
 
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      # Spring Boot 不会帮你猜序列化方式,必须显式配置,不然启动会报错要你选一个。
+      # 用最朴素的字符串序列化,我们自己把 Java 对象转成 JSON 字符串再发——
+      # 跟 llm-service 那边 Python 用 json.dumps() 发的消息格式完全一致,
+      # 两边不用为了"Java 特有的对象格式"额外多写一层转换代码。
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+document:
+  # 跟 llm-service 的 app/config.py 读的是同一个 .env 变量,单一数据源,
+  # 不在这里重新拼一遍字符串(Day 3 就踩过这个坑)。
+  upload-topic: ${DOC_UPLOAD_TOPIC:document-upload-events}
 
 server:
   # 8080 是 Spring Boot 默认端口,但我们的 kafka-ui 已经占了 8080,

@@ -57,16 +57,52 @@ cd backend-service
 .\mvnw.cmd spring-boot:run      # WSL/macOS/Linux: ./mvnw spring-boot:run
 ```
 
-- `application.yml` 数据源默认指向 `localhost:5432 / ops / ops_dev_pw / ops_assistant`(跟 `.env.example` 对齐),要先 `docker compose up -d` 把 Postgres 起起来
+- `application.yml` 数据源默认指向 `localhost:5432 / ops / ops_dev_pw / ops_assistant`(跟 `.env.example` 对齐),要先 `docker compose up -d` 把 Postgres/Kafka 起起来
 - 访问 `http://localhost:8081/health` → `{"status":"ok","service":"backend-service"}`
 - 访问 `http://localhost:8081/actuator/health` → `{"status":"UP",...}`
-- 启动日志里应该能看到 `DepartmentStartupCheck` 打印"写入成功"/"读取成功"——证明 JPA 连库正常
+
+## Jackson 版本注意
+
+Spring Boot 4 默认用 **Jackson 3**,Maven 坐标和 Java 包名都从 `com.fasterxml.jackson.*`
+换成了 **`tools.jackson.*`**——网上大部分教程/StackOverflow 答案还是 Jackson 2 的写法
+(`com.fasterxml.jackson.databind.ObjectMapper`),照抄会编译不过。`JacksonException` 也从
+Jackson 2 的受检异常(`extends IOException`)变成了非受检异常。
+
+## 已实现的接口
+
+### `POST /documents/upload`
+
+对应 [docs/architecture.md](../docs/architecture.md) 的"两条摄入管道共用一个 topic"设计。
+`multipart/form-data`,字段:
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `file` | 是 | 要上传的文件 |
+| `contentKind` | 是 | `document`(SOP/策划案/复盘,走 RAG)或 `data_table`(商品表/顾客行为表,直接落表) |
+| `docType` | `contentKind=document` 时必填 | `sop` / `campaign_plan` / `campaign_review` |
+| `tableType` | `contentKind=data_table` 时必填 | `campaign_products` / `campaign_customer_behavior` |
+| `department` | 是 | 部门名或 `ALL`(仅 `sop` 可用) |
+| `campaignId` | 除 `sop` 外必填 | `campaign_plan`/`campaign_review`/`data_table` 都要挂一个 campaign |
+| `category` | 否 | |
+
+成功返回 `202 Accepted` + `{"uploadId": "..."}`。文件存到 `uploads/`(gitignore 了,不进仓库),
+同时发一条 JSON 消息到 `document-upload-events`(topic 名从 `.env` 的 `DOC_UPLOAD_TOPIC` 读)。
+
+**注意是 `upload_id` 不是 `doc_id`**——`documents.doc_id` 是 Postgres 自增列,要等 Day 8+
+消费者真正执行 `INSERT` 才会产生,上传这一刻还不存在,不可能提前塞进消息里。
+
+验证:
+```bash
+curl -X POST http://localhost:8081/documents/upload \
+  -F "file=@some.md" -F "contentKind=document" -F "docType=sop" -F "department=ALL"
+```
+然后用 `llm-service/scripts/kafka_consumer_test.py` 或 `kafka-console-consumer` 确认收到。
 
 ## 计划中的接口
 
 | 接口 | 天 | 说明 |
 |---|---|---|
 | `GET /actuator/health` | 4 | 健康检查 |
-| `POST /documents/upload` | 6 | 上传文件 → 存盘 → 发 Kafka `document-upload-events` |
+| `POST /documents/upload` | 6 ✅ | 上传文件 → 存盘 → 发 Kafka `document-upload-events` |
 | `POST /query` | 13 | 转发给 llm-service /query(带 `X-User-Id`) |
 | 结构化数据只读接口 | 5+ | campaigns / campaign_metrics / anchors 查询(给前端看板用,可选) |

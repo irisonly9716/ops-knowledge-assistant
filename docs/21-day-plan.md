@@ -54,10 +54,12 @@
 - **第三轮**:又加了 `campaign_products`(商品售卖数据)/ `campaign_customer_behavior`(顾客行为数据)两张表,都是"运营上传、不是我们计算"的结构化数据;确认了复购率不需要建订单系统,按 `customer_ref` 分组的普通 SQL 就够(已用真实 mock 数据验证过);写了一组策划案+复盘示例文档([campaign_docs/](../campaign_docs/)),数字跟 mock 数据(`campaign_id=3`)对得上;架构上定了"文档类"(RAG)和"结构化表格类"(直接落表)两条摄入管道共用一个 Kafka topic,靠消息体里的 `content_kind` 分流
 - **第四轮**:ROI 公式改了两次才对——第一次漏扣商品成本,第二次把商品成本也算进分母(错的,商品成本不是这场活动的营销投入)。定案:`ROI = SUM(campaign_products.profit) / campaigns.actual_operating_cost`(`profit` 已经净掉商品成本,分母只算运营成本)。`campaign_products` 补了 `cost_price`/`profit`/`profit_margin`;`campaigns` 补了 `planned_operating_cost`/`actual_operating_cost`。顺带修了 mock 数据生成逻辑:之前 `campaign_products` 的销售额跟 `campaign_metrics` 的 GMV 是各自独立随机生成,加起来会超过 GMV——现在改成先算出 campaign 的 total_gmv,商品销售额从 GMV 的 60%-90% 里分配,保证不会超过大盘
 
-### Day 6 — 文件上传 API + Kafka 生产者打通
-- [ ] Spring Boot `POST /documents/upload`,接收文件存到本地/临时目录(或 S3)
-- [ ] 上传成功后往 `document-upload-events` 发消息(含文件路径、department、category、`source: manual`)
-- [ ] 用 Postman 上传测试文件 → 命令行 consumer 确认收到
+### Day 6 — 文件上传 API + Kafka 生产者打通  ✅ 完成
+- [x] Spring Boot `POST /documents/upload`,接收文件存到 `uploads/`;实际做成了两种上传("文档类"/"结构化表格类"共用一个接口,见 [architecture.md](architecture.md)),不只是单一的文档上传
+- [x] 上传成功后往 `document-upload-events` 发消息(`upload_id`/路径/`department`/`campaignId`/`category`/`source: manual`;修正了架构文档里"消息带 doc_id"的设计错误——doc_id 要等 Day 8+ 插库才产生)
+- [x] 用 curl 测了 5 种组合(sop / campaign_plan / campaign_review / 两种 data_table),`kafka-console-consumer` 确认全部正确收到;校验逻辑(该带 campaignId 没带、sop 不该带却带了……)也测过,返回 400 + 具体原因
+- 【学】`KafkaTemplate.send(topic, key, value)`:对着实际代码讲的,发消息用 uploadId 当 key、用 `.get(5,TimeUnit.SECONDS)` 同步等结果好让发送失败能反映到这次 HTTP 响应里
+- 备注(真踩的坑):**Spring Boot 4 默认用 Jackson 3**,Maven 坐标和包名从 `com.fasterxml.jackson.*` 换成了 `tools.jackson.*`,网上教程按 Jackson 2 写会编译不过;`server.error.include-message: always` 在这个版本没有让 `ResponseStatusException` 的详细原因透出来,改成自己写 `@ExceptionHandler` 解决
 
 ### Day 7 — 缓冲 + 第 1 周回顾
 - [ ] 补齐没跑通的部分

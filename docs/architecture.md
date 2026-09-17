@@ -22,14 +22,20 @@
 上传的东西分两种性质,处理方式完全不同,但共用同一个 Kafka topic(消息体带
 `content_kind` 字段区分,consumer 收到后分流,不需要为此另开一个 topic):
 
+**关于 `upload_id` vs `doc_id`**:消息体里带的是 backend-service 自己生成的 `upload_id`
+(UUID),不是 `doc_id`——`documents.doc_id` 是 Postgres 的 `BIGSERIAL`,要等 llm-service
+真正执行 `INSERT INTO documents ... RETURNING doc_id` 才会产生,backend-service 发消息
+那一刻这行还不存在,不可能提前知道。`upload_id` 的另一个用处是 Kafka 消费者的**去重键**
+(Day 3 讨论过的"至少一次投递,消费者可能收到重复消息"那个问题)。
+
 **① 文档类**(SOP / 策划案 / 复盘的叙述内容)—— 非结构化文字,走 RAG:
 
 ```
 [员工手动上传]  POST /documents/upload (backend)
-      │  存文件到 uploads/ 或 S3
+      │  存文件到 uploads/ 或 S3,生成 upload_id
       ▼
-  Kafka: document-upload-events   { doc_id, path, content_kind: "document",
-                                     doc_type, department, campaign_id?, source: "manual" }
+  Kafka: document-upload-events   { upload_id, path, content_kind: "document",
+                                     doc_type, department, campaign_id?, category?, source: "manual" }
       │
 [未来] 定时任务  ──发同一个 topic──▶   { ..., source: "auto" }
       │
@@ -39,7 +45,7 @@
       │  2. 解析(PDF / Markdown / Word)
       │  3. chunking(RecursiveCharacterTextSplitter)
       │  4. embedding(每个 chunk 一个向量)
-      │  5. 写入 Postgres: documents 元数据 + doc_chunks(chunk, embedding, metadata)
+      │  5. 写入 Postgres: INSERT documents(此时才产生真正的 doc_id)+ doc_chunks
       │  6. 更新状态 done
       ▼
   能被向量检索
@@ -50,9 +56,9 @@
 
 ```
 [员工上传 Excel/CSV]  POST /documents/upload (backend,同一个接口)
-      │
+      │  生成 upload_id
       ▼
-  Kafka: document-upload-events   { doc_id, path, content_kind: "data_table",
+  Kafka: document-upload-events   { upload_id, path, content_kind: "data_table",
                                      table_type: "campaign_products" | "campaign_customer_behavior",
                                      campaign_id, source: "manual" }
       ▼
@@ -111,5 +117,5 @@ backend /query ──转发──▶ llm-service /query
 - **为什么 llm-service 用 Kafka 消费而不是 backend 直接 HTTP 调**:解析 + embedding 可能几秒到几十秒,上传接口不能被拖住;失败要能重试;未来自动化 producer 也能复用。
 - **为什么向量和结构化数据都放 Postgres**:少一个中间件要运维,`doc_chunks` 和业务表能在同一事务/同一连接里查。
 - **为什么权限在 schema 层就埋 `department`**:如果等到最后才加,向量表、SQL 生成、检索 filter 全要返工。见 [permission-model.md](permission-model.md)。
-- **为什么"文档"和"结构化表格"两种上传共用一个 topic,不是分开两个**:两者的消息形状(`doc_id`/`path`/`department`)本来就大部分重合,分流靠 payload 里一个 `content_kind` 字段 + consumer 内部 if/else 就够了;拆成两个 topic 除了多一次创建/多一份配置,没有实际好处,恰好是 Day 3 讨论过的"要不要多建 topic"那次的同一个原则:topic 该按*语义上不同的事件种类*拆,不该为了图代码分支清晰而拆。
+- **为什么"文档"和"结构化表格"两种上传共用一个 topic,不是分开两个**:两者的消息形状(`upload_id`/`path`/`department`)本来就大部分重合,分流靠 payload 里一个 `content_kind` 字段 + consumer 内部 if/else 就够了;拆成两个 topic 除了多一次创建/多一份配置,没有实际好处,恰好是 Day 3 讨论过的"要不要多建 topic"那次的同一个原则:topic 该按*语义上不同的事件种类*拆,不该为了图代码分支清晰而拆。
 - **为什么 ROI / 商品级归因 / 顾客人群这些不做成结构化字段**:这个项目的核心价值是"AI 分析内容和结果",不是重新造一套 BI 计算引擎。干净的数字(GMV/DAU/转化率/在线人数)进 `campaign_metrics`,需要判断和归因的内容进 `documents`(复盘文档),运营已经有但我们不该重新计算的原始数据(商品售卖、顾客行为)进对应的结构化表,原样接收,不在中间加一层自己的计算逻辑。
