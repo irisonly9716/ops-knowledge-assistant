@@ -45,6 +45,12 @@
 - [x] 写了 5 篇模拟 SOP(2 篇 `ALL` 通用 + 3 篇分部门),见 [sop_docs/](../sop_docs/)
 - [x] **`department_id` / `users` / `role` 已经埋进 schema**(见 [permission-model.md](permission-model.md)),`sop_documents.department` 故意用 TEXT 不用外键,为了能存 `ALL` 哨兵值
 - 备注:`backend-service` 的 `ddl-auto` 从 `update` 切到 `validate`,`DepartmentStartupCheck.java` 已删除(职责被 Faker 脚本取代)
+- **Day 5 之后又追加了一轮设计讨论,schema 有二次修改**(见 [data-schema.md](data-schema.md) / [permission-model.md](permission-model.md)):
+  - `campaigns` 加 `anchor_id`(追溯"这场活动是哪个主播的",不做主播组这层权限)
+  - `sop_documents` 泛化成 `documents` + `doc_type`(`sop`/`campaign_plan`/`campaign_review`),三种文档共用同一条摄入管道;数据库 CHECK 约束强制"sop 不挂 campaign,plan/review 必须挂 campaign"
+  - `campaign_metrics` 加 `peak_concurrent_viewers` / `avg_dwell_time_minutes` 两个汇总字段;**ROI 和商品级拆解不做结构化字段**,归到 `campaign_review` 文档的内容里,靠 RAG 分析,不是我们计算的
+  - 顾客人群分析(复购率等)明确是外部团队算好同步给我们的数据,不是本项目计算范围;`customer_insights` 表还在提议阶段,没有建
+  - `campaign_plan`/`campaign_review` 的示例文档内容还没写(SOP 那 5 篇已经写了)
 
 ### Day 6 — 文件上传 API + Kafka 生产者打通
 - [ ] Spring Boot `POST /documents/upload`,接收文件存到本地/临时目录(或 S3)

@@ -1,7 +1,8 @@
 """Day 5:生成模拟数据,插入 departments / users / anchors / campaigns / campaign_metrics。
 
-不接真实阿里数据,自己造。sop_documents / doc_chunks 不在这里造——那两张表要等
-Day 9-12 真正的"上传 -> 解析 -> 切片 -> embedding"链路跑起来才有数据,不是假数据。
+不接真实阿里数据,自己造。documents / doc_chunks 不在这里造——那两张表(SOP、
+策划案、复盘文档)要等 Day 6+ 真正的"上传 -> 解析 -> 切片 -> embedding"链路
+跑起来才有数据,不是假数据。
 
 跑法:
     cd llm-service
@@ -23,8 +24,8 @@ fake = Faker("zh_CN")
 random.seed(42)  # 固定随机种子:每次跑生成的数据都一样,方便调试和复现问题
 
 # 部门名字是业务领域知识,Faker 编不出来,手写固定列表——
-# 这几个名字后面 sop_docs/ 里的 SOP 文档也会用到,必须完全一致(纯字符串匹配,
-# 见 docs/permission-model.md:sop_documents.department 不是外键)。
+# 这几个名字后面 sop_docs/ 里的 SOP 文档、以及策划案/复盘文档也会用到,必须
+# 完全一致(纯字符串匹配,见 docs/permission-model.md:documents.department 不是外键)。
 DEPARTMENTS = ["美妆运营", "3C数码运营", "食品生鲜运营", "日用百货运营"]
 
 CAMPAIGN_TEMPLATES = ["618大促", "双11大促", "新品首发", "日常直播专场", "粉丝节", "清仓特卖", "周年庆"]
@@ -77,23 +78,25 @@ def main():
                 ("系统管理员", first_dept_id),
             )
 
-            # ---- anchors:每个部门 3-5 个 ----
+            # ---- anchors:每个部门 3-5 个,记下 anchor_id 给 campaigns 用 ----
+            anchor_ids_by_dept = {}
             for dept_name, dept_id in dept_ids.items():
                 n_anchors = random.randint(3, 5)
-                cur.executemany(
-                    """INSERT INTO anchors (name, department_id, category, fans_count, join_date)
-                       VALUES (%s, %s, %s, %s, %s)""",
-                    [
+                ids = []
+                for _ in range(n_anchors):
+                    cur.execute(
+                        """INSERT INTO anchors (name, department_id, category, fans_count, join_date)
+                           VALUES (%s, %s, %s, %s, %s) RETURNING anchor_id""",
                         (
                             fake.name(),
                             dept_id,
                             dept_name.replace("运营", ""),
                             random.randint(1_000, 500_000),
                             fake.date_between(start_date="-2y", end_date="today"),
-                        )
-                        for _ in range(n_anchors)
-                    ],
-                )
+                        ),
+                    )
+                    ids.append(cur.fetchone()[0])
+                anchor_ids_by_dept[dept_name] = ids
 
             # ---- campaigns + campaign_metrics:每个部门 10-15 个活动,
             #      每个活动 15-60 天的每日指标 ----
@@ -105,11 +108,14 @@ def main():
                     end = start + timedelta(days=duration)
                     status = "finished" if end < date.today() else random.choice(["running", "planned"])
                     name = f"{dept_name.replace('运营', '')}{random.choice(CAMPAIGN_TEMPLATES)}"
+                    # 从本部门的主播里挑一个当主责主播——不跨部门挑,保持
+                    # campaign 的部门和主播的部门一致(避免以后按部门过滤时数据自相矛盾)
+                    anchor_id = random.choice(anchor_ids_by_dept[dept_name])
 
                     cur.execute(
-                        """INSERT INTO campaigns (name, department_id, category, start_date, end_date, status)
-                           VALUES (%s, %s, %s, %s, %s, %s) RETURNING campaign_id""",
-                        (name, dept_id, dept_name.replace("运营", ""), start, end, status),
+                        """INSERT INTO campaigns (name, department_id, anchor_id, category, start_date, end_date, status)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING campaign_id""",
+                        (name, dept_id, anchor_id, dept_name.replace("运营", ""), start, end, status),
                     )
                     campaign_id = cur.fetchone()[0]
 
@@ -127,11 +133,14 @@ def main():
                             campaign_id, d, gmv, dau,
                             round(random.uniform(15, 90), 2),
                             round(random.uniform(0.01, 0.15), 4),
+                            int(dau * random.uniform(1.2, 2.5)),  # peak_concurrent_viewers,粗略比 DAU 高一截
+                            round(random.uniform(3, 25), 2),      # avg_dwell_time_minutes
                         ))
                     cur.executemany(
                         """INSERT INTO campaign_metrics
-                           (campaign_id, date, gmv, dau, watch_time, conversion_rate)
-                           VALUES (%s, %s, %s, %s, %s, %s)""",
+                           (campaign_id, date, gmv, dau, watch_time, conversion_rate,
+                            peak_concurrent_viewers, avg_dwell_time_minutes)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                         metrics_rows,
                     )
 

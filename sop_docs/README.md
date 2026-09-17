@@ -1,11 +1,15 @@
 # SOP 文档
 
-Day 5 手写的模拟 SOP,markdown 格式,Day 9 起会被 Kafka 消费者读取、解析、切片、
-生成 embedding,最终存进 `sop_documents` + `doc_chunks` 表(见 `docs/data-schema.md`)。
+Day 5 手写的模拟 SOP,markdown 格式,Day 6+ 起会被 Kafka 消费者读取、解析、切片、
+生成 embedding,最终存进 `documents`(`doc_type='sop'`)+ `doc_chunks` 表(见 `docs/data-schema.md`)。
+
+`documents` 表还有 `campaign_plan`(策划案)/ `campaign_review`(复盘,含 ROI 等结果数据)
+两种文档类型,跟具体 campaign 挂钩——这两种目前只有 schema,还没有示例内容,不放在这个目录
+(这个目录名字就叫 SOP,专指 `doc_type='sop'` 这一种)。
 
 ## 格式约定
 
-每篇文档顶部有一段 frontmatter(`---` 包起来),对应 `sop_documents` 表的字段:
+每篇文档顶部有一段 frontmatter(`---` 包起来),对应 `documents` 表的字段:
 
 ```markdown
 ---

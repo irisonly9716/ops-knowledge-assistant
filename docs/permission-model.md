@@ -37,6 +37,9 @@
   - `role = staff` → `department IN (:current_dept, 'ALL')`
   - `role in (manager, admin)` → 不加(或 `department IN (所有部门, 'ALL')`)
 - SOP 文档在录入时(上传事件的消息体)就要带 `department`;通用流程填 `ALL`
+- `campaign_plan`/`campaign_review` 类型的文档同样走这条过滤规则(它们的 `department` 取值
+  跟对应 campaign 一致,不会是 `ALL`);另外还能按 `campaign_id`/`doc_type` 精确过滤到
+  "只查这一场活动的复盘",这两个字段也存在 `doc_chunks.metadata` 里,不用 join
 
 ## 4. 跨部门 campaign 怎么办
 
@@ -53,3 +56,11 @@
 - [ ] 同一个问题换 `admin` 用户,能拿到
 - [ ] 文档检索:`staff` 问别的部门专属 SOP,检索不到;问通用 SOP(`ALL`)能检索到
 - [ ] LLM 生成了带 `department_id` 过滤的 SQL,即使用户问句里没提部门
+
+## 6. 主播这一层,先不做权限
+
+`campaigns.anchor_id` / `documents.campaign_id -> campaigns.anchor_id` 只是用来**追溯**
+"这场活动、这篇策划案/复盘是哪个主播的",不是权限过滤的维度。1000 人 / 10 部门 /
+5 组 / 组 20 人的规模假设隐含了"主播组"这一级组织架构,讨论过要不要连带做"组长只看
+本组"这种更细粒度的权限,决定先不做——部门这一级的权限先跑通、验证完整,组这层
+以后再加,不在这轮范围内。
