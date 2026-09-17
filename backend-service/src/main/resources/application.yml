@@ -14,11 +14,10 @@ spring:
 
   jpa:
     hibernate:
-      # Day 4 临时用 update 让 Hibernate 自己按 Entity 建表,图快验证连接。
-      # Day 5 定稿真正的 schema(sql/ 下的 DDL,含 department 权限字段、pgvector 等
-      # Hibernate 不擅长表达的东西)之后,这里要改成 validate 或 none ——
-      # 到那时"表长什么样"应该完全由 SQL 文件说了算,不能让 Hibernate 偷偷改表结构。
-      ddl-auto: update
+      # Day 5:sql/02_schema.sql 定稿了真正的 schema,换成 validate——
+      # 启动时检查 Entity 跟数据库表是否一致,不一致直接报错,但绝不会自己改表结构。
+      # "表长什么样"从此完全由 SQL 文件说了算。
+      ddl-auto: validate
     properties:
       hibernate:
         format_sql: true
