@@ -91,6 +91,45 @@ CREATE TABLE campaign_metrics (
 CREATE INDEX idx_metrics_campaign ON campaign_metrics(campaign_id);
 
 -- ----------------------------------------------------------------------------
+--  campaign_products —— 商品维度的售卖数据,运营上传(比如导出的 Excel/CSV),
+--  不是我们计算的——这是"结构化表格上传"，跟下面的 documents(文档上传)
+--  是两条不同的摄入管道:documents 是非结构化文字，要切片+embedding 走 RAG；
+--  这张表和 campaign_customer_behavior 是结构化表格，解析后直接 INSERT 成行，
+--  不切片不 embedding，靠 Text-to-SQL 查询。见 docs/architecture.md 的说明。
+-- ----------------------------------------------------------------------------
+CREATE TABLE campaign_products (
+    id                  BIGSERIAL PRIMARY KEY,
+    campaign_id         BIGINT NOT NULL REFERENCES campaigns(campaign_id) ON DELETE CASCADE,
+    product_name        TEXT NOT NULL,
+    units_sold          INTEGER,
+    sell_through_rate   NUMERIC(5, 4), -- 售出率
+    return_rate         NUMERIC(5, 4), -- 退货率
+    sales_amount        NUMERIC(14, 2),
+    click_through_rate  NUMERIC(5, 4), -- 点击率
+    UNIQUE (campaign_id, product_name)
+);
+CREATE INDEX idx_products_campaign ON campaign_products(campaign_id);
+
+-- ----------------------------------------------------------------------------
+--  campaign_customer_behavior —— 顾客行为数据,运营上传,同样不是我们计算的。
+--  customer_ref 是匿名化标识(不存真实姓名/手机号)。以后要算"复购率"，
+--  不需要另建一套订单系统——直接按 customer_ref 分组、数一下这个顾客出现在
+--  几个不同 campaign 里，就是一句普通的 SQL,不是什么复杂的分析引擎。
+-- ----------------------------------------------------------------------------
+CREATE TABLE campaign_customer_behavior (
+    id                      BIGSERIAL PRIMARY KEY,
+    campaign_id             BIGINT NOT NULL REFERENCES campaigns(campaign_id) ON DELETE CASCADE,
+    customer_ref            TEXT NOT NULL,
+    region                  TEXT,
+    dwell_time_minutes      NUMERIC(6, 2),
+    products_purchased      JSONB DEFAULT '[]'::jsonb, -- 顾客可能买了不止一件商品
+    purchase_amount         NUMERIC(10, 2),
+    ip_address              TEXT
+);
+CREATE INDEX idx_behavior_campaign ON campaign_customer_behavior(campaign_id);
+CREATE INDEX idx_behavior_customer ON campaign_customer_behavior(customer_ref); -- 给以后跨 campaign 找同一顾客用
+
+-- ----------------------------------------------------------------------------
 --  documents —— 文档表(原名 sop_documents,泛化成三种文档类型共用一张表):
 --    sop             运营 SOP / 指南
 --    campaign_plan   直播策划案(campaign 开播前,用于事后被 AI 分析

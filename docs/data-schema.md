@@ -64,21 +64,42 @@
 
 > 部门过滤走 `campaign_metrics JOIN campaigns ON ... WHERE campaigns.department_id = :dept`
 
-### customer_insights(顾客人群分析)—— 提议中,还没建表
-
-复购率、近期在哪些直播间购买过、IP 地址、人均购买价值这些,**不是我们自己算的**——
-现实场景里这是另一个团队(用户增长/数据中台)算好、同步给我们的数据,我们只存不算。
-项目的核心价值是"AI 分析内容和结果",不是重新造一套用户行为分析引擎。
-
-提议的字段(待确认是否现在建):
+### campaign_products(商品维度售卖数据)—— 运营上传,不是我们计算的
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| customer_ref | text PK | 匿名化的顾客标识,不存真实姓名/手机号 |
+| id | bigserial PK | |
+| campaign_id | bigint FK → campaigns | |
+| product_name | text | 没建单独的商品目录表,先用文本存商品名(见下方"没选的做法") |
+| units_sold | int | 销量 |
+| sell_through_rate | numeric | 售出率 |
+| return_rate | numeric | 退货率 |
+| sales_amount | numeric | 销售额 |
+| click_through_rate | numeric | 点击率 |
+
+### campaign_customer_behavior(顾客行为数据)—— 运营上传,不是我们计算的
+
+复购率这类"人群分析"结论,**不是我们自己算的**——现实场景里这本该是另一个团队
+(用户增长/数据中台)算好同步给我们的东西。但这张表存的是**原始的顾客-campaign
+行为记录**,不是"已经算好的复购率指标",好处是复购率这种问题以后想问,
+是一句普通 SQL(按 `customer_ref` 分组、数一下出现在几个不同 campaign 里),
+不需要额外建一套订单/交易系统去支撑计算。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | bigserial PK | |
+| campaign_id | bigint FK → campaigns | |
+| customer_ref | text | 匿名化顾客标识,不存真实姓名/手机号;建了索引方便跨 campaign 找同一顾客 |
+| region | text | |
+| dwell_time_minutes | numeric | 这个顾客在这场直播的停留时长 |
+| products_purchased | jsonb | 买了哪些商品,数组 |
+| purchase_amount | numeric | |
 | ip_address | text | |
-| repurchase_rate | numeric | |
-| avg_order_value | numeric | |
-| recent_campaigns | jsonb | 最近购买过的 campaign/直播间列表,原样存外部系统给的结构,不强行拆表 |
+
+`campaign_products` / `campaign_customer_behavior` 是**结构化表格上传**(运营导出的
+Excel/CSV 之类),跟下面 `documents`(非结构化文字)是两条不同的摄入管道——前者解析后
+直接 `INSERT` 成行、走 Text-to-SQL 查询;后者要切片 + embedding、走 RAG 检索。
+见 [architecture.md](architecture.md) 的说明。
 
 ## 文档表(SOP / 策划案 / 复盘)
 
@@ -147,5 +168,6 @@
 - 24 个用户(1 admin,4 manager,19 staff)
 - 15 个主播(每部门 3-5 个)
 - 49 个 campaign(每部门 10-15 个,每个 15-60 天的 metrics,共 1700+ 条指标记录)
+- 251 条 campaign_products,1493 条 campaign_customer_behavior
 - 5 篇 SOP(2 篇 `ALL` 通用 + 3 篇分部门),放 [sop_docs/](../sop_docs/) 目录
-- `campaign_plan` / `campaign_review` 示例文档:待定(schema 已就绪,内容还没写)
+- 1 组策划案 + 复盘示例文档(以 `campaign_id=3` "美妆新品首发" 为原型,数字跟 mock 数据对得上),放 [campaign_docs/](../campaign_docs/) 目录

@@ -1,4 +1,9 @@
-"""Day 5:生成模拟数据,插入 departments / users / anchors / campaigns / campaign_metrics。
+"""Day 5:生成模拟数据,插入 departments / users / anchors / campaigns / campaign_metrics /
+campaign_products / campaign_customer_behavior。
+
+后两张表模拟的是"运营上传的结构化表格"(商品售卖数据、顾客行为数据)——现实中这些
+本来就该是别的系统算好/导出给我们的,不是我们自己造的分析引擎,这里只是伪造几行
+方便下游代码有数据可查。
 
 不接真实阿里数据,自己造。documents / doc_chunks 不在这里造——那两张表(SOP、
 策划案、复盘文档)要等 Day 6+ 真正的"上传 -> 解析 -> 切片 -> embedding"链路
@@ -17,6 +22,7 @@ from datetime import date, timedelta
 
 import psycopg
 from faker import Faker
+from psycopg.types.json import Jsonb
 
 from app.config import settings
 
@@ -29,6 +35,21 @@ random.seed(42)  # 固定随机种子:每次跑生成的数据都一样,方便�
 DEPARTMENTS = ["美妆运营", "3C数码运营", "食品生鲜运营", "日用百货运营"]
 
 CAMPAIGN_TEMPLATES = ["618大促", "双11大促", "新品首发", "日常直播专场", "粉丝节", "清仓特卖", "周年庆"]
+
+# 每个部门卖的商品,也是业务领域知识,手写
+PRODUCTS_BY_DEPT = {
+    "美妆运营": ["口红", "粉底液", "眼影盘", "面膜", "精华液", "防晒霜", "洗面奶"],
+    "3C数码运营": ["蓝牙耳机", "充电宝", "手机壳", "智能手表", "数据线", "音箱", "平板支架"],
+    "食品生鲜运营": ["车厘子", "牛肉卷", "坚果礼盒", "螺蛳粉", "大闸蟹", "有机蔬菜包", "速冻水饺"],
+    "日用百货运营": ["抽纸", "洗衣液", "垃圾袋", "收纳箱", "保温杯", "拖把", "衣架套装"],
+}
+
+REGIONS = ["华东", "华南", "华北", "华中", "西南", "东北"]
+
+# 每个部门一个固定的"顾客池",campaign 之间从池子里抽样——这样同一个顾客
+# (同一个 customer_ref)有机会出现在这个部门的多场 campaign 里,以后想算
+# "复购率"才有意义(不然每场活动的顾客都是全新的,永远查不出复购)。
+CUSTOMER_POOL_SIZE = 150
 
 
 def connect():
@@ -47,7 +68,8 @@ def main():
             # RESTART IDENTITY:自增 id 也归零,重跑几次 id 都从 1 开始,不会越跑越大
             # CASCADE:department 被 users/anchors/campaigns 外键引用,级联清空
             cur.execute("""
-                TRUNCATE departments, users, anchors, campaigns, campaign_metrics
+                TRUNCATE departments, users, anchors, campaigns, campaign_metrics,
+                         campaign_products, campaign_customer_behavior
                 RESTART IDENTITY CASCADE
             """)
 
@@ -98,6 +120,12 @@ def main():
                     ids.append(cur.fetchone()[0])
                 anchor_ids_by_dept[dept_name] = ids
 
+            # ---- 每个部门一个固定顾客池,供 campaign_customer_behavior 抽样 ----
+            customer_pool_by_dept = {
+                dept_name: [f"CUST-{dept_name[:2]}-{i:04d}" for i in range(CUSTOMER_POOL_SIZE)]
+                for dept_name in dept_ids
+            }
+
             # ---- campaigns + campaign_metrics:每个部门 10-15 个活动,
             #      每个活动 15-60 天的每日指标 ----
             for dept_name, dept_id in dept_ids.items():
@@ -142,6 +170,49 @@ def main():
                             peak_concurrent_viewers, avg_dwell_time_minutes)
                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                         metrics_rows,
+                    )
+
+                    # ---- campaign_products:这场活动卖了哪些商品(运营上传的表,假装是) ----
+                    dept_products = PRODUCTS_BY_DEPT[dept_name]
+                    campaign_products = random.sample(dept_products, k=min(len(dept_products), random.randint(3, 6)))
+                    cur.executemany(
+                        """INSERT INTO campaign_products
+                           (campaign_id, product_name, units_sold, sell_through_rate,
+                            return_rate, sales_amount, click_through_rate)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                        [
+                            (
+                                campaign_id, product,
+                                (units := random.randint(50, 5000)),
+                                round(random.uniform(0.1, 0.95), 4),
+                                round(random.uniform(0.01, 0.2), 4),
+                                round(units * random.uniform(30, 300), 2),
+                                round(random.uniform(0.02, 0.3), 4),
+                            )
+                            for product in campaign_products
+                        ],
+                    )
+
+                    # ---- campaign_customer_behavior:这场活动的顾客行为(同样是运营上传的表) ----
+                    sampled_customers = random.sample(
+                        customer_pool_by_dept[dept_name],
+                        k=min(len(customer_pool_by_dept[dept_name]), random.randint(15, 40)),
+                    )
+                    cur.executemany(
+                        """INSERT INTO campaign_customer_behavior
+                           (campaign_id, customer_ref, region, dwell_time_minutes,
+                            products_purchased, purchase_amount, ip_address)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                        [
+                            (
+                                campaign_id, customer_ref, random.choice(REGIONS),
+                                round(random.uniform(0.5, 45), 2),
+                                Jsonb(random.sample(campaign_products, k=min(len(campaign_products), random.randint(1, 3)))),
+                                round(random.uniform(20, 2000), 2),
+                                fake.ipv4(),
+                            )
+                            for customer_ref in sampled_customers
+                        ],
                     )
 
         conn.commit()  # 整个脚本一个事务:中途报错就整体回滚,不会留下"造了一半"的脏数据

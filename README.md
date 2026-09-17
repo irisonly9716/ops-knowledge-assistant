@@ -65,6 +65,7 @@ ops-knowledge-assistant/
 ├── backend-service/        # Spring Boot,Java —— Day 4 用 Spring Initializr 生成
 ├── llm-service/            # Python FastAPI —— embedding / RAG / SQL agent / 路由
 ├── sop_docs/               # 模拟 SOP 文档(markdown),Day 9 起被摄入 RAG 链路
+├── campaign_docs/          # 模拟策划案/复盘文档(markdown),同样走 RAG 链路
 └── docs/
     ├── architecture.md     # 架构与运行时链路
     ├── data-schema.md      # 数据表设计(含 users / 权限字段)
