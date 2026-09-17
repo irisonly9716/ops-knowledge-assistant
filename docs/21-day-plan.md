@@ -48,10 +48,11 @@
 - **Day 5 之后又追加了一轮设计讨论,schema 有二次修改**(见 [data-schema.md](data-schema.md) / [permission-model.md](permission-model.md)):
   - `campaigns` 加 `anchor_id`(追溯"这场活动是哪个主播的",不做主播组这层权限)
   - `sop_documents` 泛化成 `documents` + `doc_type`(`sop`/`campaign_plan`/`campaign_review`),三种文档共用同一条摄入管道;数据库 CHECK 约束强制"sop 不挂 campaign,plan/review 必须挂 campaign"
-  - `campaign_metrics` 加 `peak_concurrent_viewers` / `avg_dwell_time_minutes` 两个汇总字段;**ROI 和商品级拆解不做结构化字段**,归到 `campaign_review` 文档的内容里,靠 RAG 分析,不是我们计算的
+  - `campaign_metrics` 加 `peak_concurrent_viewers` / `avg_dwell_time_minutes` 两个汇总字段;**ROI 和商品级拆解不做结构化字段**,归到 `campaign_review` 文档的内容里,靠 RAG 分析,不是我们计算的(⚠️ 这条后来第四轮部分推翻了,见下面)
   - 顾客人群分析(复购率等)明确是外部团队算好同步给我们的数据,不是本项目计算范围;`customer_insights` 表还在提议阶段,没有建
   - `campaign_plan`/`campaign_review` 的示例文档内容还没写(SOP 那 5 篇已经写了)
 - **第三轮**:又加了 `campaign_products`(商品售卖数据)/ `campaign_customer_behavior`(顾客行为数据)两张表,都是"运营上传、不是我们计算"的结构化数据;确认了复购率不需要建订单系统,按 `customer_ref` 分组的普通 SQL 就够(已用真实 mock 数据验证过);写了一组策划案+复盘示例文档([campaign_docs/](../campaign_docs/)),数字跟 mock 数据(`campaign_id=3`)对得上;架构上定了"文档类"(RAG)和"结构化表格类"(直接落表)两条摄入管道共用一个 Kafka topic,靠消息体里的 `content_kind` 分流
+- **第四轮**:ROI 公式改了两次才对——第一次漏扣商品成本,第二次把商品成本也算进分母(错的,商品成本不是这场活动的营销投入)。定案:`ROI = SUM(campaign_products.profit) / campaigns.actual_operating_cost`(`profit` 已经净掉商品成本,分母只算运营成本)。`campaign_products` 补了 `cost_price`/`profit`/`profit_margin`;`campaigns` 补了 `planned_operating_cost`/`actual_operating_cost`。顺带修了 mock 数据生成逻辑:之前 `campaign_products` 的销售额跟 `campaign_metrics` 的 GMV 是各自独立随机生成,加起来会超过 GMV——现在改成先算出 campaign 的 total_gmv,商品销售额从 GMV 的 60%-90% 里分配,保证不会超过大盘
 
 ### Day 6 — 文件上传 API + Kafka 生产者打通
 - [ ] Spring Boot `POST /documents/upload`,接收文件存到本地/临时目录(或 S3)

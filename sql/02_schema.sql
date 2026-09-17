@@ -72,7 +72,12 @@ CREATE TABLE campaigns (
     -- 代价:摄入代码(Day 6+)插入/删除 documents 时,必须记得同步更新这两个字段,
     -- 忘了同步就会跟 documents 表的真实状态不一致——这是主动接受的冗余,不是疏忽。
     has_plan_doc    BOOLEAN NOT NULL DEFAULT FALSE,
-    has_review_doc  BOOLEAN NOT NULL DEFAULT FALSE
+    has_review_doc  BOOLEAN NOT NULL DEFAULT FALSE,
+    -- 运营成本(坑位费+推广+赠品,不含商品成本——商品成本走 campaign_products)。
+    -- 分"计划"和"实际"两个:策划阶段填 planned(预算),活动结束、账单/发票都
+    -- 到齐之后才能填 actual。actual 允许为空——campaign 刚开始跑的时候还不知道。
+    planned_operating_cost   NUMERIC(14, 2),
+    actual_operating_cost    NUMERIC(14, 2)
 );
 CREATE INDEX idx_campaigns_department ON campaigns(department_id);
 CREATE INDEX idx_campaigns_anchor ON campaigns(anchor_id);

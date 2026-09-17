@@ -140,51 +140,70 @@ def main():
                     # campaign 的部门和主播的部门一致(避免以后按部门过滤时数据自相矛盾)
                     anchor_id = random.choice(anchor_ids_by_dept[dept_name])
 
-                    cur.execute(
-                        """INSERT INTO campaigns (name, department_id, anchor_id, category, start_date, end_date, status)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING campaign_id""",
-                        (name, dept_id, anchor_id, dept_name.replace("运营", ""), start, end, status),
-                    )
-                    campaign_id = cur.fetchone()[0]
-
+                    # 先把每日 gmv 算出来(还不需要 campaign_id),这样才能拿到 total_gmv
+                    # 去校准运营成本和商品销售额——不然三张表的数字会各算各的、互相对不上
+                    # (之前 campaign_products 的销售额加起来会超过 campaign_metrics 的 GMV,
+                    # 就是因为两边完全独立生成,没有互相校准)。
                     base_gmv = random.uniform(5_000, 50_000)
-                    metrics_rows = []
+                    daily = []
                     for day_offset in range(duration):
                         d = start + timedelta(days=day_offset)
                         if d > date.today():
                             break
-                        # 随手加点每日波动,不追求真实,只求"看起来不是常数"
-                        wobble = random.uniform(0.6, 1.5)
+                        wobble = random.uniform(0.6, 1.5)  # 随手加点每日波动,不追求真实
                         gmv = round(base_gmv * wobble, 2)
                         dau = int(gmv / random.uniform(8, 15))
-                        metrics_rows.append((
-                            campaign_id, d, gmv, dau,
+                        daily.append((
+                            d, gmv, dau,
                             round(random.uniform(15, 90), 2),
                             round(random.uniform(0.01, 0.15), 4),
-                            int(dau * random.uniform(1.2, 2.5)),  # peak_concurrent_viewers,粗略比 DAU 高一截
+                            int(dau * random.uniform(1.2, 2.5)),  # peak_concurrent_viewers
                             round(random.uniform(3, 25), 2),      # avg_dwell_time_minutes
                         ))
+                    total_gmv = sum(row[1] for row in daily)
+
+                    # 运营成本(坑位费+推广+赠品,不含商品成本):按 GMV 的一个粗略比例定计划成本,
+                    # 实际成本在计划上下浮动——活动结束账单和预算本来就会有出入,这正是要分开
+                    # 记两个字段的原因。只有"finished"的活动才填得出实际成本,没跑完的还不知道。
+                    planned_cost = round(total_gmv * random.uniform(0.1, 0.2), 2)
+                    actual_cost = round(planned_cost * random.uniform(0.85, 1.25), 2) if status == "finished" else None
+
+                    cur.execute(
+                        """INSERT INTO campaigns
+                           (name, department_id, anchor_id, category, start_date, end_date, status,
+                            planned_operating_cost, actual_operating_cost)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING campaign_id""",
+                        (name, dept_id, anchor_id, dept_name.replace("运营", ""), start, end, status,
+                         planned_cost, actual_cost),
+                    )
+                    campaign_id = cur.fetchone()[0]
+
                     cur.executemany(
                         """INSERT INTO campaign_metrics
                            (campaign_id, date, gmv, dau, watch_time, conversion_rate,
                             peak_concurrent_viewers, avg_dwell_time_minutes)
                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                        metrics_rows,
+                        [(campaign_id, *row) for row in daily],
                     )
 
                     # ---- campaign_products:这场活动卖了哪些商品(运营上传的表,假装是)。
+                    # 销售额校准到 total_gmv 的一个比例以内(留一部分给长尾/未追踪的商品),
+                    # 保证"主推品销售额加起来"永远不会超过这场活动的总 GMV。
                     # cost_price/profit/profit_margin 现实中应该跟 units_sold 这些一样,
                     # 是这份上传表格自带的字段(财务系统算好的),不是我们衍生计算的——
-                    # 这里只是为了让假数据内部数字对得上(profit = 销售额 - 成本),才顺手推一下,
-                    # 真实摄入代码应该是"表里给什么就存什么",不需要重新计算。
+                    # 这里只是为了让假数据内部数字对得上(profit = 销售额 - 商品成本),才顺手推一下。
                     dept_products = PRODUCTS_BY_DEPT[dept_name]
                     campaign_products = random.sample(dept_products, k=min(len(dept_products), random.randint(3, 6)))
+                    product_pool = total_gmv * random.uniform(0.6, 0.9)
+                    weights = [random.random() for _ in campaign_products]
+                    weight_total = sum(weights)
+
                     product_rows = []
-                    for product in campaign_products:
-                        units = random.randint(50, 5000)
+                    for product, weight in zip(campaign_products, weights):
+                        sales_amount = round(product_pool * weight / weight_total, 2)
                         unit_price = random.uniform(30, 300)
+                        units = max(1, round(sales_amount / unit_price))
                         cost_price = round(unit_price * random.uniform(0.4, 0.7), 2)  # 成本价是售价的 40%-70%
-                        sales_amount = round(units * unit_price, 2)
                         profit = round(sales_amount - cost_price * units, 2)
                         profit_margin = round(profit / sales_amount, 4) if sales_amount else 0
                         product_rows.append((

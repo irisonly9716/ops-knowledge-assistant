@@ -46,7 +46,18 @@
 | status | text | planned / running / finished |
 | has_plan_doc | boolean | 有没有策划案文档,默认 false |
 | has_review_doc | boolean | 有没有复盘文档,默认 false |
+| planned_operating_cost | numeric | 计划运营成本(坑位费+推广+赠品,不含商品成本),策划阶段就能填 |
+| actual_operating_cost | numeric | 实际运营成本,只有活动结束、账单到齐才填得出,可以为空 |
 
+**ROI 怎么算**(踩过两次坑才定下来的公式,记录一下避免以后又算错):
+
+```
+ROI = SUM(campaign_products.profit) / campaigns.actual_operating_cost
+```
+
+- 分子是 `campaign_products.profit` 的汇总——这个字段**已经扣过商品成本**了(利润 = 销售额 - 成本价×销量),不能再在分母里重复扣一次商品成本
+- 分母只用**运营成本**(这场活动"额外花的营销投入"),不包含商品成本——商品成本是做生意本来就要花的钱,不是这场活动新增的投入,ROI 问的是"这笔营销投入划不划算",不是"整个生意划不划算"
+- 计划成本 vs 实际成本分开存,是因为活动结束后账单和预算总会有出入(mock 数据里两者故意不完全相等)
 `has_plan_doc`/`has_review_doc` 是**效率优化,不是权威数据源**——真相永远是"`documents`
 表里存不存在这个 `campaign_id` 对应 `doc_type` 的一行"。这两个字段只是让路由逻辑在
 决定要不要做一次向量检索之前,先用一次便宜的查询判断"根本没有文档,不用检索了"。
@@ -184,7 +195,7 @@ Excel/CSV 之类),跟下面 `documents`(非结构化文字)是两条不同的摄
 - 4 个部门(美妆运营 / 3C数码运营 / 食品生鲜运营 / 日用百货运营)
 - 24 个用户(1 admin,4 manager,19 staff)
 - 15 个主播(每部门 3-5 个)
-- 49 个 campaign(每部门 10-15 个,每个 15-60 天的 metrics,共 1700+ 条指标记录)
-- 222 条 campaign_products(含成本价/利润/利润率),1391 条 campaign_customer_behavior
+- 47 个 campaign(每部门 10-15 个,每个 15-60 天的 metrics,共 1700+ 条指标记录;运营成本已校准到 GMV 的 10%-20%)
+- 202 条 campaign_products(含成本价/利润/利润率,销售额已校准到不超过所属 campaign 的 GMV),1200 条 campaign_customer_behavior
 - 5 篇 SOP(2 篇 `ALL` 通用 + 3 篇分部门),放 [sop_docs/](../sop_docs/) 目录
-- 1 组策划案 + 复盘示例文档(以 `campaign_id=3` "美妆新品首发" 为原型,数字跟 mock 数据对得上),放 [campaign_docs/](../campaign_docs/) 目录
+- 1 组策划案 + 复盘示例文档(以 `campaign_id=3` "美妆618大促" 为原型,数字跟当前 mock 数据对得上——但这个耦合比较脆弱,见 [campaign_docs/README.md](../campaign_docs/README.md) 的说明),放 [campaign_docs/](../campaign_docs/) 目录
