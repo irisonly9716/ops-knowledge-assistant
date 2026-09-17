@@ -7,6 +7,10 @@ python-dotenv==1.0.1
 # ---- Day 3  Kafka 收发验证(Day 8 真正的消费者服务也用它)----
 confluent-kafka==2.6.1
 
+# ---- Day 5  造假数据 + 直连 Postgres ----
+faker==33.1.0
+psycopg[binary]==3.2.3
+
 # ---- 后面按天解开注释 ----
 # Day 9    文档解析 + chunking
 # langchain==0.3.14
@@ -20,8 +24,7 @@ confluent-kafka==2.6.1
 # langchain-openai==0.2.14
 # 或本地模型: sentence-transformers==3.3.1
 #
-# Day 11   向量库
-# psycopg[binary]==3.2.3
+# Day 11   向量库(psycopg 已经在上面装了,这里再装 pgvector 的 Python 适配层)
 # pgvector==0.3.6
 # sqlalchemy==2.0.36
 #
