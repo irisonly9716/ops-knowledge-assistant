@@ -3,12 +3,11 @@ spring:
     name: backend-service
 
   datasource:
-    # ${VAR:默认值} —— Spring 原生支持从"真实环境变量"读值,读不到就用冒号后面的默认值。
-    # 默认值刻意跟 .env.example 里 Postgres 那几项对齐,本地开发不用配就能连上。
-    # 注意:这跟 docker-compose 的 .env 机制不是一回事 —— Java 进程不会自动去读
-    # 项目根目录那个 .env 文件,只认操作系统真正 export 出来的环境变量。
-    # 所以这里的默认值其实是把 .env.example 的值"抄了一份"进代码,生产环境要覆盖它,
-    # 应该在部署环境里设真正的 POSTGRES_PASSWORD 环境变量,而不是继续用这个默认值。
+    # ${VAR:默认值} —— 读不到 VAR 就用冒号后面的默认值。
+    # VAR 现在真的能从仓库根目录的 .env 读到(见 config/DotenvEnvironmentPostProcessor.java——
+    # Java 本身不认识 .env,这是我们自己补的)。冒号后面的默认值只是最后一道保险,
+    # 正常情况下不会用到;生产环境要覆盖,应该设真正的操作系统环境变量
+    # (优先级比 .env 高,见 DotenvEnvironmentPostProcessor 里 addLast 的说明)。
     url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:ops_assistant}
     username: ${POSTGRES_USER:ops}
     password: ${POSTGRES_PASSWORD:ops_dev_pw}
@@ -37,4 +36,4 @@ management:
   endpoints:
     web:
       exposure:
-        include: health
+        include: health # /actuator/env 只在调试时临时打开,平时不暴露(会连敏感配置项名字一起透出去)
