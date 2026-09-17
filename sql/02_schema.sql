@@ -113,6 +113,9 @@ CREATE TABLE campaign_products (
     return_rate         NUMERIC(5, 4), -- 退货率
     sales_amount        NUMERIC(14, 2),
     click_through_rate  NUMERIC(5, 4), -- 点击率
+    cost_price          NUMERIC(10, 2), -- 单件成本价
+    profit              NUMERIC(14, 2), -- 这个商品在这场活动的利润总额
+    profit_margin       NUMERIC(5, 4),  -- 利润率
     UNIQUE (campaign_id, product_name)
 );
 CREATE INDEX idx_products_campaign ON campaign_products(campaign_id);

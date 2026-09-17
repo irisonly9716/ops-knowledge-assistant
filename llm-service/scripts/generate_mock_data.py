@@ -172,25 +172,36 @@ def main():
                         metrics_rows,
                     )
 
-                    # ---- campaign_products:这场活动卖了哪些商品(运营上传的表,假装是) ----
+                    # ---- campaign_products:这场活动卖了哪些商品(运营上传的表,假装是)。
+                    # cost_price/profit/profit_margin 现实中应该跟 units_sold 这些一样,
+                    # 是这份上传表格自带的字段(财务系统算好的),不是我们衍生计算的——
+                    # 这里只是为了让假数据内部数字对得上(profit = 销售额 - 成本),才顺手推一下,
+                    # 真实摄入代码应该是"表里给什么就存什么",不需要重新计算。
                     dept_products = PRODUCTS_BY_DEPT[dept_name]
                     campaign_products = random.sample(dept_products, k=min(len(dept_products), random.randint(3, 6)))
+                    product_rows = []
+                    for product in campaign_products:
+                        units = random.randint(50, 5000)
+                        unit_price = random.uniform(30, 300)
+                        cost_price = round(unit_price * random.uniform(0.4, 0.7), 2)  # 成本价是售价的 40%-70%
+                        sales_amount = round(units * unit_price, 2)
+                        profit = round(sales_amount - cost_price * units, 2)
+                        profit_margin = round(profit / sales_amount, 4) if sales_amount else 0
+                        product_rows.append((
+                            campaign_id, product, units,
+                            round(random.uniform(0.1, 0.95), 4),
+                            round(random.uniform(0.01, 0.2), 4),
+                            sales_amount,
+                            round(random.uniform(0.02, 0.3), 4),
+                            cost_price, profit, profit_margin,
+                        ))
                     cur.executemany(
                         """INSERT INTO campaign_products
                            (campaign_id, product_name, units_sold, sell_through_rate,
-                            return_rate, sales_amount, click_through_rate)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                        [
-                            (
-                                campaign_id, product,
-                                (units := random.randint(50, 5000)),
-                                round(random.uniform(0.1, 0.95), 4),
-                                round(random.uniform(0.01, 0.2), 4),
-                                round(units * random.uniform(30, 300), 2),
-                                round(random.uniform(0.02, 0.3), 4),
-                            )
-                            for product in campaign_products
-                        ],
+                            return_rate, sales_amount, click_through_rate,
+                            cost_price, profit, profit_margin)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        product_rows,
                     )
 
                     # ---- campaign_customer_behavior:这场活动的顾客行为(同样是运营上传的表) ----

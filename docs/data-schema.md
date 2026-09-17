@@ -84,6 +84,15 @@
 | return_rate | numeric | 退货率 |
 | sales_amount | numeric | 销售额 |
 | click_through_rate | numeric | 点击率 |
+| cost_price | numeric | 单件成本价 |
+| profit | numeric | 这个商品在这场活动的利润总额 |
+| profit_margin | numeric | 利润率 |
+
+`cost_price`/`profit`/`profit_margin` 是后来补的:ROI 不能只拿 GMV 减一个笼统的
+"成本"就算,必须扣掉商品成本(`cost_price × units_sold` 汇总),这几个字段就是让
+"商品成本"变成结构化查询就能拿到的数字,不用在复盘文档里手动估算。这三个字段
+现实中应该跟其它几列一样,是运营上传的表格自带的(财务系统算好给的),不是
+我们自己计算再存进去的。
 
 ### campaign_customer_behavior(顾客行为数据)—— 运营上传,不是我们计算的
 
@@ -176,6 +185,6 @@ Excel/CSV 之类),跟下面 `documents`(非结构化文字)是两条不同的摄
 - 24 个用户(1 admin,4 manager,19 staff)
 - 15 个主播(每部门 3-5 个)
 - 49 个 campaign(每部门 10-15 个,每个 15-60 天的 metrics,共 1700+ 条指标记录)
-- 251 条 campaign_products,1493 条 campaign_customer_behavior
+- 222 条 campaign_products(含成本价/利润/利润率),1391 条 campaign_customer_behavior
 - 5 篇 SOP(2 篇 `ALL` 通用 + 3 篇分部门),放 [sop_docs/](../sop_docs/) 目录
 - 1 组策划案 + 复盘示例文档(以 `campaign_id=3` "美妆新品首发" 为原型,数字跟 mock 数据对得上),放 [campaign_docs/](../campaign_docs/) 目录
