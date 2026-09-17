@@ -44,6 +44,14 @@
 | start_date | date | |
 | end_date | date | |
 | status | text | planned / running / finished |
+| has_plan_doc | boolean | 有没有策划案文档,默认 false |
+| has_review_doc | boolean | 有没有复盘文档,默认 false |
+
+`has_plan_doc`/`has_review_doc` 是**效率优化,不是权威数据源**——真相永远是"`documents`
+表里存不存在这个 `campaign_id` 对应 `doc_type` 的一行"。这两个字段只是让路由逻辑在
+决定要不要做一次向量检索之前,先用一次便宜的查询判断"根本没有文档,不用检索了"。
+代价:Day 6+ 的摄入代码插入 `documents` 行时,必须记得同步更新这两个字段,这是主动
+接受的冗余,不是疏忽。
 
 ### campaign_metrics(活动指标,按天)
 

@@ -65,7 +65,14 @@ CREATE TABLE campaigns (
     category        TEXT,
     start_date      DATE NOT NULL,
     end_date        DATE NOT NULL,
-    status          TEXT NOT NULL CHECK (status IN ('planned', 'running', 'finished'))
+    status          TEXT NOT NULL CHECK (status IN ('planned', 'running', 'finished')),
+    -- 效率优化,不是权威数据源:真相永远是"documents 表里存不存在这个 campaign_id
+    -- 对应 doc_type 的一行"。这两个字段只是让路由逻辑在决定"要不要做一次向量检索"
+    -- 之前,能先用一次便宜的查询判断"根本没有策划案/复盘,不用检索了"。
+    -- 代价:摄入代码(Day 6+)插入/删除 documents 时,必须记得同步更新这两个字段,
+    -- 忘了同步就会跟 documents 表的真实状态不一致——这是主动接受的冗余,不是疏忽。
+    has_plan_doc    BOOLEAN NOT NULL DEFAULT FALSE,
+    has_review_doc  BOOLEAN NOT NULL DEFAULT FALSE
 );
 CREATE INDEX idx_campaigns_department ON campaigns(department_id);
 CREATE INDEX idx_campaigns_anchor ON campaigns(anchor_id);
