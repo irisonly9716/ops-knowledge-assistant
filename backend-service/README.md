@@ -97,6 +97,11 @@ Jackson 2 的受检异常(`extends IOException`)变成了非受检异常。
 `"SOP"`),枚举只让 Java 这一侧更安全,不改变线上的消息格式,也不会自动跟数据库
 的 CHECK 约束或 Python 那边保持同步——这三处仍然要靠人记得同时改。
 
+`department`/`campaignId` **不是**枚举——它们是业务数据(哪天可能多一个新部门/新
+campaign),不是写死在 schema 里的固定几个值。这两个改成查真实的表验证存在性
+(`DepartmentRepository.existsByName` / `CampaignRepository.existsById`),不存在就
+400。`ALL` 是 sop 专用的哨兵值,不在 `departments` 表里,单独放行。
+
 验证:
 ```bash
 curl -X POST http://localhost:8081/documents/upload \

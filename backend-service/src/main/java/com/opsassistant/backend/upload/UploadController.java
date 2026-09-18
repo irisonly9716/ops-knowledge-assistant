@@ -9,6 +9,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
+import com.opsassistant.backend.campaign.CampaignRepository;
+import com.opsassistant.backend.department.DepartmentRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -42,9 +44,12 @@ import tools.jackson.databind.ObjectMapper;
 public class UploadController {
 
     private static final Path UPLOAD_DIR = Path.of("uploads");
+    private static final String ALL_DEPARTMENTS = "ALL"; // sop 文档专用的哨兵值,不在 departments 表里
 
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper; // Spring Boot 自动配置好的 Jackson 实例,直接注入用
+    private final DepartmentRepository departmentRepository;
+    private final CampaignRepository campaignRepository;
 
     @Value("${document.upload-topic}")
     private String uploadTopic;
@@ -79,6 +84,17 @@ public class UploadController {
                     throw badRequest("contentKind=data_table 必须带 campaignId");
                 }
             }
+        }
+
+        // department/campaignId 不是像 doc_type 那样"写死在 schema 里的固定几个值",
+        // 是业务数据(哪天可能多一个新部门、多一场新 campaign),所以不用枚举——
+        // 但也不能完全不管,得去查真实的表,确认传进来的值确实存在。
+        // "ALL" 是 sop 专用的哨兵值,不在 departments 表里,单独放行。
+        if (!ALL_DEPARTMENTS.equals(department) && !departmentRepository.existsByName(department)) {
+            throw badRequest("department 不存在:" + department);
+        }
+        if (campaignId != null && !campaignRepository.existsById(campaignId)) {
+            throw badRequest("campaignId 不存在:" + campaignId);
         }
 
         String uploadId = UUID.randomUUID().toString();
