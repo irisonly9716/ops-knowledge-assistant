@@ -8,6 +8,7 @@ import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Supplier;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -29,6 +30,10 @@ import tools.jackson.databind.ObjectMapper;
  * Day 6:上传接口 + Kafka 生产者。对应 docs/architecture.md 里"两条摄入管道共用一个
  * topic"的设计——文档类(SOP/策划案/复盘)和结构化表格类(商品表/顾客行为表)
  * 都走这一个接口,靠 contentKind 字段告诉 llm-service 消费者该怎么处理。
+ *
+ * 请求参数(contentKind/docType/tableType)进来时还是裸字符串——HTTP 表单字段
+ * 本来就只能是字符串,类型系统帮不上忙——但一进方法体就立刻转换成枚举
+ * (parseOrBadRequest),后面的业务逻辑全程用枚举,不再碰裸字符串。
  */
 @Slf4j
 @RestController
@@ -47,56 +52,62 @@ public class UploadController {
     @PostMapping("/upload")
     public ResponseEntity<Map<String, String>> upload(
             @RequestParam("file") MultipartFile file,
-            @RequestParam("contentKind") String contentKind,
-            @RequestParam(value = "docType", required = false) String docType,
-            @RequestParam(value = "tableType", required = false) String tableType,
+            @RequestParam("contentKind") String contentKindRaw,
+            @RequestParam(value = "docType", required = false) String docTypeRaw,
+            @RequestParam(value = "tableType", required = false) String tableTypeRaw,
             @RequestParam("department") String department,
             @RequestParam(value = "campaignId", required = false) Long campaignId,
             @RequestParam(value = "category", required = false) String category
     ) throws IOException {
-        validate(contentKind, docType, tableType, campaignId);
+        ContentKind contentKind = parseOrBadRequest(() -> ContentKind.fromValue(contentKindRaw));
+        DocType docType = null;
+        TableType tableType = null;
+
+        switch (contentKind) {
+            case DOCUMENT -> {
+                docType = parseOrBadRequest(() -> DocType.fromValue(docTypeRaw));
+                if (docType.needsCampaign() && campaignId == null) {
+                    throw badRequest("docType=" + docType.value() + " 必须带 campaignId");
+                }
+                if (!docType.needsCampaign() && campaignId != null) {
+                    throw badRequest("docType=sop 不能带 campaignId");
+                }
+            }
+            case DATA_TABLE -> {
+                tableType = parseOrBadRequest(() -> TableType.fromValue(tableTypeRaw));
+                if (campaignId == null) {
+                    throw badRequest("contentKind=data_table 必须带 campaignId");
+                }
+            }
+        }
 
         String uploadId = UUID.randomUUID().toString();
         Path dest = saveFile(file, uploadId);
 
         UploadEvent event = new UploadEvent(
                 uploadId, dest.toString(), contentKind, docType, tableType,
-                department, campaignId, category, "manual"
+                department, campaignId, category, Source.MANUAL
         );
         sendToKafka(uploadId, event);
 
-        log.info("上传成功 uploadId={} contentKind={} 已发到 topic {}", uploadId, contentKind, uploadTopic);
+        log.info("上传成功 uploadId={} contentKind={} 已发到 topic {}", uploadId, contentKind.value(), uploadTopic);
         return ResponseEntity.accepted().body(Map.of("uploadId", uploadId, "status", "accepted"));
     }
 
     /**
-     * 两种 contentKind 各自要求哪些字段必填,这条业务规则在这里用代码校验——
-     * 呼应 sql/02_schema.sql 里 documents 表那条 CHECK 约束的思路,只是这里发生在
-     * 消息产生之前,提前把明显错误的请求挡在门外,不让脏消息进 Kafka。
+     * 各枚举的 fromValue() 匹配不上会抛 IllegalArgumentException(见 ContentKind 等类)。
+     * 这里统一接住,转成带 400 状态码的 ResponseStatusException——三处调用
+     * (contentKind/docType/tableType)共用这一段,不用把 try/catch 写三遍。
+     *
+     * Supplier<T> 是 Java 的一个函数式接口,代表"一个不接收参数、返回 T 类型值的动作"。
+     * 传进来的 () -> ContentKind.fromValue(contentKindRaw) 就是这样一个"动作",
+     * 调用 parser.get() 才会真正执行它——这样能把"可能抛异常的调用"整个包起来传进来。
      */
-    private void validate(String contentKind, String docType, String tableType, Long campaignId) {
-        switch (contentKind) {
-            case "document" -> {
-                if (docType == null || docType.isBlank()) {
-                    throw badRequest("contentKind=document 时 docType 必填");
-                }
-                boolean needsCampaign = !"sop".equals(docType);
-                if (needsCampaign && campaignId == null) {
-                    throw badRequest("docType=" + docType + " 必须带 campaignId");
-                }
-                if (!needsCampaign && campaignId != null) {
-                    throw badRequest("docType=sop 不能带 campaignId");
-                }
-            }
-            case "data_table" -> {
-                if (tableType == null || tableType.isBlank()) {
-                    throw badRequest("contentKind=data_table 时 tableType 必填");
-                }
-                if (campaignId == null) {
-                    throw badRequest("contentKind=data_table 必须带 campaignId");
-                }
-            }
-            default -> throw badRequest("contentKind 只能是 document 或 data_table,收到:" + contentKind);
+    private static <T> T parseOrBadRequest(Supplier<T> parser) {
+        try {
+            return parser.get();
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
         }
     }
 
@@ -116,9 +127,11 @@ public class UploadController {
     private void sendToKafka(String uploadId, UploadEvent event) {
         // 注意包名是 tools.jackson.*,不是网上大部分教程里的 com.fasterxml.jackson.*——
         // Spring Boot 4 默认换成了 Jackson 3(连 Maven 坐标的 groupId 都变了)。
-        // Jackson 3 的 JacksonException 是运行时异常(不强制 try/catch),这里还是
-        // 手动 catch 一下,是为了把错误包成一个带明确 HTTP 状态码的响应,而不是让它
-        // 冒泡成一个 500 页面看不出原因。
+        // 但 @JsonValue/@JsonCreator 这些注解还留在老包名 com.fasterxml.jackson.annotation.*,
+        // 两套包名混着用是 Jackson 3 真实的样子,不是我们写错了。
+        // JacksonException 是运行时异常(不强制 try/catch),这里还是手动 catch 一下,
+        // 是为了把错误包成一个带明确 HTTP 状态码的响应,而不是让它冒泡成一个
+        // 500 页面看不出原因。
         String json;
         try {
             json = objectMapper.writeValueAsString(event);

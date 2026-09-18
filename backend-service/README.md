@@ -91,6 +91,12 @@ Jackson 2 的受检异常(`extends IOException`)变成了非受检异常。
 **注意是 `upload_id` 不是 `doc_id`**——`documents.doc_id` 是 Postgres 自增列,要等 Day 8+
 消费者真正执行 `INSERT` 才会产生,上传这一刻还不存在,不可能提前塞进消息里。
 
+`contentKind`/`docType`/`tableType`/`source` 在 Java 代码里是枚举(`upload/` 包下的
+`ContentKind`/`DocType`/`TableType`/`Source`),不是裸字符串——防止手滑拼错值。
+`@JsonValue` 保证序列化成 JSON 时还是这四张表约定好的小写字符串(`"sop"` 不是
+`"SOP"`),枚举只让 Java 这一侧更安全,不改变线上的消息格式,也不会自动跟数据库
+的 CHECK 约束或 Python 那边保持同步——这三处仍然要靠人记得同时改。
+
 验证:
 ```bash
 curl -X POST http://localhost:8081/documents/upload \
