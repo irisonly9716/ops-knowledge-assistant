@@ -84,13 +84,34 @@ ops-knowledge-assistant/
 3. JDK 已有(Java 25);Maven 用项目自带的 wrapper,不用装
 4. Python 用 `uv`(已装),版本锁 3.12,见 [llm-service/README.md](llm-service/README.md)
 
-### 起中间件
+### 从零跑通(顺序不能乱,Day 7 实测过一遍)
 
 ```bash
+# 1. 起中间件(Docker Desktop 引擎要先在运行,否则 docker 命令连不上)
 cp .env.example .env
 docker compose up -d
-docker compose ps        # 三个服务都是 healthy 才算成功
+docker compose ps                     # postgres / redis / kafka 都是 healthy 再往下
+
+# 2. 建 Kafka topic ——必须在上传之前。compose 里关了自动建 topic,
+#    topic 不存在时上传接口会在 ~5 秒后返回 503
+cd llm-service
+uv run python -m scripts.init_topics
+
+# 3. 灌模拟数据 ——必须在上传之前。上传接口会校验 department / campaignId
+#    在库里真实存在,库是空的话任何上传都会 400
+uv run python -m scripts.generate_mock_data
+
+# 4. 起后端(另开一个终端)
+cd ../backend-service
+.\mvnw.cmd spring-boot:run            # WSL/macOS/Linux: ./mvnw spring-boot:run
+
+# 5. 验证上传 → Kafka
+curl -X POST http://localhost:8081/documents/upload \
+  -F "file=@some.md" -F "contentKind=document" -F "docType=sop" -F "department=ALL"
 ```
+
+`docker compose down -v` 会清空所有数据卷(Postgres 数据、Kafka topic 全没),
+之后必须重新走 2、3 两步。
 
 ### 验证
 

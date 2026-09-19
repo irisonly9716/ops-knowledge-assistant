@@ -61,10 +61,15 @@
 - 【学】`KafkaTemplate.send(topic, key, value)`:对着实际代码讲的,发消息用 uploadId 当 key、用 `.get(5,TimeUnit.SECONDS)` 同步等结果好让发送失败能反映到这次 HTTP 响应里
 - 备注(真踩的坑):**Spring Boot 4 默认用 Jackson 3**,Maven 坐标和包名从 `com.fasterxml.jackson.*` 换成了 `tools.jackson.*`,网上教程按 Jackson 2 写会编译不过;`server.error.include-message: always` 在这个版本没有让 `ResponseStatusException` 的详细原因透出来,改成自己写 `@ExceptionHandler` 解决
 
-### Day 7 — 缓冲 + 第 1 周回顾
-- [ ] 补齐没跑通的部分
-- [ ] 自查:compose 一键起 PG+Redis+Kafka?上传能触发 Kafka 消息?模拟数据入库了?
-- [ ] 【学】pgvector 基本用法(怎么存 embedding、怎么做相似度查询)
+### Day 7 — 缓冲 + 第 1 周回顾  ✅ 完成
+- [x] 补齐没跑通的部分:**Day 6 的 Kafka 失败路径当时根本没测过**,今天补测,发现并修了三个真问题:
+  ① topic 不存在时 `send()` 自己阻塞 60 秒(Kafka 默认 `max.block.ms`),我 Day 6 声称的"5 秒内失败"是错的,实测 60.2 秒;
+  ② 抛出的是 `org.apache.kafka.common.errors.TimeoutException`,我 catch 的是 `java.util.concurrent.TimeoutException`(同名不同包),异常漏过去变成笼统 500;
+  ③ 发送失败后文件已存盘,留下没有对应消息的孤儿文件。
+  修复:producer 配 `max.block.ms`/`request.timeout.ms`/`delivery.timeout.ms`;区分"确定失败"(清理文件,返回 503)和"结果不确定"(超时/被中断,**不删文件**,因为消息可能已发出)。实测 60.2s → 5.2s,孤儿文件 11→11。
+- [x] 自查(从零 `down -v` 全流程实测):compose 一键起 → 灌 mock 数据 → 起后端 → 上传 → Kafka 收到消息,全部通过。副产物:摸清了**启动顺序依赖**(先建 topic、先灌 mock 数据才能上传),写进了根 README 的"从零跑通"。
+- [x] 【学】pgvector:三种距离算子(`<->` L2 / `<=>` 余弦 / `<#>` 负内积)对同一批点排序结果各不相同;索引算子类必须跟查询算子对上(`EXPLAIN` 验证);**向量检索 + WHERE 过滤会安静地少给结果**(实测要 10 条返回 0 条,`hnsw.iterative_scan` 后返回 10 条),已写进 [permission-model.md](permission-model.md) 第 3 节,Day 11 写检索时要选方案
+- 备注:Docker Desktop 每天隔夜都会停(这是第三次),建议在 Settings 里开"开机自启动"
 
 ---
 

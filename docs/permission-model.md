@@ -37,6 +37,17 @@
   - `role = staff` → `department IN (:current_dept, 'ALL')`
   - `role in (manager, admin)` → 不加(或 `department IN (所有部门, 'ALL')`)
 - SOP 文档在录入时(上传事件的消息体)就要带 `department`;通用流程填 `ALL`
+- **⚠️ 向量检索 + WHERE 过滤有个会"安静地少给结果"的坑(Day 7 实测)**:HNSW 是近似索引,
+  它先按向量相似度取出一批候选(`hnsw.ef_search`,默认 40),**再**套 `WHERE department = ...`
+  过滤。如果目标部门只占全部数据的 1%,这 40 个候选里大概率一条都不属于它——实测
+  20000 行/100 个部门,要"部门 7 的 top 10",默认设置返回 **0 条**(不报错),打开
+  `SET hnsw.iterative_scan = relaxed_order`(pgvector ≥ 0.8,本项目装的是 0.8.6)后返回 10 条,
+  精确扫描(不走索引)也是 10 条。对权限过滤来说这不只是"召回率低",是**用户明明有权看的
+  文档查不出来**。应对办法(Day 11 写检索函数时选一个):
+  1. 本项目 `doc_chunks` 只有几百~几千行,**直接不用 HNSW 索引、走精确扫描**,永远正确,
+     且这个量级下速度完全够——索引是数据量大了才需要的优化,不是必需品
+  2. 保留索引,检索前 `SET hnsw.iterative_scan = relaxed_order`
+  3. 数据量大到必须用索引时,按部门做分区表/部分索引
 - `campaign_plan`/`campaign_review` 类型的文档同样走这条过滤规则(它们的 `department` 取值
   跟对应 campaign 一致,不会是 `ALL`);另外还能按 `campaign_id`/`doc_type` 精确过滤到
   "只查这一场活动的复盘",这两个字段也存在 `doc_chunks.metadata` 里,不用 join

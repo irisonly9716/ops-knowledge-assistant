@@ -32,6 +32,14 @@ spring:
       # 两边不用为了"Java 特有的对象格式"额外多写一层转换代码。
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        # Day 7 实测发现:topic 不存在/Kafka 连不上时,send() 自己会阻塞 60 秒(Kafka 默认的
+        # max.block.ms)才报错,HTTP 请求整整卡一分钟,占着一个 Tomcat 线程。
+        # 三个超时要配套:delivery.timeout.ms 必须 >= request.timeout.ms + linger.ms,
+        # 否则 Kafka 启动就拒绝这套配置。
+        max.block.ms: 5000        # send() 等元数据(topic 是否存在、broker 地址)最多等 5 秒
+        request.timeout.ms: 5000  # 单次请求 broker 的超时
+        delivery.timeout.ms: 10000  # 从 send() 返回起,10 秒内一定给出"成功"或"失败"的确定结果
 
 document:
   # 跟 llm-service 的 app/config.py 读的是同一个 .env 变量,单一数据源,

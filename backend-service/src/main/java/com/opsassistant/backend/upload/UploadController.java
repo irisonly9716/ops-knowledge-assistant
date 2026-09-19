@@ -5,6 +5,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -104,7 +105,7 @@ public class UploadController {
                 uploadId, dest.toString(), contentKind, docType, tableType,
                 department, campaignId, category, Source.MANUAL
         );
-        sendToKafka(uploadId, event);
+        sendToKafka(uploadId, event, dest);
 
         log.info("上传成功 uploadId={} contentKind={} 已发到 topic {}", uploadId, contentKind.value(), uploadTopic);
         return ResponseEntity.accepted().body(Map.of("uploadId", uploadId, "status", "accepted"));
@@ -140,7 +141,19 @@ public class UploadController {
         return dest;
     }
 
-    private void sendToKafka(String uploadId, UploadEvent event) {
+    /**
+     * 文件已经存盘(savedFile)之后才发消息,所以"发消息失败"时要不要把文件删掉,
+     * 取决于这次失败是不是【确定】的——
+     *   确定失败(send() 自己抛异常 = 记录根本没进发送队列;或 Future 以异常结束):
+     *     消息一定没发出去,文件成了没人认领的孤儿,安全删除。
+     *   结果不确定(等 Future 超时、线程被中断):
+     *     消息可能其实已经/即将发出去了,消费者随后会来读这个文件。此时删文件反而制造
+     *     "有消息、没文件"的更坏局面,所以不删,只告诉调用方"不确定"。
+     * "超时 ≠ 失败":这是分布式系统里最经典的坑之一。上面 application.yml 里把
+     * delivery.timeout.ms 设成 10 秒、这里的 get() 等 15 秒,就是为了让 Kafka 自己
+     * 先给出确定结果,几乎不会走到"不确定"分支。
+     */
+    private void sendToKafka(String uploadId, UploadEvent event, Path savedFile) {
         // 注意包名是 tools.jackson.*,不是网上大部分教程里的 com.fasterxml.jackson.*——
         // Spring Boot 4 默认换成了 Jackson 3(连 Maven 坐标的 groupId 都变了)。
         // 但 @JsonValue/@JsonCreator 这些注解还留在老包名 com.fasterxml.jackson.annotation.*,
@@ -152,23 +165,48 @@ public class UploadController {
         try {
             json = objectMapper.writeValueAsString(event);
         } catch (JacksonException e) {
+            deleteQuietly(savedFile); // 还没发出去,序列化就失败了 = 确定失败
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "消息序列化失败", e);
         }
 
-        // send() 是异步的,返回一个 Future——这里同步等最多 5 秒拿结果,
-        // 是为了让"发送失败"这件事能立刻反映到这次 HTTP 响应里,而不是悄悄丢在后台。
         // uploadId 当 key:同一个 upload 的消息固定分到同一个 partition,以后即使
         // 一个 upload 产生多条消息(比如切片进度事件),顺序也有保证。
+        CompletableFuture<SendResult<String, String>> future;
         try {
-            SendResult<String, String> result = kafkaTemplate.send(uploadTopic, uploadId, json)
-                    .get(5, TimeUnit.SECONDS);
+            future = kafkaTemplate.send(uploadTopic, uploadId, json);
+        } catch (RuntimeException e) {
+            // send() 自己就抛异常(典型:topic 不存在/连不上 broker,等元数据超时),
+            // 说明这条记录根本没进发送队列 —— 确定失败。
+            // 之前这里漏了:实际抛出的是 org.apache.kafka.common.errors.TimeoutException,
+            // 而我 catch 的是 java.util.concurrent.TimeoutException——两个同名不同包的类,
+            // 结果异常直接漏过去,变成 Spring 默认的笼统 500。
+            deleteQuietly(savedFile);
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "消息队列暂不可用,上传未生效,请稍后重试", e);
+        }
+
+        try {
+            SendResult<String, String> result = future.get(15, TimeUnit.SECONDS);
             log.debug("发送到 partition={} offset={}",
                     result.getRecordMetadata().partition(), result.getRecordMetadata().offset());
+        } catch (ExecutionException e) {
+            deleteQuietly(savedFile); // Future 以异常结束 = 确定失败
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "消息发送失败,上传未生效,请稍后重试", e);
+        } catch (TimeoutException e) {
+            log.warn("uploadId={} 等待发送结果超时,结果不确定,文件保留: {}", uploadId, savedFile);
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "发送结果不确定,请稍后确认后再决定是否重传", e);
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "发送被中断", e);
-        } catch (ExecutionException | TimeoutException e) {
-            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "发送到 Kafka 失败", e);
+            Thread.currentThread().interrupt(); // 恢复中断标志,别把"我被要求停止"这个信号吞掉
+            log.warn("uploadId={} 等待发送结果时被中断,结果不确定,文件保留: {}", uploadId, savedFile);
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "发送被中断,结果不确定", e);
+        }
+    }
+
+    /** 清理孤儿文件。删除本身失败了只记日志,不能盖掉真正要报告的那个原始错误。 */
+    private void deleteQuietly(Path file) {
+        try {
+            Files.deleteIfExists(file);
+        } catch (IOException e) {
+            log.warn("清理孤儿文件失败,需要手动删除: {}", file, e);
         }
     }
 
