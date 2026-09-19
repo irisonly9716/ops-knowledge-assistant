@@ -28,6 +28,9 @@
 	</scm>
 	<properties>
 		<java.version>21</java.version>
+		<!-- 默认不跑打了 @Tag("integration") 的测试(它们要连真实 Postgres),
+		     这样 Docker 没开时 mvnw test 也是绿的。跑法见 BackendServiceApplicationTests。 -->
+		<excludedGroups>integration</excludedGroups>
 	</properties>
 	<dependencies>
 		<dependency>

@@ -116,6 +116,26 @@ curl -X POST http://localhost:8081/documents/upload \
 ```
 然后用 `llm-service/scripts/kafka_consumer_test.py` 或 `kafka-console-consumer` 确认收到。
 
+## 测试
+
+```bash
+.\mvnw.cmd test                                                # 默认:30 个单元/切片测试,不需要 Docker,几秒钟
+.\mvnw.cmd test -DexcludedGroups=none -Dgroups=integration     # 集成测试:需要 Postgres 在跑
+.\mvnw.cmd test -Dtest=UploadControllerTest                    # 只跑某个类
+```
+
+| 测试类 | 类型 | 内容 |
+|---|---|---|
+| `UploadEnumsTest`(13) | 纯单元 | 枚举的 `fromValue`(拼错/大小写/null)、`needsCampaign`、**JSON 线上格式必须小写**(`@JsonValue`) |
+| `UploadControllerTest`(17) | `@WebMvcTest` 切片 | 成功路径(含实际发出去的 JSON)、10 种参数错误各自返回 400 + 具体原因 + **零副作用**、4 个 Kafka 故障回归测试 |
+| `BackendServiceApplicationTests`(1) | 集成,`@Tag("integration")` | 完整容器 + 真实 Postgres;因为 `ddl-auto: validate`,它同时检测 **Entity 是否跟 `02_schema.sql` 漂移** |
+
+要点:
+- `@WebMvcTest` 只加载 Web 层,Kafka / 两个 Repository 用 `@MockitoBean` 换成假的——这样才能**按需让 Kafka 出故障**(真 Kafka 做不到"恰好在这一刻抛某个异常")
+- 上传目录和发送超时是配置项(`document.upload-dir` / `document.send-timeout-ms`),测试指向临时目录、把 15 秒改成 300 毫秒。**这是写测试"逼"出来的设计改进**:硬编码的路径和超时让代码没法测
+- Spring Boot 4 的测试类换了包:`@WebMvcTest` 在 `org.springframework.boot.webmvc.test.autoconfigure`,`@MockBean` 已被 `@MockitoBean` 取代,JUnit 是 6.x——别照抄 Boot 3 时代的教程
+- **变异验证过**:故意把 5 个 bug 改回去(catch 错异常类型 / 不清理孤儿文件 / 不恢复中断标志 / 超时也删文件 / 误删 `@JsonValue`),每个都被对应的测试抓到变红。没见过它失败的测试,不能证明它有用
+
 ## 计划中的接口
 
 | 接口 | 天 | 说明 |

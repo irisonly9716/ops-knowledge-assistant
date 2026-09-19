@@ -69,6 +69,7 @@
   修复:producer 配 `max.block.ms`/`request.timeout.ms`/`delivery.timeout.ms`;区分"确定失败"(清理文件,返回 503)和"结果不确定"(超时/被中断,**不删文件**,因为消息可能已发出)。实测 60.2s → 5.2s,孤儿文件 11→11。
 - [x] 自查(从零 `down -v` 全流程实测):compose 一键起 → 灌 mock 数据 → 起后端 → 上传 → Kafka 收到消息,全部通过。副产物:摸清了**启动顺序依赖**(先建 topic、先灌 mock 数据才能上传),写进了根 README 的"从零跑通"。
 - [x] 【学】pgvector:三种距离算子(`<->` L2 / `<=>` 余弦 / `<#>` 负内积)对同一批点排序结果各不相同;索引算子类必须跟查询算子对上(`EXPLAIN` 验证);**向量检索 + WHERE 过滤会安静地少给结果**(实测要 10 条返回 0 条,`hnsw.iterative_scan` 后返回 10 条),已写进 [permission-model.md](permission-model.md) 第 3 节,Day 11 写检索时要选方案
+- [x] **补测试**(自查发现"backend 真测试数为 0"之后):30 个测试(13 纯单元 + 17 `@WebMvcTest` 切片)+ 1 个集成测试。覆盖成功路径、10 种参数错误、4 个 Kafka 故障回归;做了**变异验证**(5 个 bug 故意改回去,全部被对应测试抓到)。写测试逼出两处设计改进(上传目录、发送超时改成配置项)。默认 `mvnw test` 不需要 Docker;依赖 Postgres 的 `contextLoads` 打了 `@Tag("integration")` 默认排除。详见 [backend-service/README.md](../backend-service/README.md) 的"测试"一节。Python 侧(mock 数据的跨表一致性校验)还没补
 - 备注:Docker Desktop 每天隔夜都会停(这是第三次),建议在 Settings 里开"开机自启动"
 
 ---
