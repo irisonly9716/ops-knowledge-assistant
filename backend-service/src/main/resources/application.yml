@@ -45,6 +45,11 @@ document:
   # 跟 llm-service 的 app/config.py 读的是同一个 .env 变量,单一数据源,
   # 不在这里重新拼一遍字符串(Day 3 就踩过这个坑)。
   upload-topic: ${DOC_UPLOAD_TOPIC:document-upload-events}
+  # 下面两项是 Day 7 写测试时"逼"出来的:原先一个硬编码成 uploads,一个硬编码成 15 秒,
+  # 结果测试要么往真实目录写文件,要么测"结果不确定"分支得真等 15 秒。
+  # 变成配置项后,测试可以指到临时目录、把超时改成 300 毫秒。
+  upload-dir: uploads
+  send-timeout-ms: 15000  # 等 Kafka 发送结果的上限;必须大于 delivery.timeout.ms(10 秒),见上面 producer 配置
 
 server:
   # 8080 是 Spring Boot 默认端口,但我们的 kafka-ui 已经占了 8080,

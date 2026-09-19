@@ -44,7 +44,6 @@ import tools.jackson.databind.ObjectMapper;
 @RequiredArgsConstructor
 public class UploadController {
 
-    private static final Path UPLOAD_DIR = Path.of("uploads");
     private static final String ALL_DEPARTMENTS = "ALL"; // sop 文档专用的哨兵值,不在 departments 表里
 
     private final KafkaTemplate<String, String> kafkaTemplate;
@@ -54,6 +53,12 @@ public class UploadController {
 
     @Value("${document.upload-topic}")
     private String uploadTopic;
+
+    @Value("${document.upload-dir}")
+    private String uploadDir;
+
+    @Value("${document.send-timeout-ms}")
+    private long sendTimeoutMs;
 
     @PostMapping("/upload")
     public ResponseEntity<Map<String, String>> upload(
@@ -133,10 +138,11 @@ public class UploadController {
     }
 
     private Path saveFile(MultipartFile file, String uploadId) throws IOException {
-        Files.createDirectories(UPLOAD_DIR);
+        Path dir = Path.of(uploadDir);
+        Files.createDirectories(dir);
         // 文件名前面加 uploadId,防止两个人传同名文件互相覆盖
         String filename = uploadId + "-" + file.getOriginalFilename();
-        Path dest = UPLOAD_DIR.resolve(filename);
+        Path dest = dir.resolve(filename);
         file.transferTo(dest);
         return dest;
     }
@@ -185,7 +191,7 @@ public class UploadController {
         }
 
         try {
-            SendResult<String, String> result = future.get(15, TimeUnit.SECONDS);
+            SendResult<String, String> result = future.get(sendTimeoutMs, TimeUnit.MILLISECONDS);
             log.debug("发送到 partition={} offset={}",
                     result.getRecordMetadata().partition(), result.getRecordMetadata().offset());
         } catch (ExecutionException e) {
