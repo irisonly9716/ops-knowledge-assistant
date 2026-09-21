@@ -22,6 +22,17 @@
     "source": "manual"
   },
   {
+    "uploadId": "44444444-4444-4444-8444-444444444444",
+    "storageKey": "44444444-4444-4444-8444-444444444444-美妆618大促-策划案.md",
+    "contentKind": "document",
+    "docType": "campaign_plan",
+    "tableType": null,
+    "department": "美妆运营",
+    "campaignId": 3,
+    "category": null,
+    "source": "manual"
+  },
+  {
     "uploadId": "33333333-3333-4333-8333-333333333333",
     "storageKey": "33333333-3333-4333-8333-333333333333-products.csv",
     "contentKind": "data_table",
@@ -31,5 +42,16 @@
     "campaignId": 3,
     "category": null,
     "source": "manual"
+  },
+  {
+    "uploadId": "55555555-5555-4555-8555-555555555555",
+    "storageKey": "55555555-5555-4555-8555-555555555555-customers.csv",
+    "contentKind": "data_table",
+    "docType": null,
+    "tableType": "campaign_customer_behavior",
+    "department": "美妆运营",
+    "campaignId": 3,
+    "category": null,
+    "source": "auto"
   }
 ]

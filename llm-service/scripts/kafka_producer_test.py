@@ -1,18 +1,22 @@
-"""Day 3 验证脚本:往 document-upload-events 发一条测试消息。
-
-跟 app/consumers/ 里"真正的"生产逻辑分开 —— 这里只是确认 Python 能连上 Kafka、
-消息能发出去,不接业务逻辑。跑法(注意是 -m,不是直接给文件路径,见下方说明):
+"""手动往 document-upload-events 发一条【符合契约的】上传事件——不经过 Java 后端,
+方便单独验证消费者。跑法(注意是 -m,不是直接给文件路径,原因见下方说明):
 
     cd llm-service
     uv run python -m scripts.kafka_producer_test
 
+Day 3 写的这个脚本最初发的是随手编的消息(doc_id / path 字段),后来契约定了(见
+contracts/upload-event.examples.json),那种消息现在会被消费者正确地扔进死信。
+所以这里改成:先在上传目录里写一个真实文件,再发一条指向它的合法事件——
+消费者应该能收到并读到文件内容,整条 Python 侧的链路一次验证完。
+
 为什么用 `-m scripts.xxx` 而不是 `python scripts/xxx.py`:
 后者会把 sys.path[0] 设成 scripts/ 目录本身,`import app.config` 找不到 app 包;
-用 `-m` 时 Python 以当前目录(llm-service/)为根,app/ 和 scripts/ 都在同一层,
-才能正常 import。
+用 `-m` 时 Python 以当前目录(llm-service/)为根,app/ 和 scripts/ 都在同一层,才能正常 import。
 """
 import json
 import sys
+import uuid
+from pathlib import Path
 
 from confluent_kafka import Producer
 
@@ -33,19 +37,30 @@ def delivery_report(err, msg):
 
 
 def main():
+    upload_id = str(uuid.uuid4())
+    storage_key = f"{upload_id}-smoke-test.md"
+
+    # 先把文件放进上传目录(生产环境里这一步是 backend-service 做的)
+    upload_dir = Path(settings.upload_dir)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    (upload_dir / storage_key).write_text("# Kafka 冒烟测试\n\n这是 kafka_producer_test.py 写进上传目录的文件。\n", encoding="utf-8")
+
     producer = Producer({"bootstrap.servers": BOOTSTRAP_SERVERS})
-
-    message = {
-        "doc_id": 1,
-        "path": "/tmp/test.md",
-        "department": "美妆运营",
-        "category": "风控",
-        "source": "manual",   # manual = 员工手动上传;auto = 未来定时任务自动摄取
+    event = {  # 字段名和取值必须跟 contracts/upload-event.examples.json 一致(camelCase)
+        "uploadId": upload_id,
+        "storageKey": storage_key,
+        "contentKind": "document",
+        "docType": "sop",
+        "tableType": None,
+        "department": "ALL",
+        "campaignId": None,
+        "category": "冒烟测试",
+        "source": "manual",
     }
-
     producer.produce(
         TOPIC,
-        value=json.dumps(message, ensure_ascii=False).encode("utf-8"),
+        key=upload_id,
+        value=json.dumps(event, ensure_ascii=False).encode("utf-8"),
         callback=delivery_report,
     )
 

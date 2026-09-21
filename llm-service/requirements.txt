@@ -11,6 +11,10 @@ confluent-kafka==2.6.1
 faker==33.1.0
 psycopg[binary]==3.2.3
 
+# ---- 测试(Day 7-8)----
+pytest==9.1.1
+httpx==0.28.1   # FastAPI 的 TestClient 依赖它
+
 # ---- 后面按天解开注释 ----
 # Day 9    文档解析 + chunking
 # langchain==0.3.14

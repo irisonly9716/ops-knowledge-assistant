@@ -18,6 +18,9 @@ BOOTSTRAP_SERVERS = settings.kafka_bootstrap_servers
 
 TOPICS = [
     NewTopic(settings.doc_upload_topic, num_partitions=1, replication_factor=1),
+    # 死信 topic:消费者处理不了的消息(格式坏了 / 重试用尽)转存在这里,不阻塞主流程也不丢。
+    # 名字从主 topic 派生(见 app/config.py),消费者和这个脚本用的是同一个来源。
+    NewTopic(settings.doc_upload_dlq_topic, num_partitions=1, replication_factor=1),
     # 以后如果有语义上不同的事件种类,在这里加新的一行,比如:
     # NewTopic("document-processing-failed", num_partitions=1, replication_factor=1),
 ]
