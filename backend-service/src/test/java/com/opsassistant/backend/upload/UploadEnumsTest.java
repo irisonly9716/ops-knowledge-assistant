@@ -66,7 +66,7 @@ class UploadEnumsTest {
     @SuppressWarnings("unchecked")
     void event_serializes_enums_as_the_lowercase_wire_format() throws Exception {
         UploadEvent event = new UploadEvent(
-                "u-1", "uploads/x.md", ContentKind.DOCUMENT, DocType.CAMPAIGN_REVIEW, null,
+                "u-1", "u-1-x.md", ContentKind.DOCUMENT, DocType.CAMPAIGN_REVIEW, null,
                 "美妆运营", 3L, null, Source.MANUAL);
 
         JsonMapper mapper = JsonMapper.builder().build();

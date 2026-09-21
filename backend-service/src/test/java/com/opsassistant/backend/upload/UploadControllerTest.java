@@ -26,6 +26,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -108,6 +109,7 @@ class UploadControllerTest {
         Map<String, Object> message = readMap(value.getValue());
         assertThat(message)
                 .containsEntry("uploadId", uploadId)
+                .containsEntry("storageKey", uploadId + "-note.md") // 逻辑键(文件名),不是物理路径
                 .containsEntry("contentKind", "document") // 小写,不是 DOCUMENT
                 .containsEntry("docType", "sop")
                 .containsEntry("department", "ALL")
@@ -147,6 +149,45 @@ class UploadControllerTest {
                 .containsEntry("contentKind", "data_table")
                 .containsEntry("tableType", "campaign_products");
         assertThat(message.get("docType")).isNull();
+    }
+
+    /**
+     * 文件名是客户端随便填的。"../../evil.md" 如果原样拼进磁盘路径,就能写到上传目录之外。
+     * 这里验证:恶意文件名被压成一个单层的安全名字,文件确实落在上传目录里,
+     * 且发出去的 storageKey 里没有任何路径分隔符(消费者拿它拼路径也不会越界)。
+     */
+    @Test
+    void a_malicious_filename_cannot_escape_the_upload_directory() throws Exception {
+        kafkaSendSucceeds();
+        MockMultipartFile evil = new MockMultipartFile(
+                "file", "../../evil.md", "text/markdown", "x".getBytes(UTF_8));
+
+        mockMvc.perform(multipart("/documents/upload").file(evil)
+                        .param("contentKind", "document").param("docType", "sop").param("department", "ALL"))
+                .andExpect(status().isAccepted());
+
+        ArgumentCaptor<String> value = ArgumentCaptor.forClass(String.class);
+        verify(kafkaTemplate).send(eq("test-topic"), anyString(), value.capture());
+        String storageKey = (String) readMap(value.getValue()).get("storageKey");
+
+        assertThat(storageKey).doesNotContain("/").doesNotContain("\\");
+        assertThat(fileCount()).isEqualTo(1);
+        assertThat(uploadDir.resolve(storageKey)).exists(); // 就在上传目录里
+        assertThat(uploadDir.resolve(storageKey).normalize().getParent()).isEqualTo(uploadDir.normalize());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', nullValues = "NULL", value = {
+            "note.md                | note.md",
+            "../../evil.md          | .._.._evil.md",
+            "C:\\Windows\\sys.md     | C__Windows_sys.md",
+            "a/b\\c.md              | a_b_c.md",
+            "风控 SOP.md            | 风控 SOP.md",
+            "..                     | upload",
+            "NULL                   | upload",
+    })
+    void sanitizeFilename_flattens_everything_that_could_be_a_path(String input, String expected) {
+        assertThat(UploadController.sanitizeFilename(input)).isEqualTo(expected);
     }
 
     // ------------------------------------------------------------------ 参数校验

@@ -48,7 +48,12 @@ document:
   # 下面两项是 Day 7 写测试时"逼"出来的:原先一个硬编码成 uploads,一个硬编码成 15 秒,
   # 结果测试要么往真实目录写文件,要么测"结果不确定"分支得真等 15 秒。
   # 变成配置项后,测试可以指到临时目录、把超时改成 300 毫秒。
-  upload-dir: uploads
+  # 上传文件的存放根目录,backend 写、llm-service 读——两边读同一个 .env 变量 UPLOAD_DIR。
+  # 默认 ../uploads 是相对【各服务自己的目录】的:backend-service/ 和 llm-service/ 是兄弟目录,
+  # 各自从自己目录运行时,../uploads 恰好都指向仓库根的 uploads/,不用写死绝对路径。
+  # (以后上 Docker,两个容器挂同一个共享卷,把这个变量设成挂载点即可;再往后换成 S3,
+  #  消息里的 storageKey 不变,只换存储后端。)
+  upload-dir: ${UPLOAD_DIR:../uploads}
   send-timeout-ms: 15000  # 等 Kafka 发送结果的上限;必须大于 delivery.timeout.ms(10 秒),见上面 producer 配置
 
 server:

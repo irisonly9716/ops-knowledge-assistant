@@ -107,7 +107,7 @@ public class UploadController {
         Path dest = saveFile(file, uploadId);
 
         UploadEvent event = new UploadEvent(
-                uploadId, dest.toString(), contentKind, docType, tableType,
+                uploadId, dest.getFileName().toString(), contentKind, docType, tableType,
                 department, campaignId, category, Source.MANUAL
         );
         sendToKafka(uploadId, event, dest);
@@ -141,7 +141,7 @@ public class UploadController {
         Path dir = Path.of(uploadDir);
         Files.createDirectories(dir);
         // 文件名前面加 uploadId,防止两个人传同名文件互相覆盖
-        String filename = uploadId + "-" + file.getOriginalFilename();
+        String filename = uploadId + "-" + sanitizeFilename(file.getOriginalFilename());
         Path dest = dir.resolve(filename);
         file.transferTo(dest);
         return dest;
@@ -159,6 +159,24 @@ public class UploadController {
      * delivery.timeout.ms 设成 10 秒、这里的 get() 等 15 秒,就是为了让 Kafka 自己
      * 先给出确定结果,几乎不会走到"不确定"分支。
      */
+    /**
+     * getOriginalFilename() 是【客户端随便填的】,可能是 "../../evil.md"、"C:\x\y.md"、
+     * 带控制字符,甚至为 null。直接拼进磁盘文件名是路径穿越(path traversal)的经典入口。
+     * 这里把路径分隔符、Windows 不允许的字符、控制字符全部替换成下划线,得到一个
+     * 在任何操作系统上都只能是"单层文件名"的安全字符串。中文等普通字符原样保留。
+     * 注意是"替换"不是"取最后一段"——后者在 Linux 上遇到 Windows 风格的反斜杠路径会漏。
+     */
+    static String sanitizeFilename(String original) {
+        if (original == null) {
+            return "upload";
+        }
+        String cleaned = original.replaceAll("[\\\\/:*?\"<>|\\p{Cntrl}]", "_").strip();
+        if (cleaned.length() > 100) {
+            cleaned = cleaned.substring(cleaned.length() - 100); // 保留末尾,扩展名不丢
+        }
+        return cleaned.isBlank() || cleaned.chars().allMatch(c -> c == '.') ? "upload" : cleaned;
+    }
+
     private void sendToKafka(String uploadId, UploadEvent event, Path savedFile) {
         // 注意包名是 tools.jackson.*,不是网上大部分教程里的 com.fasterxml.jackson.*——
         // Spring Boot 4 默认换成了 Jackson 3(连 Maven 坐标的 groupId 都变了)。
