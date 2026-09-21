@@ -76,9 +76,14 @@
 
 ## 第 2 周:文档处理 + 核心 RAG 链路
 
-### Day 8 — Kafka 消费者服务(Python)
-- [ ] 写 Python 消费者服务,监听 `document-upload-events`
-- [ ] 最简版:收到消息 → 打印日志 → 读取对应文件,确认链路跑通
+### Day 8 — Kafka 消费者服务(Python)  ✅ 完成
+- [x] Python 消费者服务,监听 `document-upload-events`:独立 worker 进程(`python -m app.consumers.upload_consumer`),同步 confluent-kafka;**至少一次**(关自动提交,处理完才提交 offset);永久错误直接进死信 / 暂时错误指数退避重试 / 死信写不进去就崩溃不提交。选型结论:独立进程 + 同步 confluent-kafka(不用 aiokafka),理由见 [architecture.md](architecture.md)
+- [x] 收到消息 → 读取对应文件,**真实端到端验证通过**:Java 后端上传 `sop_docs/风控问题处理流程.md` → Kafka → 消费者读到 1616 字节文件
+- [x] 失败路径也真测了:格式坏的消息(0 次重试进死信)、指向不存在文件(0.5s→1s 退避重试 3 次后进死信)、`../.env` 路径穿越(识别为永久错误,`.env` 未被读取)、Day 7 遗留的旧格式消息(被隔离进死信,消费者没崩)、强杀消费者后重启(约 24 秒会话超时后接手,只处理积压的 2 条,LAG=0,无重复)
+- **Day 8 暴露的 Day 6 设计缺陷**:消息里的 `path`(`uploads\xxx.md`,相对 backend 目录+Windows 反斜杠)别的服务根本解析不了。改成 `storageKey`(逻辑键=文件名)+ 两个服务共享 `.env` 的 `UPLOAD_DIR`;顺带修了 `getOriginalFilename()` 客户端可控的路径穿越隐患(`sanitizeFilename`)
+- **契约测试**:`contracts/upload-event.examples.json` 是消息格式的唯一事实来源,Java(`UploadEventContractTest`)和 Python(`test_events.py`)都对着它验证;Python 还解析 `sql/02_schema.sql` 检测枚举跟 CHECK 约束是否漂移
+- 测试:Java 30→39,Python 1→54(+1 个 Windows 上跳过的符号链接测试)。Python 侧同样做了变异验证(6 个关键保证故意破坏,每个都被对应测试抓到)
+- 备注:Day 8 的 handler 是只读的,天然幂等;**Day 11 开始有写库动作,必须靠 `upload_id` 去重**(Kafka 至少一次投递会重复)
 
 ### Day 9 — 文档解析 + Chunking
 - [ ] 【学】chunking 是什么、为什么需要

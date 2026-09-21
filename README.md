@@ -66,6 +66,8 @@ ops-knowledge-assistant/
 ├── llm-service/            # Python FastAPI —— embedding / RAG / SQL agent / 路由
 ├── sop_docs/               # 模拟 SOP 文档(markdown),Day 9 起被摄入 RAG 链路
 ├── campaign_docs/          # 模拟策划案/复盘文档(markdown),同样走 RAG 链路
+├── contracts/              # 服务间消息契约的样例(Java 和 Python 的测试都对着它验证)
+├── uploads/                # 上传的文件(运行时生成,gitignore)
 └── docs/
     ├── architecture.md     # 架构与运行时链路
     ├── data-schema.md      # 数据表设计(含 users / 权限字段)
@@ -105,10 +107,16 @@ uv run python -m scripts.generate_mock_data
 cd ../backend-service
 .\mvnw.cmd spring-boot:run            # WSL/macOS/Linux: ./mvnw spring-boot:run
 
-# 5. 验证上传 → Kafka
+# 5. 起消费者(再另开一个终端)——独立的 worker 进程,不是 FastAPI
+cd ../llm-service
+uv run python -m app.consumers.upload_consumer
+
+# 6. 验证 上传 → Kafka → 消费者读到文件(消费者的日志里会出现"收到上传 ...")
 curl -X POST http://localhost:8081/documents/upload \
-  -F "file=@some.md" -F "contentKind=document" -F "docType=sop" -F "department=ALL"
+  -F "file=@sop_docs/风控问题处理流程.md" -F "contentKind=document" -F "docType=sop" -F "department=ALL"
 ```
+
+跑测试:`cd backend-service; .\mvnw.cmd test`(39 个,不需要 Docker)和 `cd llm-service; uv run pytest`(不需要 Kafka)。
 
 `docker compose down -v` 会清空所有数据卷(Postgres 数据、Kafka topic 全没),
 之后必须重新走 2、3 两步。

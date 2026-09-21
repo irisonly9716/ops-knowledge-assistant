@@ -85,8 +85,18 @@ Jackson 2 的受检异常(`extends IOException`)变成了非受检异常。
 | `campaignId` | 除 `sop` 外必填 | `campaign_plan`/`campaign_review`/`data_table` 都要挂一个 campaign |
 | `category` | 否 | |
 
-成功返回 `202 Accepted` + `{"uploadId": "..."}`。文件存到 `uploads/`(gitignore 了,不进仓库),
+成功返回 `202 Accepted` + `{"uploadId": "..."}`。文件存到 `UPLOAD_DIR`(`.env` 里配,默认 `../uploads`,
+即仓库根的 `uploads/`,gitignore 了不进仓库;llm-service 读的是同一个变量),
 同时发一条 JSON 消息到 `document-upload-events`(topic 名从 `.env` 的 `DOC_UPLOAD_TOPIC` 读)。
+
+**消息里是 `storageKey`(逻辑键 = 文件名),不是文件路径**——Day 6 最初发的是 `path`(相对本目录、
+带 Windows 反斜杠),Day 8 消费者去读文件时才发现别的服务根本解析不了。契约的唯一事实来源是
+[contracts/upload-event.examples.json](../contracts/upload-event.examples.json),`UploadEventContractTest`
+和 Python 侧 `tests/test_events.py` 对着同一份文件验证。
+
+**文件名清理**:`getOriginalFilename()` 是客户端随便填的(`../../evil.md`、Windows 风格的 `C:\x\y.md`、
+控制字符、null),`sanitizeFilename` 把路径分隔符/Windows 非法字符/控制字符统一替换成 `_`,
+得到任何操作系统上都只能是单层文件名的字符串;中文原样保留。
 
 **注意是 `upload_id` 不是 `doc_id`**——`documents.doc_id` 是 Postgres 自增列,要等 Day 8+
 消费者真正执行 `INSERT` 才会产生,上传这一刻还不存在,不可能提前塞进消息里。
@@ -119,7 +129,7 @@ curl -X POST http://localhost:8081/documents/upload \
 ## 测试
 
 ```bash
-.\mvnw.cmd test                                                # 默认:30 个单元/切片测试,不需要 Docker,几秒钟
+.\mvnw.cmd test                                                # 默认:39 个单元/切片测试,不需要 Docker,几秒钟
 .\mvnw.cmd test -DexcludedGroups=none -Dgroups=integration     # 集成测试:需要 Postgres 在跑
 .\mvnw.cmd test -Dtest=UploadControllerTest                    # 只跑某个类
 ```
@@ -127,7 +137,8 @@ curl -X POST http://localhost:8081/documents/upload \
 | 测试类 | 类型 | 内容 |
 |---|---|---|
 | `UploadEnumsTest`(13) | 纯单元 | 枚举的 `fromValue`(拼错/大小写/null)、`needsCampaign`、**JSON 线上格式必须小写**(`@JsonValue`) |
-| `UploadControllerTest`(17) | `@WebMvcTest` 切片 | 成功路径(含实际发出去的 JSON)、10 种参数错误各自返回 400 + 具体原因 + **零副作用**、4 个 Kafka 故障回归测试 |
+| `UploadControllerTest`(25) | `@WebMvcTest` 切片 | 成功路径(含实际发出去的 JSON)、10 种参数错误各自返回 400 + 具体原因 + **零副作用**、4 个 Kafka 故障回归测试、恶意文件名不能逃出上传目录、`sanitizeFilename` 的 7 种输入 |
+| `UploadEventContractTest`(1) | 契约 | `contracts/upload-event.examples.json` 里每条样例经 Java 反序列化再序列化,必须与原文一致 |
 | `BackendServiceApplicationTests`(1) | 集成,`@Tag("integration")` | 完整容器 + 真实 Postgres;因为 `ddl-auto: validate`,它同时检测 **Entity 是否跟 `02_schema.sql` 漂移** |
 
 要点:
