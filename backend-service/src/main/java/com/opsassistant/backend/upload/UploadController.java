@@ -148,18 +148,6 @@ public class UploadController {
     }
 
     /**
-     * 文件已经存盘(savedFile)之后才发消息,所以"发消息失败"时要不要把文件删掉,
-     * 取决于这次失败是不是【确定】的——
-     *   确定失败(send() 自己抛异常 = 记录根本没进发送队列;或 Future 以异常结束):
-     *     消息一定没发出去,文件成了没人认领的孤儿,安全删除。
-     *   结果不确定(等 Future 超时、线程被中断):
-     *     消息可能其实已经/即将发出去了,消费者随后会来读这个文件。此时删文件反而制造
-     *     "有消息、没文件"的更坏局面,所以不删,只告诉调用方"不确定"。
-     * "超时 ≠ 失败":这是分布式系统里最经典的坑之一。上面 application.yml 里把
-     * delivery.timeout.ms 设成 10 秒、这里的 get() 等 15 秒,就是为了让 Kafka 自己
-     * 先给出确定结果,几乎不会走到"不确定"分支。
-     */
-    /**
      * getOriginalFilename() 是【客户端随便填的】,可能是 "../../evil.md"、"C:\x\y.md"、
      * 带控制字符,甚至为 null。直接拼进磁盘文件名是路径穿越(path traversal)的经典入口。
      * 这里把路径分隔符、Windows 不允许的字符、控制字符全部替换成下划线,得到一个
@@ -177,6 +165,18 @@ public class UploadController {
         return cleaned.isBlank() || cleaned.chars().allMatch(c -> c == '.') ? "upload" : cleaned;
     }
 
+    /**
+     * 文件已经存盘(savedFile)之后才发消息,所以"发消息失败"时要不要把文件删掉,
+     * 取决于这次失败是不是【确定】的——
+     *   确定失败(send() 自己抛异常 = 记录根本没进发送队列;或 Future 以异常结束):
+     *     消息一定没发出去,文件成了没人认领的孤儿,安全删除。
+     *   结果不确定(等 Future 超时、线程被中断):
+     *     消息可能其实已经/即将发出去了,消费者随后会来读这个文件。此时删文件反而制造
+     *     "有消息、没文件"的更坏局面,所以不删,只告诉调用方"不确定"。
+     * "超时 ≠ 失败":这是分布式系统里最经典的坑之一。上面 application.yml 里把
+     * delivery.timeout.ms 设成 10 秒、这里的 get() 等 15 秒,就是为了让 Kafka 自己
+     * 先给出确定结果,几乎不会走到"不确定"分支。
+     */
     private void sendToKafka(String uploadId, UploadEvent event, Path savedFile) {
         // 注意包名是 tools.jackson.*,不是网上大部分教程里的 com.fasterxml.jackson.*——
         // Spring Boot 4 默认换成了 Jackson 3(连 Maven 坐标的 groupId 都变了)。
