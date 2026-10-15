@@ -5,8 +5,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import org.springframework.boot.EnvironmentPostProcessor;
 import org.springframework.boot.SpringApplication;
-import org.springframework.boot.env.EnvironmentPostProcessor;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.MapPropertySource;
 
@@ -22,6 +22,12 @@ import org.springframework.core.env.MapPropertySource;
  * 这个类不像 @Component / @RestController 那样靠"扫描注解"被发现——
  * EnvironmentPostProcessor 跑的时候,Spring 的容器(能扫描注解那套机制)还没建好,
  * 所以必须用更原始的方式注册,见 resources/META-INF/spring.factories。
+ *
+ * 注意接口的包名:Spring Boot 4 把它从 org.springframework.boot.env 搬到了 org.springframework.boot,
+ * 旧位置的那个标了 @Deprecated(forRemoval = true)。import 和 spring.factories 里的注册键
+ * 必须【同时】用新名字:只改一处,Spring 启动时会直接抛 "not assignable to factory type"(实测),
+ * 是大声失败。真正会【悄悄失效】的是"没注册"(spring.factories 缺失/键名写错成别的)——
+ * 那样 .env 不再被读,application.yml 退回冒号后面的默认值(Day 5 的那个 bug)。
  */
 public class DotenvEnvironmentPostProcessor implements EnvironmentPostProcessor {
 
