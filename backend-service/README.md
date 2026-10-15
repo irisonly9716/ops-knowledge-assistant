@@ -19,7 +19,7 @@ Day 4 已生成(用下面的 Spring Initializr 配置,通过 `curl` 直接调 st
 | Artifact | `backend-service` |
 | Package name | `com.opsassistant.backend` |
 | Packaging | Jar |
-| Java | **21**(见下方 Java 版本说明) |
+| Java | Day 4 选的 21,**现已改为 25**(见下方 Java 版本说明) |
 
 Dependencies:
 - Spring Web
@@ -45,10 +45,15 @@ curl https://start.spring.io/starter.zip \
 
 ## Java 版本说明
 
-你本机是 **Java 25**。Spring Initializr 里选 **Java 21** 作为编译目标(`<java.version>21</java.version>`)——
-用 JDK 25 的 JVM 跑一个以 21 为目标的构建没问题。
-如果 Day 4 真遇到 Spring Boot 对 Java 25 报兼容问题,再单独装一个 JDK 21 切过去即可
-(大纲原本就要求 JDK 21)。
+你本机是 **Java 25**,项目的编译目标(`pom.xml` 里的 `<java.version>`)也是 **25**。
+
+大纲原本写的是 21,Day 4 生成项目时选的也是 21(JDK 25 跑 21 目标的构建本身没问题,Maven 构建一直是好的)。
+**Day 8 之后改成了 25**,原因出在编辑器而不是构建:VS Code 的 Java 扩展用 Eclipse 编译器加自带的
+Lombok(1.18.39),在语言级别 21 下对 Lombok 生成的构造函数(`@AllArgsConstructor` 等)报
+`Flexible Constructor Bodies is only available with source level 25`——文件标红,而且它还会把残缺的
+class 写进 `target/classes`,Maven 看到比源码新就不重编,启动时 `ClassFormatError`。
+语言级别设成 25 后这个特性是允许的,问题消失。代价是以后 Docker / 部署要用 Java 25 的基础镜像。
+(上面 Initializr 表格里的 21 是 Day 4 当时生成项目用的选项,现在以 `pom.xml` 为准。)
 
 ## 跑起来
 

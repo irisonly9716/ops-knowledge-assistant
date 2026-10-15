@@ -131,9 +131,13 @@ curl -X POST http://localhost:8081/documents/upload \
 再 `docker compose up -d`(只重建 postgres 容器,数据卷保留)。compose、Spring、Python 都读这个变量,
 不用改别处。(`.env` 不进 git,所以这个改动只影响你这台机器;`.env.example` 保持默认 5432。)
 
-**`mvnw spring-boot:run` 报 `ClassFormatError` / `Unresolved compilation problem`**
-`target/classes` 里有被别的编译器(VS Code 的 Java 扩展用的 Eclipse 编译器)写坏的 class,
-Maven 看它比源码新就不重编。`.\mvnw.cmd clean` 一次即可;想省心就每次 `clean spring-boot:run`。
+**`mvnw spring-boot:run` 报 `ClassFormatError` / `Unresolved compilation problem`,VS Code 里 Lombok 的类标红**
+`target/classes` 里有被 VS Code 的 Java 扩展(Eclipse 编译器)写坏的 class,Maven 看它比源码新就不重编。
+根因是语言级别:在 `java.version=21` 下,VS Code 自带的 Lombok 生成的构造函数会报
+`Flexible Constructor Bodies is only available with source level 25`。**已通过把 `pom.xml` 的
+`java.version` 改成 25 解决**(见 [backend-service/README.md](backend-service/README.md) 的"Java 版本说明")。
+如果你拉到的是旧版本又遇到了:`.\mvnw.cmd clean` 一次,并在 VS Code 命令面板运行
+`Java: Clean Java Language Server Workspace`。
 
 **`uv run python -m scripts.xxx` 报 `No module named 'scripts'`**
 要在 `llm-service/` 目录里跑(`cd llm-service`),不是仓库根。

@@ -10,7 +10,7 @@
 ### Day 1 — 开发环境搭建  ✅ 完成
 - [x] 装 **WSL2**:管理员 PowerShell → `wsl --install` → 重启;实际要再跑一次 `wsl --install -d Ubuntu` 才装上发行版
 - [x] 装 **Docker Desktop**(装在 `%LOCALAPPDATA%\Programs\DockerDesktop`),`docker run hello-world` 通过
-- [x] JDK:已有 Java 25(比大纲的 21 新,兼容,跳过装 21)
+- [x] JDK:已有 Java 25(比大纲的 21 新,兼容,跳过装 21)。Day 4 项目最初以 21 为编译目标,Day 8 之后改成 25(原因见 [backend-service/README.md](../backend-service/README.md) 的"Java 版本说明")
 - [x] Python 环境:用 `uv`(机器上的 `python` 是坏的商店占位符),版本锁 3.12 —— `uv python install 3.12` → `cd llm-service && uv venv && uv pip install -r requirements.txt`;`uv run uvicorn app.main:app --port 8000` → /health 返回 ok
 - [x] 建项目仓库结构 + 推到 GitHub
 - [x] 【学】Docker 核心概念:image=只读模板 / container=运行实例(用完即弃)/ volume=容器外持久化存储 / docker-compose=一个 yml 声明多容器一键起。用容器而非本机装:隔离、版本可控、一键复现
