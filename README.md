@@ -121,10 +121,27 @@ curl -X POST http://localhost:8081/documents/upload \
 `docker compose down -v` 会清空所有数据卷(Postgres 数据、Kafka topic 全没),
 之后必须重新走 2、3 两步。
 
+### 常见问题
+
+**后端报 `password authentication failed for user "ops"`,但密码明明没错**
+十有八九是**本机另有一个 Postgres 也占着 5432 端口**(比如 Windows 上装过原生 PostgreSQL,
+服务名 `postgresql-x64-NN`)。Docker 和它同时监听 5432,`localhost:5432` 会连到本机那个——
+它没有 `ops` 用户。确认方法(PowerShell):`Get-NetTCPConnection -LocalPort 5432 -State Listen`
+会看到两个进程。**不用卸载它**,把项目的端口换掉即可:`.env` 里改 `POSTGRES_PORT=5433`,
+再 `docker compose up -d`(只重建 postgres 容器,数据卷保留)。compose、Spring、Python 都读这个变量,
+不用改别处。(`.env` 不进 git,所以这个改动只影响你这台机器;`.env.example` 保持默认 5432。)
+
+**`mvnw spring-boot:run` 报 `ClassFormatError` / `Unresolved compilation problem`**
+`target/classes` 里有被别的编译器(VS Code 的 Java 扩展用的 Eclipse 编译器)写坏的 class,
+Maven 看它比源码新就不重编。`.\mvnw.cmd clean` 一次即可;想省心就每次 `clean spring-boot:run`。
+
+**`uv run python -m scripts.xxx` 报 `No module named 'scripts'`**
+要在 `llm-service/` 目录里跑(`cd llm-service`),不是仓库根。
+
 ### 验证
 
 ```bash
-# Postgres(需要 psql 或用 DBeaver 连 localhost:5432)
+# Postgres(需要 psql 或用 DBeaver 连 localhost:<.env 里的 POSTGRES_PORT,默认 5432>)
 docker compose exec postgres psql -U ops -d ops_assistant -c "SELECT extname FROM pg_extension;"
 # 应看到 vector
 
