@@ -139,7 +139,7 @@ class UploadConsumer:
             self._commit(msg)  # 【先处理成功、后提交】——至少一次
             return
 
-        log.error("upload_id=%s 重试 %d 次仍失败,进死信: %s", event.upload_id, self._max_attempts, last_error)
+        log.error("upload_id=%s 共尝试 %d 次仍失败,进死信: %s", event.upload_id, self._max_attempts, last_error)
         self._dead_letter(msg, last_error, attempts=self._max_attempts)
 
     def _dead_letter(self, msg, reason: str, attempts: int) -> None:

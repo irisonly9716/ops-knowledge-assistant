@@ -63,7 +63,7 @@ topic 已建(`init_topics`,其中包含死信 topic `document-upload-events.dlq`
 行为要点(设计理由见 [docs/architecture.md](../docs/architecture.md)):
 - **至少一次**:关掉自动提交,处理完(或确定进了死信)才提交 offset
 - 消息本身坏了(非 JSON / 不符合契约 / 路径越界)→ 不重试,直接进死信 `document-upload-events.dlq`
-- 其它异常 → 指数退避重试(默认 3 次),用尽进死信;死信里带失败原因、尝试次数、来源 offset
+- 其它异常 → 指数退避重试(默认共尝试 3 次 = 第一次 + 2 次重试,中间等 0.5s、1s),用尽进死信;死信里带失败原因、尝试次数、来源 offset
 - 死信写不进去 → 不提交 offset 并崩溃(宁可停也不丢消息)
 - 被强杀后重启,新消费者要等旧成员的**会话超时**(约 45 秒)才会接手分区;Ctrl+C 优雅退出则立刻让位
 
