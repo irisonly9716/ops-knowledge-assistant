@@ -34,3 +34,6 @@ Thumbs.db
 uploads/
 data/
 *.log
+
+# ---- Personal study plan (kept locally, not published) ----
+docs/21-day-plan.md

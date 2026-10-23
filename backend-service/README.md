@@ -62,7 +62,7 @@ cd backend-service
 .\mvnw.cmd spring-boot:run      # WSL/macOS/Linux: ./mvnw spring-boot:run
 ```
 
-- `application.yml` 数据源默认指向 `localhost:5432 / ops / ops_dev_pw / ops_assistant`(跟 `.env.example` 对齐),要先 `docker compose up -d` 把 Postgres/Kafka 起起来
+- `application.yml` 的数据源配置从仓库根的 `.env` 读(主机/端口/库名有默认值,**密码没有默认值,必须在 `.env` 里设置**),要先 `docker compose up -d` 把 Postgres/Kafka 起起来
 - 访问 `http://localhost:8081/health` → `{"status":"ok","service":"backend-service"}`
 - 访问 `http://localhost:8081/actuator/health` → `{"status":"UP",...}`
 

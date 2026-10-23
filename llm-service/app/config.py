@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     postgres_host: str = "localhost"
     postgres_port: int = 5432
     postgres_user: str = "ops"
-    postgres_password: str = "ops_dev_pw"
+    postgres_password: str = ""  # 不在代码里写默认密码(仓库是公开的),必须从 .env 读
     postgres_db: str = "ops_assistant"
 
     redis_host: str = "localhost"

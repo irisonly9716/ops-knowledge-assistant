@@ -10,7 +10,9 @@ spring:
     # (优先级比 .env 高,见 DotenvEnvironmentPostProcessor 里 addLast 的说明)。
     url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:ops_assistant}
     username: ${POSTGRES_USER:ops}
-    password: ${POSTGRES_PASSWORD:ops_dev_pw}
+    # 密码故意【不给默认值】:没配置时启动直接报 "Could not resolve placeholder 'POSTGRES_PASSWORD'",
+    # 比拿一个写死在仓库里(公开可见)的密码去连、再报一个让人摸不着头脑的认证失败要清楚。
+    password: ${POSTGRES_PASSWORD}
 
   jpa:
     hibernate:
