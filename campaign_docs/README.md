@@ -19,7 +19,7 @@ anchor: 主责主播名字
 
 `campaign_name` + `department` 是给摄入代码用来反查 `campaign_id` 的(`documents.campaign_id`
 是 NOT NULL 外键,但这几篇文件是静态内容,写的时候数据库里的 campaign_id 是多少无所谓,
-交给 Day 6+ 的摄入逻辑按名字匹配)。这跟 SOP 文档里 `department` 靠字符串匹配是同一个思路。
+交给摄入逻辑按名字匹配)。这跟 SOP 文档里 `department` 靠字符串匹配是同一个思路。
 
 **已知的脆弱点**:这两篇示例内容的数字(GMV/转化率/商品利润……)是照着某次
 `generate_mock_data.py` 跑出来的真实数据写的。但 `generate_mock_data.py` 的随机数

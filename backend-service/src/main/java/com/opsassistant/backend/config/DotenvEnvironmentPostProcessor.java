@@ -13,7 +13,7 @@ import org.springframework.core.env.MapPropertySource;
 /**
  * Java 默认不认识仓库根目录那个 .env 文件——这个类是我们自己补的"读 .env 的能力",
  * 让 application.yml 里 ${POSTGRES_USER:ops} 这种占位符真的有机会从 .env 拿到值,
- * 而不是永远退到冒号后面写死的默认值(这是 Day 5 发现的一个真实 bug 的修复)。
+ * 而不是永远退到冒号后面写死的默认值(这是开发中发现的一个真实 bug 的修复)。
  *
  * EnvironmentPostProcessor 是 Spring Boot 提供的一个扩展点:启动过程中,
  * 比读 application.yml 还早的阶段,会调用所有注册了的 EnvironmentPostProcessor。
@@ -27,7 +27,7 @@ import org.springframework.core.env.MapPropertySource;
  * 旧位置的那个标了 @Deprecated(forRemoval = true)。import 和 spring.factories 里的注册键
  * 必须【同时】用新名字:只改一处,Spring 启动时会直接抛 "not assignable to factory type"(实测),
  * 是大声失败。真正会【悄悄失效】的是"没注册"(spring.factories 缺失/键名写错成别的)——
- * 那样 .env 不再被读,application.yml 退回冒号后面的默认值(Day 5 的那个 bug)。
+ * 那样 .env 不再被读,application.yml 退回冒号后面的默认值(就是上面说的那个 bug)。
  */
 public class DotenvEnvironmentPostProcessor implements EnvironmentPostProcessor {
 

@@ -10,8 +10,8 @@ Ctrl+C 会优雅退出:处理完手上这条消息、正常离开消费组,再�
   - 生命周期独立:web 服务重启/扩容不该打断一条正在处理的文档,反过来也一样
   - 可以独立伸缩:同一个消费组多开几个 worker 就分摊分区;上 Docker 时同一个镜像、
     两条不同的启动命令(uvicorn / 这个模块)即可
-  - 因为是普通的阻塞循环,用同步的 confluent-kafka 就够,不需要 aiokafka(Day 3 说过
-    "Day 8 再权衡",结论是:独立进程 + 同步库,最简单也最稳)
+  - 因为是普通的阻塞循环,用同步的 confluent-kafka 就够,不需要 aiokafka
+    (结论:独立进程 + 同步库,最简单也最稳)
 
 投递语义:【至少一次】。关掉自动提交,处理完(或确定进了死信)之后才手动提交 offset。
   处理完但提交前崩溃 -> 重启后这条会被重新投递 -> 处理逻辑必须能容忍重复(见 handlers.py)
@@ -43,7 +43,7 @@ def parse_event(raw: bytes | None) -> UploadEvent:
     if raw is None:
         raise PermanentError("消息体为空")
     try:
-        # json.loads 接受 bytes,并且能自动处理 UTF-8 BOM——Day 3 我们见过
+        # json.loads 接受 bytes,并且能自动处理 UTF-8 BOM——之前见过
         # PowerShell 管道发出来的消息开头会带 BOM,这里天然容忍
         payload = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as e:

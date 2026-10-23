@@ -1,10 +1,9 @@
-"""llm-service 入口。
+"""llm-service 的 HTTP 入口(FastAPI)。
 
-Day 1:只有 /health,确认服务能跑起来。
-后面会挂:
-  - Day 8   Kafka consumer(文档处理)—— 用 lifespan 启动后台任务
-  - Day 13  POST /query —— RAG 问答
-  - Day 17+ 路由 / 记忆 / 缓存
+目前只有 /health。后续会挂 POST /query:RAG 问答、Text-to-SQL、查询路由、会话记忆与缓存。
+
+注意:Kafka 消费者【不在】这里启动,它是独立的 worker 进程
+(python -m app.consumers.upload_consumer),理由见 app/consumers/upload_consumer.py。
 """
 from fastapi import FastAPI
 

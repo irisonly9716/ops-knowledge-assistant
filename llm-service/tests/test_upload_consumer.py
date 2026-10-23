@@ -287,7 +287,7 @@ def test_the_consumer_is_closed_even_if_processing_crashes(calls):
 
 
 def test_parse_event_tolerates_a_utf8_bom():
-    # Day 3 见过:PowerShell 管道发出来的消息开头会带 BOM
+    # 实际遇到过:PowerShell 管道发出来的消息开头会带 BOM
     assert parse_event(b"\xef\xbb\xbf" + VALID).upload_id == CONTRACT[0]["uploadId"]
 
 

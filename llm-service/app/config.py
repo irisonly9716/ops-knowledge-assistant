@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     kafka_bootstrap_servers: str = "localhost:9092"
     doc_upload_topic: str = "document-upload-events"
 
-    # ---- 文档摄入消费者(Day 8)----
+    # ---- 文档摄入消费者 ----
     # 上传文件的存放根目录,跟 backend-service 读的是同一个 .env 变量。相对路径按【本服务的
     # 工作目录】(llm-service/)解析,../uploads 恰好就是仓库根的 uploads/。
     upload_dir: str = "../uploads"
@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     # 重试前的等待:第 n 次失败后等 backoff * 2^(n-1) 秒(指数退避)
     doc_consumer_backoff_seconds: float = 0.5
 
-    # ---- LLM / embedding(Day 10 起用到)----
+    # ---- LLM / embedding(向量化与问答用到)----
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     embedding_model: str = "text-embedding-3-small"

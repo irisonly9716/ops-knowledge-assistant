@@ -8,7 +8,7 @@ package com.opsassistant.backend.upload;
  * 两边的测试都对着这同一份文件验证,防止各改各的、悄悄漂移(见 UploadEventContractTest 和
  * llm-service/tests/test_events.py)。
  *
- * storageKey 不是文件路径,是"存储里的逻辑键"(现在就是文件名)。Day 8 之前这里叫 path、
+ * storageKey 不是文件路径,是"存储里的逻辑键"(现在就是文件名)。早期版本这里叫 path、
  * 存的是 "uploads\xxx.md" 这种相对于 backend-service 目录的路径——消费者在另一个目录、
  * 甚至另一台机器上,根本解析不了。消息里只放逻辑键,各服务自己知道"存储根目录"在哪
  * (UPLOAD_DIR 环境变量),以后换成 S3 键也不变,只换存储后端。

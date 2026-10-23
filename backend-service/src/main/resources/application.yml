@@ -16,7 +16,7 @@ spring:
 
   jpa:
     hibernate:
-      # Day 5:sql/02_schema.sql 定稿了真正的 schema,换成 validate——
+      # sql/02_schema.sql 是 schema 的唯一来源,所以用 validate——
       # 启动时检查 Entity 跟数据库表是否一致,不一致直接报错,但绝不会自己改表结构。
       # "表长什么样"从此完全由 SQL 文件说了算。
       ddl-auto: validate
@@ -35,7 +35,7 @@ spring:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
       properties:
-        # Day 7 实测发现:topic 不存在/Kafka 连不上时,send() 自己会阻塞 60 秒(Kafka 默认的
+        # 实测发现:topic 不存在/Kafka 连不上时,send() 自己会阻塞 60 秒(Kafka 默认的
         # max.block.ms)才报错,HTTP 请求整整卡一分钟,占着一个 Tomcat 线程。
         # 三个超时要配套:delivery.timeout.ms 必须 >= request.timeout.ms + linger.ms,
         # 否则 Kafka 启动就拒绝这套配置。
@@ -45,9 +45,9 @@ spring:
 
 document:
   # 跟 llm-service 的 app/config.py 读的是同一个 .env 变量,单一数据源,
-  # 不在这里重新拼一遍字符串(Day 3 就踩过这个坑)。
+  # 不在这里重新拼一遍字符串(早期就踩过这个坑)。
   upload-topic: ${DOC_UPLOAD_TOPIC:document-upload-events}
-  # 下面两项是 Day 7 写测试时"逼"出来的:原先一个硬编码成 uploads,一个硬编码成 15 秒,
+  # 下面两项是写测试时"逼"出来的:原先一个硬编码成 uploads,一个硬编码成 15 秒,
   # 结果测试要么往真实目录写文件,要么测"结果不确定"分支得真等 15 秒。
   # 变成配置项后,测试可以指到临时目录、把超时改成 300 毫秒。
   # 上传文件的存放根目录,backend 写、llm-service 读——两边读同一个 .env 变量 UPLOAD_DIR。

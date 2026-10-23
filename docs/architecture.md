@@ -26,10 +26,10 @@
 (UUID),不是 `doc_id`——`documents.doc_id` 是 Postgres 的 `BIGSERIAL`,要等 llm-service
 真正执行 `INSERT INTO documents ... RETURNING doc_id` 才会产生,backend-service 发消息
 那一刻这行还不存在,不可能提前知道。`upload_id` 的另一个用处是 Kafka 消费者的**去重键**
-(Day 3 讨论过的"至少一次投递,消费者可能收到重复消息"那个问题)。
+(Kafka "至少一次投递,消费者可能收到重复消息"的问题)。
 
-**关于 `storageKey`(Day 8 改的)**:消息里传的是存储里的【逻辑键】(现在就是文件名),
-不是文件路径。Day 6 最初发的是 `path: "uploads\\xxx.md"`——相对于 backend-service 目录、
+**关于 `storageKey`**:消息里传的是存储里的【逻辑键】(现在就是文件名),
+不是文件路径。最初的版本发的是 `path: "uploads\\xxx.md"`——相对于 backend-service 目录、
 带 Windows 反斜杠,消费者在另一个目录甚至另一台机器上根本解析不了。现在两个服务各自读
 `.env` 里的 `UPLOAD_DIR` 知道"存储根目录"在哪,自己拼出真实路径;以后换 S3,键不变,只换
 存储后端。消费者拼路径时必须防路径穿越(见 `llm-service/app/consumers/storage.py`),
@@ -39,7 +39,7 @@
 Java 的 `UploadEventContractTest` 和 Python 的 `tests/test_events.py` 都对着这同一份文件验证,
 任何一边悄悄改格式,对应那边的测试就红。
 
-**消费者(Day 8)是独立的 worker 进程**,不是 FastAPI 里的后台线程:
+**消费者是独立的 worker 进程**,不是 FastAPI 里的后台线程:
 `uv run python -m app.consumers.upload_consumer`。理由:长期阻塞的 poll 循环和 HTTP 的
 async 事件循环是两种性质的活;生命周期独立(web 重启不打断正在处理的文档);可以独立伸缩
 (同一消费组多开 worker 分摊分区);因为是普通阻塞循环,用同步的 confluent-kafka 即可,不需要 aiokafka。
@@ -96,7 +96,7 @@ async 事件循环是两种性质的活;生命周期独立(web 重启不打断�
 ```
 
 这两条管道不是我们计算分析引擎——**它们只是把"运营已经有的数据"或"运营写的内容"
-存进来,真正的分析(为什么这场结果好/差)交给 Day 15+ 的 LLM,结合 ① 里的策划案/复盘
+存进来,真正的分析(为什么这场结果好/差)交给 LLM,结合 ① 里的策划案/复盘
 内容 + ② 里的结构化数据 + `campaign_metrics` 一起做归因,这才是本项目的核心价值。
 
 ## 提问链路(query)
@@ -141,5 +141,5 @@ backend /query ──转发──▶ llm-service /query
 - **为什么 llm-service 用 Kafka 消费而不是 backend 直接 HTTP 调**:解析 + embedding 可能几秒到几十秒,上传接口不能被拖住;失败要能重试;未来自动化 producer 也能复用。
 - **为什么向量和结构化数据都放 Postgres**:少一个中间件要运维,`doc_chunks` 和业务表能在同一事务/同一连接里查。
 - **为什么权限在 schema 层就埋 `department`**:如果等到最后才加,向量表、SQL 生成、检索 filter 全要返工。见 [permission-model.md](permission-model.md)。
-- **为什么"文档"和"结构化表格"两种上传共用一个 topic,不是分开两个**:两者的消息形状(`upload_id`/`storage_key`/`department`)本来就大部分重合,分流靠 payload 里一个 `content_kind` 字段 + consumer 内部 if/else 就够了;拆成两个 topic 除了多一次创建/多一份配置,没有实际好处,恰好是 Day 3 讨论过的"要不要多建 topic"那次的同一个原则:topic 该按*语义上不同的事件种类*拆,不该为了图代码分支清晰而拆。
+- **为什么"文档"和"结构化表格"两种上传共用一个 topic,不是分开两个**:两者的消息形状(`upload_id`/`storage_key`/`department`)本来就大部分重合,分流靠 payload 里一个 `content_kind` 字段 + consumer 内部 if/else 就够了;拆成两个 topic 除了多一次创建/多一份配置,没有实际好处。原则是:topic 该按*语义上不同的事件种类*拆,不该为了图代码分支清晰而拆。
 - **为什么 ROI / 商品级归因 / 顾客人群这些不做成结构化字段**:这个项目的核心价值是"AI 分析内容和结果",不是重新造一套 BI 计算引擎。干净的数字(GMV/DAU/转化率/在线人数)进 `campaign_metrics`,需要判断和归因的内容进 `documents`(复盘文档),运营已经有但我们不该重新计算的原始数据(商品售卖、顾客行为)进对应的结构化表,原样接收,不在中间加一层自己的计算逻辑。

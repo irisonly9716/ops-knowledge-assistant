@@ -4,7 +4,7 @@
     cd llm-service
     uv run python -m scripts.kafka_producer_test
 
-Day 3 写的这个脚本最初发的是随手编的消息(doc_id / path 字段),后来契约定了(见
+这个脚本最初发的是随手编的消息(doc_id / path 字段),后来契约定了(见
 contracts/upload-event.examples.json),那种消息现在会被消费者正确地扔进死信。
 所以这里改成:先在上传目录里写一个真实文件,再发一条指向它的合法事件——
 消费者应该能收到并读到文件内容,整条 Python 侧的链路一次验证完。

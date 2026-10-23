@@ -69,7 +69,7 @@ CREATE TABLE campaigns (
     -- 效率优化,不是权威数据源:真相永远是"documents 表里存不存在这个 campaign_id
     -- 对应 doc_type 的一行"。这两个字段只是让路由逻辑在决定"要不要做一次向量检索"
     -- 之前,能先用一次便宜的查询判断"根本没有策划案/复盘,不用检索了"。
-    -- 代价:摄入代码(Day 6+)插入/删除 documents 时,必须记得同步更新这两个字段,
+    -- 代价:摄入代码插入/删除 documents 时,必须记得同步更新这两个字段,
     -- 忘了同步就会跟 documents 表的真实状态不一致——这是主动接受的冗余,不是疏忽。
     has_plan_doc    BOOLEAN NOT NULL DEFAULT FALSE,
     has_review_doc  BOOLEAN NOT NULL DEFAULT FALSE,
@@ -180,7 +180,7 @@ CREATE TABLE documents (
 CREATE INDEX idx_documents_campaign ON documents(campaign_id);
 
 -- ----------------------------------------------------------------------------
---  doc_chunks —— 文档切片 + 向量(Day 9-11 才会真正写入,这里先建表)
+--  doc_chunks —— 文档切片 + 向量(由文档摄入链路写入)
 --  metadata 除了 department/category/source_doc/title,以后摄入 campaign_plan/
 --  campaign_review 时还会存 doc_type、campaign_id,方便检索时不用 join 就能过滤
 --  (呼应 department 的过滤方式,都是靠 metadata jsonb,不是靠额外的表字段)。

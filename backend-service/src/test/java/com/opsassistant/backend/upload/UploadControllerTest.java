@@ -48,7 +48,7 @@ import tools.jackson.databind.json.JsonMapper;
  * 这是真的 Kafka 做不到的(你没法可靠地让它恰好在这一刻抛某个异常)。
  *
  * 分组:成功路径(消息内容对不对) / 参数校验(该拒的都拒了、且什么副作用都没有) /
- * Kafka 故障路径(Day 7 实测发现三个 bug 的地方,每个 bug 对应一个回归测试)。
+ * Kafka 故障路径(实测发现过三个 bug 的地方,每个 bug 对应一个回归测试)。
  */
 @WebMvcTest(UploadController.class)
 class UploadControllerTest {
@@ -246,7 +246,7 @@ class UploadControllerTest {
     // ------------------------------------------------------------------ Kafka 故障路径
 
     /**
-     * 回归测试:Day 7 抓到的 bug ②。topic 不存在时 KafkaTemplate.send() 【自己】抛出
+     * 回归测试:之前抓到的 bug ②。topic 不存在时 KafkaTemplate.send() 【自己】抛出
      * org.apache.kafka.common.errors.TimeoutException(不是返回一个失败的 Future)。
      * 当时代码 catch 的是 java.util.concurrent.TimeoutException——同名不同包,
      * 异常漏过去,变成 Spring 默认的笼统 500,且遗留孤儿文件(bug ③)。

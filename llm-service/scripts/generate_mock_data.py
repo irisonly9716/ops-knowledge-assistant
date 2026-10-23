@@ -1,4 +1,4 @@
-"""Day 5:生成模拟数据,插入 departments / users / anchors / campaigns / campaign_metrics /
+"""生成模拟数据,插入 departments / users / anchors / campaigns / campaign_metrics /
 campaign_products / campaign_customer_behavior。
 
 后两张表模拟的是"运营上传的结构化表格"(商品售卖数据、顾客行为数据)——现实中这些
@@ -6,7 +6,7 @@ campaign_products / campaign_customer_behavior。
 方便下游代码有数据可查。
 
 不接真实阿里数据,自己造。documents / doc_chunks 不在这里造——那两张表(SOP、
-策划案、复盘文档)要等 Day 6+ 真正的"上传 -> 解析 -> 切片 -> embedding"链路
+策划案、复盘文档)要等真正的"上传 -> 解析 -> 切片 -> embedding"链路
 跑起来才有数据,不是假数据。
 
 跑法:

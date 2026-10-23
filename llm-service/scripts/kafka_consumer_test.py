@@ -1,4 +1,4 @@
-"""Day 3 验证脚本:从 document-upload-events 读消息,打印出来就退出。
+"""调试脚本:从 document-upload-events 读消息,打印出来就退出。
 
 跑法(先跑 producer 发一条,再跑这个读;用 -m 的原因见 kafka_producer_test.py):
 
@@ -16,7 +16,7 @@ TOPIC = settings.doc_upload_topic
 
 # 同一个 group.id 里的多个 consumer 会分摊 partition、共享消费进度(offset)。
 # 换一个新的 group.id 相当于"从头当一个新读者",不受之前消费到哪里的影响 ——
-# 调试脚本用一个独立的组名,不跟 Day 8 真正的消费者服务混用同一个 group.id。
+# 调试脚本用一个独立的组名,不跟真正的消费者服务混用同一个 group.id。
 GROUP_ID = "dev-smoke-test"
 
 

@@ -2,7 +2,7 @@
 
 Python / FastAPI。负责 embedding、RAG、Text-to-SQL、查询路由、会话记忆。
 
-## 本地跑起来(Day 1 验证)
+## 本地跑起来
 
 Python 版本锁定 **3.12**(见 `.python-version`)。推荐用 [uv](https://docs.astral.sh/uv/):
 
@@ -36,16 +36,16 @@ uvicorn app.main:app --reload --port 8000
 app/
 ├── main.py        FastAPI 入口(现在只有 /health)
 ├── config.py      读环境变量(根目录 .env)
-├── consumers/     Day 8 起  Kafka 消费者(文档处理链路),独立的 worker 进程
+├── consumers/     Kafka 消费者(文档处理链路),独立的 worker 进程
 │   ├── upload_consumer.py   消费循环:手动提交 + 重试 + 死信 + 优雅退出;入口 main()
 │   ├── events.py            消息契约的 Python 一半(pydantic,镜像 Java 的 UploadEvent)
 │   ├── storage.py           storageKey -> 上传目录里的真实文件(含路径穿越防御)
-│   ├── handlers.py          收到合法事件后具体干什么(Day 9-12 逐步往里加)
+│   ├── handlers.py          收到合法事件后具体干什么(解析/切片/向量化/入库逐步往里加)
 │   └── errors.py            PermanentError:重试无意义的错误,直接进死信
-├── rag/           Day 9-13 解析 / chunk / embed / 检索 / 问答
-├── sql_agent/     Day 15-16 Text-to-SQL + 安全校验 + 行级过滤
-├── router/        Day 17-18 查询路由 + 综合回答
-└── memory/        Day 19-20 Redis 缓存 + 会话记忆
+├── rag/           解析 / chunk / embed / 检索 / 问答
+├── sql_agent/     Text-to-SQL + 安全校验 + 行级过滤
+├── router/        查询路由 + 综合回答
+└── memory/        Redis 缓存 + 会话记忆
 tests/             pytest;test_events(契约/跨语言漂移) test_storage(路径穿越)
                    test_upload_consumer(消费循环所有分支) test_health
 ```

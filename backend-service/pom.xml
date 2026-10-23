@@ -27,7 +27,7 @@
 		<url/>
 	</scm>
 	<properties>
-		<!-- 25,不是大纲原本的 21:VS Code 的 Java 扩展用 Eclipse 编译器 + 自带的 Lombok,
+		<!-- 25,不是项目生成时选的 21:VS Code 的 Java 扩展用 Eclipse 编译器 + 自带的 Lombok,
 		     在语言级别 21 下对 Lombok 生成的构造函数报 "Flexible Constructor Bodies only
 		     available with source level 25",还会把坏 class 写进 target/classes 导致启动
 		     ClassFormatError。语言级别设成 25 就没这个问题。本机也只装了 JDK 25。 -->

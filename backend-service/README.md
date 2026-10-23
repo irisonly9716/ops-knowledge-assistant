@@ -2,7 +2,7 @@
 
 Spring Boot / Java。对外 REST API、文件上传、结构化业务表(JPA)、Kafka producer。
 
-Day 4 已生成(用下面的 Spring Initializr 配置,通过 `curl` 直接调 start.spring.io)。
+项目骨架用下面的 Spring Initializr 配置生成(通过 `curl` 直接调 start.spring.io)。
 实际拿到的是 **Spring Boot 4.1.1**(比下面写的 3.3.x/3.4.x 新——start.spring.io 默认版本
 一直在往前走,不影响我们用的这几个 starter)。
 
@@ -19,7 +19,7 @@ Day 4 已生成(用下面的 Spring Initializr 配置,通过 `curl` 直接调 st
 | Artifact | `backend-service` |
 | Package name | `com.opsassistant.backend` |
 | Packaging | Jar |
-| Java | Day 4 选的 21,**现已改为 25**(见下方 Java 版本说明) |
+| Java | 生成时选的 21,**现已改为 25**(见下方 Java 版本说明) |
 
 Dependencies:
 - Spring Web
@@ -47,13 +47,13 @@ curl https://start.spring.io/starter.zip \
 
 你本机是 **Java 25**,项目的编译目标(`pom.xml` 里的 `<java.version>`)也是 **25**。
 
-大纲原本写的是 21,Day 4 生成项目时选的也是 21(JDK 25 跑 21 目标的构建本身没问题,Maven 构建一直是好的)。
-**Day 8 之后改成了 25**,原因出在编辑器而不是构建:VS Code 的 Java 扩展用 Eclipse 编译器加自带的
+生成项目时选的是 21(JDK 25 跑 21 目标的构建本身没问题,Maven 构建一直是好的)。
+**后来改成了 25**,原因出在编辑器而不是构建:VS Code 的 Java 扩展用 Eclipse 编译器加自带的
 Lombok(1.18.39),在语言级别 21 下对 Lombok 生成的构造函数(`@AllArgsConstructor` 等)报
 `Flexible Constructor Bodies is only available with source level 25`——文件标红,而且它还会把残缺的
 class 写进 `target/classes`,Maven 看到比源码新就不重编,启动时 `ClassFormatError`。
 语言级别设成 25 后这个特性是允许的,问题消失。代价是以后 Docker / 部署要用 Java 25 的基础镜像。
-(上面 Initializr 表格里的 21 是 Day 4 当时生成项目用的选项,现在以 `pom.xml` 为准。)
+(上面 Initializr 表格里的 21 是当初生成项目用的选项,现在以 `pom.xml` 为准。)
 
 ## 跑起来
 
@@ -94,8 +94,8 @@ Jackson 2 的受检异常(`extends IOException`)变成了非受检异常。
 即仓库根的 `uploads/`,gitignore 了不进仓库;llm-service 读的是同一个变量),
 同时发一条 JSON 消息到 `document-upload-events`(topic 名从 `.env` 的 `DOC_UPLOAD_TOPIC` 读)。
 
-**消息里是 `storageKey`(逻辑键 = 文件名),不是文件路径**——Day 6 最初发的是 `path`(相对本目录、
-带 Windows 反斜杠),Day 8 消费者去读文件时才发现别的服务根本解析不了。契约的唯一事实来源是
+**消息里是 `storageKey`(逻辑键 = 文件名),不是文件路径**——最初的版本发的是 `path`(相对本目录、
+带 Windows 反斜杠),写消费者去读文件时才发现别的服务根本解析不了。契约的唯一事实来源是
 [contracts/upload-event.examples.json](../contracts/upload-event.examples.json),`UploadEventContractTest`
 和 Python 侧 `tests/test_events.py` 对着同一份文件验证。
 
@@ -103,7 +103,7 @@ Jackson 2 的受检异常(`extends IOException`)变成了非受检异常。
 控制字符、null),`sanitizeFilename` 把路径分隔符/Windows 非法字符/控制字符统一替换成 `_`,
 得到任何操作系统上都只能是单层文件名的字符串;中文原样保留。
 
-**注意是 `upload_id` 不是 `doc_id`**——`documents.doc_id` 是 Postgres 自增列,要等 Day 8+
+**注意是 `upload_id` 不是 `doc_id`**——`documents.doc_id` 是 Postgres 自增列,要等
 消费者真正执行 `INSERT` 才会产生,上传这一刻还不存在,不可能提前塞进消息里。
 
 `contentKind`/`docType`/`tableType`/`source` 在 Java 代码里是枚举(`upload/` 包下的
@@ -112,7 +112,7 @@ Jackson 2 的受检异常(`extends IOException`)变成了非受检异常。
 `"SOP"`),枚举只让 Java 这一侧更安全,不改变线上的消息格式,也不会自动跟数据库
 的 CHECK 约束或 Python 那边保持同步——这三处仍然要靠人记得同时改。
 
-**失败语义**(Day 7 实测补的):
+**失败语义**(都实测过):
 - 参数不合法 → `400` + 具体原因
 - Kafka 不可用/topic 不存在 → `503`,约 5 秒内返回(producer 配了 `max.block.ms` 等超时),
   **已存盘的文件会被清理**,不留孤儿
@@ -152,11 +152,11 @@ curl -X POST http://localhost:8081/documents/upload \
 - Spring Boot 4 的测试类换了包:`@WebMvcTest` 在 `org.springframework.boot.webmvc.test.autoconfigure`,`@MockBean` 已被 `@MockitoBean` 取代,JUnit 是 6.x——别照抄 Boot 3 时代的教程
 - **变异验证过**:故意把 5 个 bug 改回去(catch 错异常类型 / 不清理孤儿文件 / 不恢复中断标志 / 超时也删文件 / 误删 `@JsonValue`),每个都被对应的测试抓到变红。没见过它失败的测试,不能证明它有用
 
-## 计划中的接口
+## 接口一览
 
-| 接口 | 天 | 说明 |
+| 接口 | 状态 | 说明 |
 |---|---|---|
-| `GET /actuator/health` | 4 | 健康检查 |
-| `POST /documents/upload` | 6 ✅ | 上传文件 → 存盘 → 发 Kafka `document-upload-events` |
-| `POST /query` | 13 | 转发给 llm-service /query(带 `X-User-Id`) |
-| 结构化数据只读接口 | 5+ | campaigns / campaign_metrics / anchors 查询(给前端看板用,可选) |
+| `GET /health`、`GET /actuator/health` | 已实现 | 健康检查 |
+| `POST /documents/upload` | 已实现 | 上传文件 → 存盘 → 发 Kafka `document-upload-events` |
+| `POST /query` | 规划中 | 转发给 llm-service /query(带 `X-User-Id`) |
+| 结构化数据只读接口 | 规划中 | campaigns / campaign_metrics / anchors 查询(给前端看板用,可选) |

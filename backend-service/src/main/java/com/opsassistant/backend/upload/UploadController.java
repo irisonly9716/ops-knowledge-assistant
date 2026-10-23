@@ -30,7 +30,7 @@ import tools.jackson.core.JacksonException;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Day 6:上传接口 + Kafka 生产者。对应 docs/architecture.md 里"两条摄入管道共用一个
+ * 上传接口 + Kafka 生产者。对应 docs/architecture.md 里"两条摄入管道共用一个
  * topic"的设计——文档类(SOP/策划案/复盘)和结构化表格类(商品表/顾客行为表)
  * 都走这一个接口,靠 contentKind 字段告诉 llm-service 消费者该怎么处理。
  *

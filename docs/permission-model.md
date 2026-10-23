@@ -1,11 +1,11 @@
 # 部门权限模型
 
-> 大纲把权限放在 Day 21,但 `department` 字段和 `users` 表要在 **Day 5 设计 schema 时就埋进去**,
+> 权限检查可以最后接入,但 `department` 字段和 `users` 表必须在 **设计 schema 时就埋进去**,
 > 否则向量表、Text-to-SQL、检索 filter 都要返工。这份文档先把规则定清楚。
 
 ## 1. 谁在提问 —— 用户身份
 
-大纲没有登录模块。portfolio 项目用最轻量的方式:
+本项目不做登录模块,用最轻量的方式:
 
 - 建 `users` 表:`user_id, name, department_id, role`
 - 请求头带 `X-User-Id`,backend 据此查出 `department_id` 和 `role`,转发给 llm-service
@@ -27,7 +27,7 @@
 - LLM 生成 SQL 后,**在执行前**由代码强制拼上过滤条件,不靠 LLM 自觉:
   - `role = staff` → `WHERE department_id = :current_dept`(或 `AND` 进已有 WHERE)
   - `role in (manager, admin)` → 不加
-- 同时保留大纲 Day 16 的安全限制:只允许 `SELECT`,拒绝 `DROP` / `DELETE` / `UPDATE` / `INSERT`
+- 同时保留 SQL 的安全限制:只允许 `SELECT`,拒绝 `DROP` / `DELETE` / `UPDATE` / `INSERT`
 - 实现上建议:用 SQL 解析库(如 `sqlglot`)解析 AST,校验是纯 SELECT + 注入 department 谓词,比字符串拼接稳
 
 ## 3. 文档侧过滤(向量检索)
@@ -37,13 +37,13 @@
   - `role = staff` → `department IN (:current_dept, 'ALL')`
   - `role in (manager, admin)` → 不加(或 `department IN (所有部门, 'ALL')`)
 - SOP 文档在录入时(上传事件的消息体)就要带 `department`;通用流程填 `ALL`
-- **⚠️ 向量检索 + WHERE 过滤有个会"安静地少给结果"的坑(Day 7 实测)**:HNSW 是近似索引,
+- **⚠️ 向量检索 + WHERE 过滤有个会"安静地少给结果"的坑(实测)**:HNSW 是近似索引,
   它先按向量相似度取出一批候选(`hnsw.ef_search`,默认 40),**再**套 `WHERE department = ...`
   过滤。如果目标部门只占全部数据的 1%,这 40 个候选里大概率一条都不属于它——实测
   20000 行/100 个部门,要"部门 7 的 top 10",默认设置返回 **0 条**(不报错),打开
   `SET hnsw.iterative_scan = relaxed_order`(pgvector ≥ 0.8,本项目装的是 0.8.6)后返回 10 条,
   精确扫描(不走索引)也是 10 条。对权限过滤来说这不只是"召回率低",是**用户明明有权看的
-  文档查不出来**。应对办法(Day 11 写检索函数时选一个):
+  文档查不出来**。应对办法(写检索函数时选一个):
   1. 本项目 `doc_chunks` 只有几百~几千行,**直接不用 HNSW 索引、走精确扫描**,永远正确,
      且这个量级下速度完全够——索引是数据量大了才需要的优化,不是必需品
   2. 保留索引,检索前 `SET hnsw.iterative_scan = relaxed_order`
@@ -61,7 +61,7 @@
 | **A. 单一 owner 部门**(先用这个) | `campaigns.department_id` 只记主责部门 | 简单;跨部门协作的可见性靠 SOP 里写"找 X 部门协同" |
 | B. 多对多 | 加 `campaign_departments(campaign_id, department_id)` 关联表 | 更真实,但 SQL 过滤和 schema 都复杂一档 |
 
-## 5. 验收清单(对应大纲 Day 21)
+## 5. 验收清单
 
 - [ ] 换一个 `staff` 用户提"别的部门 campaign 的 GMV",拿不到数据 / 明确提示无权限
 - [ ] 同一个问题换 `admin` 用户,能拿到

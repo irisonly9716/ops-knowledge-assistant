@@ -1,39 +1,39 @@
-# ---- Day 1 需要的最小集 ----
+# ---- Web 服务 / 配置 ----
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic-settings==2.7.1
 python-dotenv==1.0.1
 
-# ---- Day 3  Kafka 收发验证(Day 8 真正的消费者服务也用它)----
+# ---- Kafka(消费者服务和调试脚本都用它)----
 confluent-kafka==2.6.1
 
-# ---- Day 5  造假数据 + 直连 Postgres ----
+# ---- 造假数据 + 直连 Postgres ----
 faker==33.1.0
 psycopg[binary]==3.2.3
 
-# ---- 测试(Day 7-8)----
+# ---- 测试 ----
 pytest==9.1.1
 httpx==0.28.1   # FastAPI 的 TestClient 依赖它
 
-# ---- 后面按天解开注释 ----
-# Day 9    文档解析 + chunking
+# ---- 后续功能用到时再解开注释 ----
+# 文档解析 + chunking
 # langchain==0.3.14
 # langchain-community==0.3.14
 # pypdf==5.1.0
 # python-docx==1.1.2
 # unstructured==0.16.11
 #
-# Day 10   embedding + LLM
+# embedding + LLM
 # openai==1.59.6
 # langchain-openai==0.2.14
 # 或本地模型: sentence-transformers==3.3.1
 #
-# Day 11   向量库(psycopg 已经在上面装了,这里再装 pgvector 的 Python 适配层)
+# 向量库(psycopg 已经在上面装了,这里再装 pgvector 的 Python 适配层)
 # pgvector==0.3.6
 # sqlalchemy==2.0.36
 #
-# Day 15   Text-to-SQL 安全校验
+# Text-to-SQL 安全校验
 # sqlglot==26.0.1
 #
-# Day 19/20 Redis
+# Redis 缓存 / 会话记忆
 # redis==5.2.1

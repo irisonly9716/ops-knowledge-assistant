@@ -1,6 +1,6 @@
 # SOP 文档
 
-Day 5 手写的模拟 SOP,markdown 格式,Day 6+ 起会被 Kafka 消费者读取、解析、切片、
+手写的模拟 SOP,markdown 格式,会被 Kafka 消费者读取、解析、切片、
 生成 embedding,最终存进 `documents`(`doc_type='sop'`)+ `doc_chunks` 表(见 `docs/data-schema.md`)。
 
 `documents` 表还有 `campaign_plan`(策划案)/ `campaign_review`(复盘,含 ROI 等结果数据)

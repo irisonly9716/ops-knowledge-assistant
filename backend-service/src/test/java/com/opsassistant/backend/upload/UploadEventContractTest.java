@@ -17,7 +17,7 @@ import tools.jackson.databind.json.JsonMapper;
  *     (字段名、枚举的小写写法、null 的显式出现)——保证 Java 发出去的就是契约规定的样子
  *   - Python 侧(llm-service/tests/test_events.py):同一批样例必须能被 pydantic 模型解析
  * 任何一边悄悄改了格式(改字段名、枚举值大小写),这份文件对不上,对应那一边的测试就红。
- * 这比"各写各的、靠人记得同步"可靠——Day 6 的 path 字段就是这样悄悄成了坑。
+ * 这比"各写各的、靠人记得同步"可靠——早期的 path 字段就是这样悄悄成了坑。
  */
 class UploadEventContractTest {
 
