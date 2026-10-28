@@ -1,7 +1,7 @@
 # 数据表设计
 
-> 真正的 DDL 在 [sql/02_schema.sql](../sql/02_schema.sql)(这份文档是它的说明,
-> 字段类型以 SQL 文件为准)。不接真实阿里数据,用 Python + Faker 生成模拟数据
+> 真正的 DDL 在 [db/migration/](../db/migration/) 下的 Flyway 迁移文件里,按版本号顺序执行
+> (这份文档是它们的说明,字段类型以 SQL 文件为准)。不接真实阿里数据,用 Python + Faker 生成模拟数据
 > (见 `llm-service/scripts/generate_mock_data.py`)。
 
 ## 结构化业务表
@@ -17,8 +17,8 @@
 |---|---|---|
 | user_id | bigserial PK | |
 | name | text | |
-| department_id | bigint FK → departments | 该员工所属部门 |
-| role | text | `staff` / `manager` / `admin` |
+| department_id | bigint FK → departments,可空 | 该员工所属部门。`executive` 和 `admin` 不属于任何运营部门,必须为空;`staff` 和 `manager` 必须有(CHECK 约束强制) |
+| role | text | `staff` / `manager` / `executive` / `admin`,各自能做什么见 [permission-model.md](permission-model.md) |
 
 > 没有"主播组"这一层。1000 人 / 10 部门 / 5 组 / 组 20 人的规模假设隐含了组这级组织架构,
 > 讨论过要不要加,决定先不加——组本身、组内权限都先不做,部门这一级权限先跑通再说。
@@ -143,7 +143,8 @@ Excel/CSV 之类),跟下面 `documents`(非结构化文字)是两条不同的摄
 ### documents(原名 sop_documents)
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| doc_id | bigserial PK | |
+| doc_id | bigserial PK | 覆盖新版本时不变(原地更新这一行、重建 chunk),所以引用和 eval 标注不会失效 |
+| upload_id | uuid unique FK → uploads | 产生当前版本的那次上传 |
 | doc_type | text | `sop` / `campaign_plan` / `campaign_review` |
 | title | text | 如 "风控问题处理流程" |
 | department | text | 部门名 或 `ALL`(仅 `sop` 可用)——非外键,原因见下 |
@@ -153,6 +154,12 @@ Excel/CSV 之类),跟下面 `documents`(非结构化文字)是两条不同的摄
 | responsible_team | text | 主责/协同团队 |
 | source_path | text | 原始文件路径 |
 | created_at | timestamptz | |
+
+**自然键**(认定"同一份文档",重传时按它判断是新建还是覆盖):
+- 策划案 / 复盘:`(campaign_id, doc_type)` 唯一,一场活动每种只有一份。`sop` 的 `campaign_id` 是 NULL,
+  唯一约束里 NULL 和 NULL 不算相等,所以这条约束只管活动文档。
+- SOP:同一 `department`(或 `ALL`)下标题唯一,按规范化后的标题比较(NFKC 全角转半角 + 去首尾空格 + 小写),
+  所以 `"　风控问题处理流程 "` 和 `"风控问题处理流程"` 算同一份。表里存的仍是原标题。
 
 `department` 是 TEXT 不是外键:要支持 `'ALL'` 这个哨兵值,这不是 `departments` 表里的一条真实记录
 (代价:部门改名要手动同步这里,量小可接受)。`campaign_plan`/`campaign_review` 类型的
@@ -172,28 +179,56 @@ Excel/CSV 之类),跟下面 `documents`(非结构化文字)是两条不同的摄
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | chunk_id | bigserial PK | |
-| doc_id | bigint FK → documents | |
-| chunk_index | int | 第几片 |
+| doc_id | bigint not null | 跟 `department` 一起构成指向 documents 的复合外键 |
+| department | text | **有意的冗余**:检索和 RLS 直接按这一列过滤,不用 JOIN |
+| chunk_index | int | 第几片,`(doc_id, chunk_index)` 唯一 |
 | content | text | 切片正文 |
 | embedding | vector(1536) | 维度跟 embedding 模型对齐(text-embedding-3-small = 1536) |
-| metadata | jsonb | `{department, category, source_doc, title, doc_type, campaign_id}` —— 检索时按 department/doc_type/campaign 过滤,不用 join |
+| embedding_model | text | 生成这条向量的模型。只能区分同维度的模型;换不同维度的模型要另加列或另建表 |
+| metadata | jsonb | `{category, source_doc, title, doc_type, campaign_id}` 等其余检索信息 |
 
-建索引:`CREATE INDEX ON doc_chunks USING hnsw (embedding vector_cosine_ops);`
+冗余的 `department` 靠**复合外键**保证不出错:`(doc_id, department)` 引用 `documents(doc_id, department)`,
+所以 chunk 的部门只能等于所属文档的部门,写错了数据库直接拒绝。`ON UPDATE CASCADE`:文档改部门时
+chunk 自动跟着改;`ON DELETE CASCADE`:删文档时 chunk 一起删。
 
-### doc_ingest_status(处理状态)
+索引:`embedding` 上的 HNSW(`vector_cosine_ops`)、`department` 上的普通索引(小部门走精确扫描时先按部门筛)。
+
+### uploads(上传记录 + 处理状态)
+每次上传一行。后端收到上传时先写 `received`(需要审批的写 `pending_approval`),再发 Kafka;
+消费者处理时更新状态。两条管道(文档、数据表)共用。
+
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| doc_id | bigint PK → documents | |
-| status | text | uploading / processing / done / failed |
+| upload_id | uuid PK | 跟 Kafka 消息里的 `uploadId` 是同一个值,也是消费者做幂等的依据 |
+| source | text | `manual` / `auto` |
+| uploaded_by | bigint FK → users,可空 | 人工上传必填,自动同步为空(CHECK 约束强制) |
+| content_kind / doc_type / table_type | text | 跟消息契约同一套取值和组合规则 |
+| department | text | 部门名,或 `ALL`(仅 `sop`) |
+| campaign_id | bigint FK → campaigns,可空 | 活动文档和数据表必填 |
+| title | text | `sop` 必填(自然键的一部分);活动文档的标题由系统生成 |
+| original_filename / storage_key | text | 原始文件名 / 存储位置(`storage_key` 唯一) |
+| replaces_upload_id | uuid FK → uploads,可空 | 要覆盖的当前版本是哪次上传产生的,为空表示新建 |
+| status | text | `pending_approval` / `received` / `processing` / `done` / `failed` / `rejected` |
 | error | text | 失败原因 |
-| updated_at | timestamptz | |
+| reviewed_by / reviewed_at / review_comment | | 审批人、审批时间、审批意见。审批人不能是上传人(CHECK 约束强制) |
+| created_at / updated_at | timestamptz | |
 
-> 也可以只用 Redis 存 `doc:{id}:status`,落库的好处是能查历史。
+```
+不需要审批:                     received -> processing -> done / failed
+需要审批:pending_approval --批准--> received -> processing -> done / failed
+                          --拒绝--> rejected
+```
+
+执行覆盖时再核对一次"当前版本还是不是 `replaces_upload_id`":不是的话说明审批期间已被别人覆盖,
+这次申请作废(乐观并发控制)。
+
+> 取代了早期的 `doc_ingest_status`:它以 `doc_id` 为主键,文档写库之前还没有 `doc_id`,
+> 数据表上传根本不产生文档,两种情况都记不了。
 
 ## 模拟数据规模(已生成)
 
 - 4 个部门(美妆运营 / 3C数码运营 / 食品生鲜运营 / 日用百货运营)
-- 24 个用户(1 admin,4 manager,19 staff)
+- 25 个用户(4 manager,19 staff,1 executive,1 admin;后两个不属于任何部门)
 - 15 个主播(每部门 3-5 个)
 - 47 个 campaign(每部门 10-15 个,每个 15-60 天的 metrics,共 1700+ 条指标记录;运营成本已校准到 GMV 的 10%-20%)
 - 202 条 campaign_products(含成本价/利润/利润率,销售额已校准到不超过所属 campaign 的 GMV),1200 条 campaign_customer_behavior

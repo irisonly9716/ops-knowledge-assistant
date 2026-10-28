@@ -27,7 +27,10 @@ from psycopg.types.json import Jsonb
 from app.config import settings
 
 fake = Faker("zh_CN")
-random.seed(42)  # 固定随机种子:每次跑生成的数据都一样,方便调试和复现问题
+# 固定 random 的种子:数量、金额、粉丝数、活动名、主播分配这些每次都一样。
+# 已知问题:主播名字和各种日期来自 Faker。Faker 用自己的随机数生成器,没有设种子,
+# 而且日期是相对"今天"算的,所以这两类值每次运行都不一样。
+random.seed(42)
 
 # 部门名字是业务领域知识,Faker 编不出来,手写固定列表——
 # 这几个名字后面 sop_docs/ 里的 SOP 文档、以及策划案/复盘文档也会用到,必须
@@ -66,7 +69,9 @@ def main():
     with connect() as conn:
         with conn.cursor() as cur:
             # RESTART IDENTITY:自增 id 也归零,重跑几次 id 都从 1 开始,不会越跑越大
-            # CASCADE:department 被 users/anchors/campaigns 外键引用,级联清空
+            # CASCADE:department 被 users/anchors/campaigns 外键引用,级联清空。
+            #   注意它会顺着外键一路清下去:uploads(引用 users)、documents 和 doc_chunks
+            #   (引用 campaigns / uploads)也会被清空,已经入库的文档要重新上传
             cur.execute("""
                 TRUNCATE departments, users, anchors, campaigns, campaign_metrics,
                          campaign_products, campaign_customer_behavior
@@ -82,8 +87,7 @@ def main():
                 )
                 dept_ids[name] = cur.fetchone()[0]
 
-            # ---- users:每个部门 5-8 人,一个 manager,其余 staff;
-            #      第一个部门额外插一个 admin,用来测试"admin 能看全部部门" ----
+            # ---- users:每个部门 5-8 人,一个 manager,其余 staff ----
             for dept_name, dept_id in dept_ids.items():
                 n_staff = random.randint(4, 7)
                 cur.execute(
@@ -94,10 +98,13 @@ def main():
                     "INSERT INTO users (name, department_id, role) VALUES (%s, %s, 'staff')",
                     [(fake.name(), dept_id) for _ in range(n_staff)],
                 )
-            first_dept_id = next(iter(dept_ids.values()))
-            cur.execute(
-                "INSERT INTO users (name, department_id, role) VALUES (%s, %s, 'admin')",
-                ("系统管理员", first_dept_id),
+            # 不属于任何运营部门的两个角色(department_id 为空,见 docs/permission-model.md):
+            #   admin     系统管理员:能看全部、做系统维护,但不改任何业务内容
+            #   executive 创始人/CEO:能看全部、审批经理的申请,但从不上传
+            # 名字写死:两个固定的特殊账号,一眼能认出来;也不调用 random,不会打乱后面的随机序列
+            cur.executemany(
+                "INSERT INTO users (name, department_id, role) VALUES (%s, NULL, %s)",
+                [("系统管理员", "admin"), ("创始人兼CEO", "executive")],
             )
 
             # ---- anchors:每个部门 3-5 个,记下 anchor_id 给 campaigns 用 ----

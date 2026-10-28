@@ -86,6 +86,6 @@ uv run pytest        # pytest / httpx 已在 requirements.txt 里,不用另装
 ```
 
 全部用假的 Consumer/Producer/sleep,不需要 Kafka 在跑,不真等退避时间。
-`test_events.py` 里有个跨语言漂移检测:直接解析 `sql/02_schema.sql`,断言 `DocType` 枚举跟
-`documents.doc_type` 的 CHECK 约束一致——有人改了 SQL 忘了改 Python,测试会红。
+`test_events.py` 里有跨语言漂移检测:按版本顺序读 `db/migration/` 下的迁移文件,断言
+`DocType` / `TableType` / `ContentKind` / `Source` 枚举跟对应的 CHECK 约束一致——有人改了 SQL 忘了改 Python,测试会红。
 另有一个 Windows 上会被跳过的测试(符号链接需要管理员权限),属正常。

@@ -1,8 +1,7 @@
 -- ============================================================================
---  02_schema.sql —— 正式建表(对应 docs/data-schema.md)
---  只在 Postgres 容器"第一次创建数据库"时自动跑一次(挂在 /docker-entrypoint-initdb.d,
---  按文件名顺序排在 01_init.sql 后面执行,所以这里能放心用 vector 类型)。
---  改了这个文件想让它重新生效:docker compose down -v 再 up。
+--  V2 —— 初始建表(对应 docs/data-schema.md)
+--  排在 V1 之后执行,所以这里能放心用 vector 类型。之后的表结构变更都在
+--  V3 及以后的迁移里,这个文件本身不再修改。
 --
 --  主键都用 BIGSERIAL(64 位自增),是为了跟 backend-service 里 Department 实体
 --  用 Long + GenerationType.IDENTITY 的映射对齐——Hibernate 的 ddl-auto: validate
@@ -207,5 +206,3 @@ CREATE TABLE doc_ingest_status (
     error           TEXT,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
-SELECT 'schema ready' AS status;

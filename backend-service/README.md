@@ -144,7 +144,7 @@ curl -X POST http://localhost:8081/documents/upload \
 | `UploadEnumsTest`(13) | 纯单元 | 枚举的 `fromValue`(拼错/大小写/null)、`needsCampaign`、**JSON 线上格式必须小写**(`@JsonValue`) |
 | `UploadControllerTest`(25) | `@WebMvcTest` 切片 | 成功路径(含实际发出去的 JSON)、10 种参数错误各自返回 400 + 具体原因 + **零副作用**、4 个 Kafka 故障回归测试、恶意文件名不能逃出上传目录、`sanitizeFilename` 的 7 种输入 |
 | `UploadEventContractTest`(1) | 契约 | `contracts/upload-event.examples.json` 里每条样例经 Java 反序列化再序列化,必须与原文一致 |
-| `BackendServiceApplicationTests`(1) | 集成,`@Tag("integration")` | 完整容器 + 真实 Postgres;因为 `ddl-auto: validate`,它同时检测 **Entity 是否跟 `02_schema.sql` 漂移** |
+| `BackendServiceApplicationTests`(1) | 集成,`@Tag("integration")` | 完整容器 + 真实 Postgres;因为 `ddl-auto: validate`,它同时检测 **Entity 是否跟 `db/migration/` 的迁移漂移** |
 
 要点:
 - `@WebMvcTest` 只加载 Web 层,Kafka / 两个 Repository 用 `@MockitoBean` 换成假的——这样才能**按需让 Kafka 出故障**(真 Kafka 做不到"恰好在这一刻抛某个异常")

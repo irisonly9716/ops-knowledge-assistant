@@ -4,9 +4,9 @@
 另一半是 Java 的 UploadEvent.java,共同的事实来源是仓库根目录的
 contracts/upload-event.examples.json——两边的测试都对着这份文件验证,见 tests/test_events.py。
 
-下面几个枚举的取值必须跟三个地方保持一致:Java 的枚举、sql/02_schema.sql 里的 CHECK 约束、
-这里。"同一份事实,三种语言各存一份"迟早漂移,所以 tests/test_events.py 里有一个测试
-直接解析 sql/02_schema.sql,对比这里的取值——有人改了 SQL 忘了改这里,测试会红。
+下面几个枚举的取值必须跟三个地方保持一致:Java 的枚举、db/migration/ 里的 CHECK 约束、
+这里。"同一份事实,三种语言各存一份"迟早漂移,所以 tests/test_events.py 里有测试
+直接解析 db/migration/ 下的迁移文件,对比这里的取值——有人改了 SQL 忘了改这里,测试会红。
 """
 from enum import StrEnum
 

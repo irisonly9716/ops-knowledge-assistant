@@ -3,7 +3,7 @@ package com.opsassistant.backend.upload;
 import com.fasterxml.jackson.annotation.JsonValue;
 
 /**
- * 对应 sql/02_schema.sql 里 documents.doc_type 的 CHECK 约束
+ * 对应 db/migration/ 里 documents.doc_type 和 uploads.doc_type 的 CHECK 约束
  * (IN ('sop','campaign_plan','campaign_review'))——这三个值必须跟那条约束
  * 完全一致,改数据库的约束时记得回来改这里,反过来也一样,枚举不会替你自动同步。
  */

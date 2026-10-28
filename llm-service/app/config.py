@@ -38,7 +38,9 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     embedding_model: str = "text-embedding-3-small"
-    chat_model: str = "gpt-4o-mini"
+    # 默认用最便宜的一档。按任务换更强的模型(SQL 生成、出策划建议、eval 评审)时,
+    # 用 eval 的准确率、延迟、成本来决定,不按版本号选
+    chat_model: str = "gpt-6-luna"
 
     llm_service_port: int = 8000
 

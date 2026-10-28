@@ -146,11 +146,11 @@ ops-knowledge-assistant/
 ├── backend-service/   # Spring Boot: REST API, uploads, Kafka producer
 ├── llm-service/       # Python: Kafka consumer, RAG, Text-to-SQL, routing, memory
 ├── contracts/         # cross-service message contract (validated by both test suites)
-├── sql/               # database schema (PostgreSQL + pgvector)
+├── db/migration/      # versioned schema migrations (Flyway, PostgreSQL + pgvector)
 ├── sop_docs/          # sample SOP documents
 ├── campaign_docs/     # sample campaign plans and post-mortems
 ├── docs/              # architecture, data schema, permission model
-└── docker-compose.yml # Postgres+pgvector, Redis, Kafka, Kafka UI
+└── docker-compose.yml # Postgres+pgvector, Flyway, Redis, Kafka, Kafka UI
 ```
 
 Sample documents and the design notes under `docs/` are written in Chinese, since the target users are Chinese-speaking operations teams. Local setup instructions are in [docs/development.md](docs/development.md).

@@ -2,7 +2,7 @@ package com.opsassistant.backend.upload;
 
 import com.fasterxml.jackson.annotation.JsonValue;
 
-/** 运营上传的结构化表格,对应 sql/02_schema.sql 里的两张表。 */
+/** 运营上传的结构化表格,对应 db/migration/ 里建的两张表。 */
 public enum TableType {
     CAMPAIGN_PRODUCTS("campaign_products"),
     CAMPAIGN_CUSTOMER_BEHAVIOR("campaign_customer_behavior");
