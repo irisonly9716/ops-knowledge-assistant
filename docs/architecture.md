@@ -66,7 +66,7 @@ async 事件循环是两种性质的活;生命周期独立(web 重启不打断�
       ▼
   llm-service Kafka consumer
       │  1. 下载/读取文件
-      │  2. 解析(PDF / Markdown / Word)
+      │  2. 解析(Markdown / docx / 数字版 PDF → 标题、段落、列表项、表格)
       │  3. chunking(RecursiveCharacterTextSplitter)
       │  4. embedding(每个 chunk 一个向量)
       │  5. 写入 Postgres: INSERT documents(此时才产生真正的 doc_id)+ doc_chunks
@@ -139,6 +139,7 @@ backend /query ──转发──▶ llm-service /query
 ## 关键设计取舍
 
 - **为什么 llm-service 用 Kafka 消费而不是 backend 直接 HTTP 调**:解析 + embedding 可能几秒到几十秒,上传接口不能被拖住;失败要能重试;未来自动化 producer 也能复用。
+- **为什么文档解析不用 Unstructured,而是每种格式一个小库**(markdown-it-py / python-docx / pdfplumber,放在同一个 `DocumentParser` 接口后面):在同一批样例上实测过。`unstructured` 不带任何格式支持就装了 372 MB(spaCy、numba),加上 PDF 支持是 1.5 GB(torch、OpenCV),而快速模式的 PDF 解析根本用不到这些;解析时还会从 GitHub 下载一个英文 spaCy 模型,拿来判断"这行是标题还是正文",对中文文档意义不大。效果上,它在 PDF 里分不出标题级别,把标题判成正文、正文判成标题,表格拆成几十个零散片段;Markdown 的嵌套列表也被压平。三个小库一共 54 MB,PDF 的结构推断规则是自己写的,三种格式解析出同样的结构(测试覆盖)。以后要支持扫描件,在同一个接口后面加一个 OCR 实现(比如 Amazon Textract)。
 - **为什么向量和结构化数据都放 Postgres**:少一个中间件要运维,`doc_chunks` 和业务表能在同一事务/同一连接里查。
 - **为什么权限在 schema 层就埋 `department`**:如果等到最后才加,向量表、SQL 生成、检索 filter 全要返工。见 [permission-model.md](permission-model.md)。
 - **为什么"文档"和"结构化表格"两种上传共用一个 topic,不是分开两个**:两者的消息形状(`upload_id`/`storage_key`/`department`)本来就大部分重合,分流靠 payload 里一个 `content_kind` 字段 + consumer 内部 if/else 就够了;拆成两个 topic 除了多一次创建/多一份配置,没有实际好处。原则是:topic 该按*语义上不同的事件种类*拆,不该为了图代码分支清晰而拆。

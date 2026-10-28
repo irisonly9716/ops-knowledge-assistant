@@ -43,11 +43,32 @@ app/
 │   ├── handlers.py          收到合法事件后具体干什么(解析/切片/向量化/入库逐步往里加)
 │   └── errors.py            PermanentError:重试无意义的错误,直接进死信
 ├── rag/           解析 / chunk / embed / 检索 / 问答
+│   ├── parsing/             Markdown / docx / PDF -> 统一的带类型元素(标题、段落、列表项、表格)
+│   └── embeddings.py        Embedder 接口 + OpenAI 实现
 ├── sql_agent/     Text-to-SQL + 安全校验 + 行级过滤
 ├── router/        查询路由 + 综合回答
 └── memory/        Redis 缓存 + 会话记忆
 tests/             pytest;test_events(契约/跨语言漂移) test_storage(路径穿越)
                    test_upload_consumer(消费循环所有分支) test_health
+                   test_embeddings(假的 OpenAI 客户端) test_parsing(三种格式解析结果一致)
+tests/fixtures/documents/   docx / PDF 样例,由 scripts/make_sample_documents.py 从 Markdown 生成
+```
+
+## 文档解析
+
+`app.rag.parsing.parse_file(path)` 按扩展名选解析器(`.md` / `.docx` / `.pdf`),输出一串元素:
+类型(标题 / 段落 / 列表项 / 表格)、级别、所在的标题路径,PDF 还带页码。后面的切块只认这些元素,
+不关心原文件是什么格式。
+
+- **Markdown**(markdown-it-py)、**docx**(python-docx):格式本身有结构,直接读
+- **PDF**(pdfplumber):只有"在什么位置用多大的字画了什么",结构靠字号、缩进、行距推断。
+  只支持有文字层的数字版 PDF;扫描件会报错(需要 OCR)
+- 文件坏了、格式不支持、编码不对、PDF 没有文字层 → `DocumentParseError`,重试也没用
+
+样例的 Markdown 改了之后要重新生成 docx / PDF(需要 Windows + Word 或 WPS):
+
+```bash
+uv run python -m scripts.make_sample_documents
 ```
 
 ## 跑消费者
