@@ -1,236 +1,259 @@
-# 数据表设计
+# Data schema
 
-> 真正的 DDL 在 [db/migration/](../db/migration/) 下的 Flyway 迁移文件里,按版本号顺序执行
-> (这份文档是它们的说明,字段类型以 SQL 文件为准)。不接真实阿里数据,用 Python + Faker 生成模拟数据
-> (见 `llm-service/scripts/generate_mock_data.py`)。
+> The actual DDL lives in the Flyway migrations under [db/migration/](../db/migration/), applied in
+> version order (this document explains them; the SQL files are authoritative for column types).
+> The data is mock data generated with Python + Faker (see `llm-service/scripts/generate_mock_data.py`).
 
-## 结构化业务表
+## Structured business tables
 
 ### departments
-| 字段 | 类型 | 说明 |
+| Column | Type | Notes |
 |---|---|---|
 | department_id | bigserial PK | |
-| name | text unique | 如 "美妆运营" "3C数码运营" "食品生鲜运营" "日用百货运营" |
+| name | text unique | e.g. "Beauty", "Consumer Electronics", "Fresh Grocery", "Home Goods" |
 
 ### users
-| 字段 | 类型 | 说明 |
+| Column | Type | Notes |
 |---|---|---|
 | user_id | bigserial PK | |
 | name | text | |
-| department_id | bigint FK → departments,可空 | 该员工所属部门。`executive` 和 `admin` 不属于任何运营部门,必须为空;`staff` 和 `manager` 必须有(CHECK 约束强制) |
-| role | text | `staff` / `manager` / `executive` / `admin`,各自能做什么见 [permission-model.md](permission-model.md) |
+| department_id | bigint FK → departments, nullable | The employee's department. `executive` and `admin` belong to no ops department and must be NULL; `staff` and `manager` must have one (enforced by a CHECK constraint) |
+| role | text | `staff` / `manager` / `executive` / `admin`; what each can do: [permission-model.md](permission-model.md) |
 
-> 没有"主播组"这一层。1000 人 / 10 部门 / 5 组 / 组 20 人的规模假设隐含了组这级组织架构,
-> 讨论过要不要加,决定先不加——组本身、组内权限都先不做,部门这一级权限先跑通再说。
+> There is no "host team" level. The assumed scale (1,000 people / 10 departments / 5 teams of 20)
+> implies a team level in the org chart; it was considered and left out. Teams and team-level
+> permissions come after department-level permissions work.
 
-### anchors(主播)
-| 字段 | 类型 | 说明 |
+### hosts (livestream hosts)
+| Column | Type | Notes |
 |---|---|---|
-| anchor_id | bigserial PK | |
+| host_id | bigserial PK | |
 | name | text | |
-| department_id | bigint FK | 归属部门 |
-| category | text | 带货类目 |
+| department_id | bigint FK | owning department |
+| category | text | product category the host sells |
 | fans_count | int | |
 | join_date | date | |
 
-### campaigns(活动)
-| 字段 | 类型 | 说明 |
+### campaigns
+| Column | Type | Notes |
 |---|---|---|
 | campaign_id | bigserial PK | |
-| name | text | |
-| department_id | bigint FK | **主责部门 —— 权限过滤基准** |
-| anchor_id | bigint FK → anchors | **主责主播**(简化:一个 campaign 记一个主播,不处理多主播联播) |
-| category | text | 如 "大促" "新品首发" "日常" |
+| name | text | e.g. "Beauty Black Friday Live" |
+| department_id | bigint FK | **owning department -- the basis of permission filtering** |
+| host_id | bigint FK → hosts | **lead host** (simplification: one host per campaign, co-hosted streams are not modeled) |
+| category | text | the department's product category |
 | start_date | date | |
 | end_date | date | |
 | status | text | planned / running / finished |
-| has_plan_doc | boolean | 有没有策划案文档,默认 false |
-| has_review_doc | boolean | 有没有复盘文档,默认 false |
-| planned_operating_cost | numeric | 计划运营成本(坑位费+推广+赠品,不含商品成本),策划阶段就能填 |
-| actual_operating_cost | numeric | 实际运营成本,只有活动结束、账单到齐才填得出,可以为空 |
+| has_plan_doc | boolean | whether a campaign plan exists, default false |
+| has_review_doc | boolean | whether a post-campaign review exists, default false |
+| planned_operating_cost | numeric | planned operating cost (placement fees + promotion + giveaways, no product cost); known at planning time |
+| actual_operating_cost | numeric | actual operating cost; only known once the campaign is over and the invoices are in, so it may be NULL |
 
-**ROI 怎么算**(踩过两次坑才定下来的公式,记录一下避免以后又算错):
+**How ROI is computed** (the formula took two corrections; written down so it doesn't go wrong again):
 
 ```
 ROI = SUM(campaign_products.profit) / campaigns.actual_operating_cost
 ```
 
-- 分子是 `campaign_products.profit` 的汇总——这个字段**已经扣过商品成本**了(利润 = 销售额 - 成本价×销量),不能再在分母里重复扣一次商品成本
-- 分母只用**运营成本**(这场活动"额外花的营销投入"),不包含商品成本——商品成本是做生意本来就要花的钱,不是这场活动新增的投入,ROI 问的是"这笔营销投入划不划算",不是"整个生意划不划算"
-- 计划成本 vs 实际成本分开存,是因为活动结束后账单和预算总会有出入(mock 数据里两者故意不完全相等)
-`has_plan_doc`/`has_review_doc` 是**效率优化,不是权威数据源**——真相永远是"`documents`
-表里存不存在这个 `campaign_id` 对应 `doc_type` 的一行"。这两个字段只是让路由逻辑在
-决定要不要做一次向量检索之前,先用一次便宜的查询判断"根本没有文档,不用检索了"。
-代价:摄入代码插入 `documents` 行时,必须记得同步更新这两个字段,这是主动
-接受的冗余,不是疏忽。
+- The numerator sums `campaign_products.profit`, which **already deducts product cost**
+  (profit = sales - unit cost × units sold); product cost must not be deducted again in the denominator
+- The denominator is **operating cost only** (the extra marketing spend of this campaign), without
+  product cost. Product cost is what doing business costs anyway, not new spend for this campaign;
+  ROI asks "was this marketing spend worth it", not "is the whole business worth it"
+- Planned and actual cost are stored separately because invoices never match the budget exactly
+  (the mock data makes them differ on purpose)
 
-### campaign_metrics(活动指标,按天)
+`has_plan_doc` / `has_review_doc` are **a shortcut, not the source of truth**: the truth is whether
+`documents` has a row with this `campaign_id` and `doc_type`. The flags only let the router answer
+"there is no document at all, skip the search" with one cheap query before deciding on a vector
+search. Cost: ingestion must update them whenever it inserts `documents` rows. The redundancy is
+deliberate, not an oversight.
 
-只放"干净的、系统自己就能拿到的数字"。ROI、商品级拆解、成因分析这些需要判断/归因的内容
-**不放在这里**——那些是"内容",走 `documents` 表(`campaign_review` 类型)的 RAG 链路。
+### campaign_metrics (daily campaign metrics)
 
-| 字段 | 类型 | 说明 |
+Only clean numbers the system can get directly. ROI, per-product breakdowns and root-cause analysis
+need judgment and **do not belong here**: they are content and go through the RAG pipeline of the
+`documents` table (`campaign_review` documents).
+
+| Column | Type | Notes |
 |---|---|---|
 | id | bigserial PK | |
 | campaign_id | bigint FK → campaigns | |
 | date | date | |
-| gmv | numeric | 成交额 |
+| gmv | numeric | gross merchandise value |
 | dau | int | |
-| watch_time | numeric | 平均观看时长(分钟) |
-| conversion_rate | numeric | 转化率 |
-| peak_concurrent_viewers | int | 当天场次在线人数峰值 |
-| avg_dwell_time_minutes | numeric | 当天场次人均停留时长(分钟) |
+| watch_time | numeric | average watch time (minutes) |
+| conversion_rate | numeric | |
+| peak_concurrent_viewers | int | peak concurrent viewers that day |
+| avg_dwell_time_minutes | numeric | average minutes a viewer stayed that day |
 
-> 部门过滤走 `campaign_metrics JOIN campaigns ON ... WHERE campaigns.department_id = :dept`
+> Department filtering: `campaign_metrics JOIN campaigns ON ... WHERE campaigns.department_id = :dept`
 
-### campaign_products(商品维度售卖数据)—— 运营上传,不是我们计算的
+### campaign_products (per-product sales) -- uploaded by ops, not computed by us
 
-| 字段 | 类型 | 说明 |
+| Column | Type | Notes |
 |---|---|---|
 | id | bigserial PK | |
 | campaign_id | bigint FK → campaigns | |
-| product_name | text | 没建单独的商品目录表,先用文本存商品名(见下方"没选的做法") |
-| units_sold | int | 销量 |
-| sell_through_rate | numeric | 售出率 |
-| return_rate | numeric | 退货率 |
-| sales_amount | numeric | 销售额 |
-| click_through_rate | numeric | 点击率 |
-| cost_price | numeric | 单件成本价 |
-| profit | numeric | 这个商品在这场活动的利润总额 |
-| profit_margin | numeric | 利润率 |
+| product_name | text | no separate product catalog table; product names are stored as text for now |
+| units_sold | int | |
+| sell_through_rate | numeric | |
+| return_rate | numeric | |
+| sales_amount | numeric | |
+| click_through_rate | numeric | |
+| cost_price | numeric | unit cost |
+| profit | numeric | total profit of this product in this campaign |
+| profit_margin | numeric | |
 
-`cost_price`/`profit`/`profit_margin` 是后来补的:ROI 不能只拿 GMV 减一个笼统的
-"成本"就算,必须扣掉商品成本(`cost_price × units_sold` 汇总),这几个字段就是让
-"商品成本"变成结构化查询就能拿到的数字,不用在复盘文档里手动估算。这三个字段
-现实中应该跟其它几列一样,是运营上传的表格自带的(财务系统算好给的),不是
-我们自己计算再存进去的。
+`cost_price` / `profit` / `profit_margin` exist because ROI can't be GMV minus a vague "cost": product
+cost (`cost_price × units_sold`, summed) has to come off, and these columns make it a number a
+structured query can fetch instead of an estimate in a review document. In reality they would come
+with the uploaded table like the other columns (computed by the finance system), not be computed
+and stored by us.
 
-### campaign_customer_behavior(顾客行为数据)—— 运营上传,不是我们计算的
+### campaign_customer_behavior (customer behavior) -- uploaded by ops, not computed by us
 
-复购率这类"人群分析"结论,**不是我们自己算的**——现实场景里这本该是另一个团队
-(用户增长/数据中台)算好同步给我们的东西。但这张表存的是**原始的顾客-campaign
-行为记录**,不是"已经算好的复购率指标",好处是复购率这种问题以后想问,
-是一句普通 SQL(按 `customer_ref` 分组、数一下出现在几个不同 campaign 里),
-不需要额外建一套订单/交易系统去支撑计算。
+Audience conclusions such as repeat-purchase rate are **not ours to compute**: in reality another team
+(growth / data platform) computes and syncs them. But this table stores **raw customer-campaign
+behavior records**, not a precomputed repeat-purchase metric, so asking about repeat purchases later
+is one plain SQL query (group by `customer_ref`, count the distinct campaigns) with no order or
+transaction system behind it.
 
-| 字段 | 类型 | 说明 |
+| Column | Type | Notes |
 |---|---|---|
 | id | bigserial PK | |
 | campaign_id | bigint FK → campaigns | |
-| customer_ref | text | 匿名化顾客标识,不存真实姓名/手机号;建了索引方便跨 campaign 找同一顾客 |
+| customer_ref | text | anonymized customer ID, no real names or phone numbers; indexed to find one customer across campaigns |
 | region | text | |
-| dwell_time_minutes | numeric | 这个顾客在这场直播的停留时长 |
-| products_purchased | jsonb | 买了哪些商品,数组 |
+| dwell_time_minutes | numeric | how long this customer stayed in this livestream |
+| products_purchased | jsonb | array of purchased products |
 | purchase_amount | numeric | |
 | ip_address | text | |
 
-`campaign_products` / `campaign_customer_behavior` 是**结构化表格上传**(运营导出的
-Excel/CSV 之类),跟下面 `documents`(非结构化文字)是两条不同的摄入管道——前者解析后
-直接 `INSERT` 成行、走 Text-to-SQL 查询;后者要切片 + embedding、走 RAG 检索。
-见 [architecture.md](architecture.md) 的说明。
+`campaign_products` / `campaign_customer_behavior` are **structured table uploads** (Excel/CSV
+exports from ops), a different ingestion pipeline from `documents` (free text) below: the former are
+parsed straight into rows and queried with Text-to-SQL; the latter are chunked and embedded and
+retrieved with RAG. See [architecture.md](architecture.md).
 
-## 文档表(SOP / 策划案 / 复盘)
+## Document tables (SOP / campaign plan / post-campaign review)
 
-三种文档共用一张表,靠 `doc_type` 区分,因为它们走的是**同一条摄入管道**
-(上传 -> Kafka -> 解析 -> 切片 -> embedding),没必要分三张表、写三遍摄入逻辑。
+The three document types share one table and differ by `doc_type`, because they go through **the same
+ingestion pipeline** (upload -> Kafka -> parse -> chunk -> embed); three tables would mean three copies
+of the ingestion logic.
 
-| doc_type | 什么时候产生 | 内容 |
+| doc_type | When it is created | Content |
 |---|---|---|
-| `sop` | 不定期 | 运营 SOP / 指南,可以是 `ALL`(全部门通用) |
-| `campaign_plan` | campaign 开播前上传 | 直播策划案——给 AI 做"根据历史结果优化/预测"用,且要留存 |
-| `campaign_review` | campaign 结束后上传 | 复盘文档——**ROI、商品级数据这些都在这篇文档的内容里**,不是结构化字段 |
+| `sop` | any time | operating procedures / guidelines; may be `ALL` (every department) |
+| `campaign_plan` | uploaded before the campaign goes live | livestream plan, kept so AI can compare plans with results and improve future plans |
+| `campaign_review` | uploaded after the campaign | post-campaign review -- **ROI and per-product results are part of this document's content**, not structured fields |
 
-### documents(原名 sop_documents)
-| 字段 | 类型 | 说明 |
+### documents
+| Column | Type | Notes |
 |---|---|---|
-| doc_id | bigserial PK | 覆盖新版本时不变(原地更新这一行、重建 chunk),所以引用和 eval 标注不会失效 |
-| upload_id | uuid unique FK → uploads | 产生当前版本的那次上传 |
+| doc_id | bigserial PK | stays the same when a new version replaces the document (the row is updated in place and its chunks rebuilt), so citations and eval labels stay valid |
+| upload_id | uuid unique FK → uploads | the upload that produced the current version |
 | doc_type | text | `sop` / `campaign_plan` / `campaign_review` |
-| title | text | 如 "风控问题处理流程" |
-| department | text | 部门名 或 `ALL`(仅 `sop` 可用)——非外键,原因见下 |
-| campaign_id | bigint FK → campaigns,可空 | 仅 `campaign_plan`/`campaign_review` 填;`sop` 必须为空(数据库 CHECK 约束强制) |
-| category | text | 如 "风控" "上线checklist" "复盘" |
-| steps | jsonb | 结构化步骤,主要给 `sop` 用,见下 |
-| responsible_team | text | 主责/协同团队 |
-| source_path | text | 原始文件路径 |
+| title | text | e.g. "Account Restriction Handling" |
+| department | text | department name or `ALL` (`sop` only) -- not a foreign key, see below |
+| campaign_id | bigint FK → campaigns, nullable | only for `campaign_plan` / `campaign_review`; must be NULL for `sop` (enforced by a CHECK constraint) |
+| category | text | e.g. "Trust & Safety", "Launch checklist", "Review" |
+| steps | jsonb | structured steps, mainly for `sop`, see below |
+| responsible_team | text | owning team |
+| source_path | text | original file path |
 | created_at | timestamptz | |
 
-**自然键**(认定"同一份文档",重传时按它判断是新建还是覆盖):
-- 策划案 / 复盘:`(campaign_id, doc_type)` 唯一,一场活动每种只有一份。`sop` 的 `campaign_id` 是 NULL,
-  唯一约束里 NULL 和 NULL 不算相等,所以这条约束只管活动文档。
-- SOP:同一 `department`(或 `ALL`)下标题唯一,按规范化后的标题比较(NFKC 全角转半角 + 去首尾空格 + 小写),
-  所以 `"　风控问题处理流程 "` 和 `"风控问题处理流程"` 算同一份。表里存的仍是原标题。
+**Natural keys** (what makes two uploads "the same document"; a re-upload is checked against them to
+decide between new and replacement):
+- Plans / reviews: `(campaign_id, doc_type)` is unique, one of each per campaign. `campaign_id` is NULL
+  for `sop`, and a unique constraint treats NULLs as distinct, so this constraint only covers campaign documents.
+- SOP: titles are unique within a `department` (or `ALL`), compared after normalization (NFKC
+  full-width to ASCII + trimmed + lowercase), so `" Account Restriction Handling "` and
+  `"account restriction handling"` are the same document. The table keeps the original title.
 
-`department` 是 TEXT 不是外键:要支持 `'ALL'` 这个哨兵值,这不是 `departments` 表里的一条真实记录
-(代价:部门改名要手动同步这里,量小可接受)。`campaign_plan`/`campaign_review` 类型的
-`department` 应该跟对应 `campaign` 的部门一致——通过 `documents.campaign_id -> campaigns.anchor_id`
-可以反查出这篇文档是哪个主播的,不在 `documents` 上冗余存一份 `anchor_id`。
+`department` is TEXT, not a foreign key, so it can hold the sentinel `'ALL'`, which is not a real row in
+`departments` (cost: renaming a department means updating this by hand; rare enough to accept).
+For `campaign_plan` / `campaign_review` the `department` should equal the campaign's department.
+The host of a document can be traced through `documents.campaign_id -> campaigns.host_id`, so
+`documents` does not store a redundant `host_id`.
 
-`steps` jsonb 结构(方便直接回答"第一步/最后一步/找哪个部门"):
+`steps` jsonb shape (so questions like "first step / last step / which team" can be answered directly):
 ```json
 [
-  {"order": 1, "action": "在风控后台确认命中的规则和账号", "owner": "运营本人"},
-  {"order": 2, "action": "填写申诉工单,附上直播回放片段",   "owner": "运营本人"},
-  {"order": 3, "action": "同步给风控对接人,等待复核",       "owner": "风控组"}
+  {"order": 1, "action": "Identify the triggered policy and the account in the seller center", "owner": "the ops owner"},
+  {"order": 2, "action": "File an appeal ticket with the stream recording attached", "owner": "the ops owner"},
+  {"order": 3, "action": "Notify the Trust & Safety contact and wait for the review", "owner": "Trust & Safety team"}
 ]
 ```
 
-### doc_chunks(切片 + 向量)
-| 字段 | 类型 | 说明 |
+### doc_chunks (chunks + vectors)
+| Column | Type | Notes |
 |---|---|---|
 | chunk_id | bigserial PK | |
-| doc_id | bigint not null | 跟 `department` 一起构成指向 documents 的复合外键 |
-| department | text | **有意的冗余**:检索和 RLS 直接按这一列过滤,不用 JOIN |
-| chunk_index | int | 第几片,`(doc_id, chunk_index)` 唯一 |
-| content | text | 切片正文 |
-| embedding | vector(1536) | 维度跟 embedding 模型对齐(text-embedding-3-small = 1536) |
-| embedding_model | text | 生成这条向量的模型。只能区分同维度的模型;换不同维度的模型要另加列或另建表 |
-| metadata | jsonb | `{category, source_doc, title, doc_type, campaign_id}` 等其余检索信息 |
+| doc_id | bigint not null | together with `department`, a composite foreign key to documents |
+| department | text | **deliberately redundant**: retrieval and RLS filter on this column without a JOIN |
+| chunk_index | int | position of the chunk; `(doc_id, chunk_index)` is unique |
+| content | text | chunk text |
+| embedding | vector(1536) | dimension of the embedding model (text-embedding-3-small = 1536) |
+| embedding_model | text | the model that produced the vector. Only tells apart models of the same dimension; a model with another dimension needs another column or table |
+| metadata | jsonb | per-chunk retrieval details such as the heading path |
 
-冗余的 `department` 靠**复合外键**保证不出错:`(doc_id, department)` 引用 `documents(doc_id, department)`,
-所以 chunk 的部门只能等于所属文档的部门,写错了数据库直接拒绝。`ON UPDATE CASCADE`:文档改部门时
-chunk 自动跟着改;`ON DELETE CASCADE`:删文档时 chunk 一起删。
+The redundant `department` is kept correct by a **composite foreign key**: `(doc_id, department)`
+references `documents(doc_id, department)`, so a chunk's department can only be its document's
+department, and the database rejects anything else. `ON UPDATE CASCADE`: when a document changes
+department, its chunks follow; `ON DELETE CASCADE`: deleting a document deletes its chunks.
 
-索引:`embedding` 上的 HNSW(`vector_cosine_ops`)、`department` 上的普通索引(小部门走精确扫描时先按部门筛)。
+Indexes: HNSW on `embedding` (`vector_cosine_ops`), a plain index on `department` (when retrieval for a
+small department uses an exact scan, it filters by department first).
 
-### uploads(上传记录 + 处理状态)
-每次上传一行。后端收到上传时先写 `received`(需要审批的写 `pending_approval`),再发 Kafka;
-消费者处理时更新状态。两条管道(文档、数据表)共用。
+### uploads (upload records + processing status)
+One row per upload. The backend writes `received` (or `pending_approval` when approval is needed)
+before publishing to Kafka; the consumer updates the status while processing. Shared by both pipelines
+(documents and data tables).
 
-| 字段 | 类型 | 说明 |
+| Column | Type | Notes |
 |---|---|---|
-| upload_id | uuid PK | 跟 Kafka 消息里的 `uploadId` 是同一个值,也是消费者做幂等的依据 |
+| upload_id | uuid PK | the same value as `uploadId` in the Kafka message, and the key the consumer deduplicates on |
 | source | text | `manual` / `auto` |
-| uploaded_by | bigint FK → users,可空 | 人工上传必填,自动同步为空(CHECK 约束强制) |
-| content_kind / doc_type / table_type | text | 跟消息契约同一套取值和组合规则 |
-| department | text | 部门名,或 `ALL`(仅 `sop`) |
-| campaign_id | bigint FK → campaigns,可空 | 活动文档和数据表必填 |
-| title | text | `sop` 必填(自然键的一部分);活动文档的标题由系统生成 |
-| original_filename / storage_key | text | 原始文件名 / 存储位置(`storage_key` 唯一) |
-| replaces_upload_id | uuid FK → uploads,可空 | 要覆盖的当前版本是哪次上传产生的,为空表示新建 |
+| uploaded_by | bigint FK → users, nullable | required for manual uploads, NULL for automatic syncs (enforced by a CHECK constraint) |
+| content_kind / doc_type / table_type | text | the same values and combination rules as the message contract |
+| department | text | department name, or `ALL` (`sop` only) |
+| campaign_id | bigint FK → campaigns, nullable | required for campaign documents and data tables |
+| title | text | required for `sop` (part of its natural key); campaign document titles are generated |
+| original_filename / storage_key | text | original file name / storage location (`storage_key` is unique) |
+| replaces_upload_id | uuid FK → uploads, nullable | the upload that produced the current version this one replaces; NULL means new |
 | status | text | `pending_approval` / `received` / `processing` / `done` / `failed` / `rejected` |
-| error | text | 失败原因 |
-| reviewed_by / reviewed_at / review_comment | | 审批人、审批时间、审批意见。审批人不能是上传人(CHECK 约束强制) |
+| error | text | failure reason |
+| reviewed_by / reviewed_at / review_comment | | reviewer, review time, review comment. The reviewer can't be the uploader (enforced by a CHECK constraint) |
 | created_at / updated_at | timestamptz | |
 
 ```
-不需要审批:                     received -> processing -> done / failed
-需要审批:pending_approval --批准--> received -> processing -> done / failed
-                          --拒绝--> rejected
+no approval needed:                      received -> processing -> done / failed
+approval needed:  pending_approval --approve--> received -> processing -> done / failed
+                                   --reject---> rejected
 ```
 
-执行覆盖时再核对一次"当前版本还是不是 `replaces_upload_id`":不是的话说明审批期间已被别人覆盖,
-这次申请作废(乐观并发控制)。
+When the replacement actually runs, it checks again that the current version is still
+`replaces_upload_id`; if not, someone else replaced it while the request waited for approval and the
+request is void (optimistic concurrency).
 
-> 取代了早期的 `doc_ingest_status`:它以 `doc_id` 为主键,文档写库之前还没有 `doc_id`,
-> 数据表上传根本不产生文档,两种情况都记不了。
+> Replaces the earlier `doc_ingest_status`, whose primary key was `doc_id`: there is no `doc_id` before
+> the document is written, and a data-table upload never produces a document, so it could record neither case.
 
-## 模拟数据规模(已生成)
+## Mock data (generated)
 
-- 4 个部门(美妆运营 / 3C数码运营 / 食品生鲜运营 / 日用百货运营)
-- 25 个用户(4 manager,19 staff,1 executive,1 admin;后两个不属于任何部门)
-- 15 个主播(每部门 3-5 个)
-- 47 个 campaign(每部门 10-15 个,每个 15-60 天的 metrics,共 1700+ 条指标记录;运营成本已校准到 GMV 的 10%-20%)
-- 202 条 campaign_products(含成本价/利润/利润率,销售额已校准到不超过所属 campaign 的 GMV),1200 条 campaign_customer_behavior
-- 5 篇 SOP(2 篇 `ALL` 通用 + 3 篇分部门),放 [sop_docs/](../sop_docs/) 目录
-- 1 组策划案 + 复盘示例文档(以 `campaign_id=3` "美妆618大促" 为原型,数字跟当前 mock 数据对得上——但这个耦合比较脆弱,见 [campaign_docs/README.md](../campaign_docs/README.md) 的说明),放 [campaign_docs/](../campaign_docs/) 目录
+The generator is reproducible: seeded `random` and Faker, every date computed from a fixed `AS_OF`
+date (2026-10-15), so every run produces the same rows.
+
+- 4 departments (Beauty / Consumer Electronics / Fresh Grocery / Home Goods)
+- 25 users (4 managers, 19 staff, 1 executive, 1 admin; the last two belong to no department)
+- 15 hosts (3-5 per department)
+- 50 campaigns (5 seasonal ones per department -- Black Friday Live, Holiday Sale, Summer Sale, Back to
+  School, Anniversary Sale, each starting inside its season -- plus 5-10 year-round ones), 15-45 days of
+  metrics each, 1,462 metric rows; operating cost calibrated to 10%-20% of GMV
+- 229 campaign_products rows (with unit cost / profit / margin; sales calibrated to stay below the
+  campaign's GMV), 1,362 campaign_customer_behavior rows
+- 5 SOPs (2 for `ALL` + 3 department-specific) in [sop_docs/](../sop_docs/)
+- 1 campaign plan + post-campaign review pair (based on `campaign_id = 1`, "Beauty Black Friday Live";
+  the numbers match the mock data, see [campaign_docs/README.md](../campaign_docs/README.md)) in
+  [campaign_docs/](../campaign_docs/)

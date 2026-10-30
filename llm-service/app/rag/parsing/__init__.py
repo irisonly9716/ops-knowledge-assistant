@@ -1,7 +1,8 @@
-"""文档解析:Markdown / docx / PDF -> 统一的"带类型的元素"(见 elements.py)。
+"""Document parsing: Markdown / docx / PDF -> the same typed elements (see elements.py).
 
-调用方只用 parse_file 或 parser_for,不直接依赖某个解析库。以后要换成别的实现
-(比如扫描件走 Amazon Textract),只需要多写一个 DocumentParser、在 PARSERS 里登记。
+Callers use only parse_file or parser_for and never depend on a parsing library directly. To use
+another implementation later (say, Amazon Textract for scans), write one more DocumentParser and
+register it in PARSERS.
 """
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from app.rag.parsing.elements import (
 from app.rag.parsing.markdown_parser import MarkdownParser
 from app.rag.parsing.pdf_parser import PdfParser
 
-# 按扩展名选解析器。上传时存下来的文件名保留了原始扩展名(见 Java 的 sanitizeFilename)
+# Parser by file extension. Stored file names keep the original extension (see Java's sanitizeFilename)
 PARSERS: dict[str, DocumentParser] = {
     ".md": MarkdownParser(),
     ".markdown": MarkdownParser(),
@@ -34,10 +35,10 @@ def parser_for(filename: str) -> DocumentParser:
     try:
         return PARSERS[suffix]
     except KeyError:
-        supported = "、".join(sorted(PARSERS))
+        supported = ", ".join(sorted(PARSERS))
         raise UnsupportedFormatError(
-            f"不支持的文件类型 {suffix or '(没有扩展名)'};目前支持 {supported}。"
-            "Word 的 .doc 请先另存为 .docx") from None
+            f"unsupported file type {suffix or '(no extension)'}; supported: {supported}. "
+            "Save Word .doc files as .docx first") from None
 
 
 def parse_file(path: Path) -> ParsedDocument:

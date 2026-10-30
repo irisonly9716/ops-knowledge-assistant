@@ -1,12 +1,14 @@
-"""document-upload-events 消息的 Python 侧模型。
+"""Python model of document-upload-events messages.
 
-这是 backend-service(Java,生产者)和本服务(消费者)之间的【契约】的 Python 一半。
-另一半是 Java 的 UploadEvent.java,共同的事实来源是仓库根目录的
-contracts/upload-event.examples.json——两边的测试都对着这份文件验证,见 tests/test_events.py。
+This is the Python half of the CONTRACT between backend-service (Java, the producer) and this
+service (the consumer). The other half is Java's UploadEvent.java; the shared source of truth
+is contracts/upload-event.examples.json at the repository root, which both sides' tests
+validate against (see tests/test_events.py).
 
-下面几个枚举的取值必须跟三个地方保持一致:Java 的枚举、db/migration/ 里的 CHECK 约束、
-这里。"同一份事实,三种语言各存一份"迟早漂移,所以 tests/test_events.py 里有测试
-直接解析 db/migration/ 下的迁移文件,对比这里的取值——有人改了 SQL 忘了改这里,测试会红。
+The enum values below must agree in three places: the Java enums, the CHECK constraints in
+db/migration/, and here. "One fact stored three times in three languages" drifts sooner or
+later, so tests/test_events.py parses the migration files in db/migration/ and compares their
+values with these; if someone changes the SQL and forgets this file, the test fails.
 """
 from enum import StrEnum
 
@@ -15,8 +17,8 @@ from pydantic.alias_generators import to_camel
 
 
 class ContentKind(StrEnum):
-    DOCUMENT = "document"      # SOP / 策划案 / 复盘:非结构化文字,走 RAG
-    DATA_TABLE = "data_table"  # 商品表 / 顾客行为表:结构化表格,解析后直接落表
+    DOCUMENT = "document"      # SOP / plan / review: free text, goes through RAG
+    DATA_TABLE = "data_table"  # product table / customer behavior table: structured, parsed straight into rows
 
 
 class DocType(StrEnum):
@@ -26,7 +28,7 @@ class DocType(StrEnum):
 
     @property
     def needs_campaign(self) -> bool:
-        """跟 Java 的 DocType.needsCampaign() 同一条规则:只有 sop 可以不挂 campaign。"""
+        """Same rule as Java's DocType.needsCampaign(): only sop has no campaign."""
         return self is not DocType.SOP
 
 
@@ -41,12 +43,13 @@ class Source(StrEnum):
 
 
 class UploadEvent(BaseModel):
-    """Java 那边发的是 camelCase(uploadId),这里用 snake_case 属性(upload_id),
-    alias_generator=to_camel 负责两边的名字翻译。
+    """Java sends camelCase (uploadId); this model uses snake_case attributes (upload_id) and
+    alias_generator=to_camel translates between them.
 
-    未知字段直接忽略(pydantic 默认行为),不设 extra="forbid":这叫"宽容的读者"——
-    生产者以后新增字段时,老版本的消费者不该因此崩溃。反过来,缺必填字段、枚举值不认识
-    则严格拒绝,因为那意味着契约真的对不上了。
+    Unknown fields are ignored (pydantic's default; no extra="forbid"). This is the "tolerant
+    reader": when the producer adds a field, an older consumer should not crash. Missing
+    required fields or unknown enum values, on the other hand, are rejected strictly, because
+    they mean the contract really is broken.
     """
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
@@ -63,18 +66,19 @@ class UploadEvent(BaseModel):
 
     @model_validator(mode="after")
     def _check_business_rules(self) -> "UploadEvent":
-        """生产者(UploadController)已经校验过一遍,这里再校验是防御:
-        以后会有别的生产者(比如"定时任务自动上传"),不能默认它们都写对了。"""
+        """The producer (UploadController) already validated these; checking again is defensive:
+        other producers will come (a scheduled automatic upload, say) and we can't assume they
+        all get it right."""
         if self.content_kind is ContentKind.DOCUMENT:
             if self.doc_type is None:
-                raise ValueError("contentKind=document 时 docType 必填")
+                raise ValueError("docType is required when contentKind=document")
             if self.doc_type.needs_campaign and self.campaign_id is None:
-                raise ValueError(f"docType={self.doc_type.value} 必须带 campaignId")
+                raise ValueError(f"docType={self.doc_type.value} requires a campaignId")
             if not self.doc_type.needs_campaign and self.campaign_id is not None:
-                raise ValueError("docType=sop 不能带 campaignId")
+                raise ValueError("docType=sop must not have a campaignId")
         else:  # DATA_TABLE
             if self.table_type is None:
-                raise ValueError("contentKind=data_table 时 tableType 必填")
+                raise ValueError("tableType is required when contentKind=data_table")
             if self.campaign_id is None:
-                raise ValueError("contentKind=data_table 必须带 campaignId")
+                raise ValueError("contentKind=data_table requires a campaignId")
         return self

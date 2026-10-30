@@ -1,36 +1,38 @@
 package com.opsassistant.backend.upload;
 
 /**
- * 发到 Kafka document-upload-events 的消息体。
+ * The message body published to the Kafka topic document-upload-events.
  *
- * 这是 backend-service(Java,生产者)和 llm-service(Python,消费者)之间的【契约】。
- * 改字段/改格式必须同步改两边,并且更新 contracts/upload-event.examples.json——
- * 两边的测试都对着这同一份文件验证,防止各改各的、悄悄漂移(见 UploadEventContractTest 和
- * llm-service/tests/test_events.py)。
+ * This is the CONTRACT between backend-service (Java, the producer) and llm-service (Python, the
+ * consumer). Changing a field or the format means changing both sides and updating
+ * contracts/upload-event.examples.json; both sides' tests validate against that one file, so the
+ * two sides cannot drift apart unnoticed (see UploadEventContractTest and
+ * llm-service/tests/test_events.py).
  *
- * storageKey 不是文件路径,是"存储里的逻辑键"(现在就是文件名)。早期版本这里叫 path、
- * 存的是 "uploads\xxx.md" 这种相对于 backend-service 目录的路径——消费者在另一个目录、
- * 甚至另一台机器上,根本解析不了。消息里只放逻辑键,各服务自己知道"存储根目录"在哪
- * (UPLOAD_DIR 环境变量),以后换成 S3 键也不变,只换存储后端。
+ * storageKey is not a file path but a logical key in storage (today: the file name). A file path
+ * relative to backend-service's own folder (like "uploads\xxx.md") means nothing to a consumer
+ * running in another folder, let alone on another machine. The message carries only the logical
+ * key; each service knows where the storage root is (the UPLOAD_DIR environment variable), and
+ * moving to S3 later keeps the key and only swaps the storage backend.
  *
- * contentKind/docType/tableType/source 都是枚举,不是裸字符串——防止 Java 这一侧
- * 手滑拼错值。序列化成 JSON 时(见各枚举的 @JsonValue),字段还是写成外界约定好的
- * 小写字符串("document"/"sop"...),跟 llm-service(Python)和数据库的 CHECK 约束
- * 保持一致;枚举只让 Java 内部更安全,不改变消息在"线上"的实际格式。
+ * contentKind/docType/tableType/source are enums, not raw strings, so the Java side can't
+ * misspell a value. Serialized to JSON (see each enum's @JsonValue) they are still the agreed
+ * lowercase strings ("document"/"sop"...), matching llm-service (Python) and the database CHECK
+ * constraints; the enums make Java safer internally without changing the wire format.
  *
- * record 是 Java 的语法糖:声明一次字段,自动生成构造器 + getter(方法名跟字段名
- * 一样,不带 get 前缀,比如 uploadId() 不是 getUploadId())+ equals/hashCode/toString,
- * 而且所有字段都是 final 的(创建后不能改)。
+ * A record is Java shorthand: declare the fields once and get a constructor, accessors (named like
+ * the field, no get prefix: uploadId(), not getUploadId()) and equals/hashCode/toString, with every
+ * field final (immutable after creation).
  */
 public record UploadEvent(
         String uploadId,
         String storageKey,
         ContentKind contentKind,
-        DocType docType,       // 仅 contentKind=DOCUMENT 时非空
-        TableType tableType,   // 仅 contentKind=DATA_TABLE 时非空
+        DocType docType,       // set only when contentKind=DOCUMENT
+        TableType tableType,   // set only when contentKind=DATA_TABLE
         String department,
-        Long campaignId,       // 可空:sop 类型不挂 campaign
-        String category,       // 可空
+        Long campaignId,       // nullable: an sop belongs to no campaign
+        String category,       // nullable
         Source source
 ) {
 }

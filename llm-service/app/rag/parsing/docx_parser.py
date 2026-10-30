@@ -1,10 +1,12 @@
-"""Word(.docx)-> 元素。用 python-docx 读文档结构。
+"""Word (.docx) -> elements, reading the document structure with python-docx.
 
-docx 本身就是结构化的(一个 zip 包,里面是 XML):标题是"标题 1 / 标题 2"样式,列表是带编号属性的
-段落,表格就是表格——不用猜,直接读。Word 和 WPS 存出来的 docx 都是这个格式。
+A docx is structured already (a zip of XML files): headings are paragraphs with a "Heading 1 /
+Heading 2" style, list items are paragraphs with numbering properties, tables are tables.
+Nothing to guess, just read it. Word and WPS both save this format.
 
-只支持 .docx;老的 .doc 是另一种二进制格式,要先另存为 docx。
-已知限制:没用标题样式、只是手动加粗加大字号的"标题",会被当成普通段落。
+Only .docx; the old .doc is a different binary format and must be saved as docx first.
+Known limitation: a "heading" made by manually bolding and enlarging text, without a heading
+style, is read as an ordinary paragraph.
 """
 import re
 from io import BytesIO
@@ -26,8 +28,8 @@ from app.rag.parsing.elements import (
     table_element,
 )
 
-# 内置标题样式在文件里的名字永远是英文 "heading 1"(界面上显示成"标题 1"),
-# 样式 ID 却不固定(实测 WPS 存的是 "2"、"3"),所以按名字认,不按 ID 认
+# A built-in heading style is always named "heading 1" inside the file (in every UI language),
+# but its style ID is not fixed (WPS saves "2", "3"), so match on the name, not the ID
 HEADING_STYLE = re.compile(r"heading ([1-9])", re.IGNORECASE)
 
 
@@ -35,12 +37,12 @@ class DocxParser:
     def parse(self, data: bytes) -> ParsedDocument:
         try:
             document = Document(BytesIO(data))
-        except Exception as e:   # 不是 zip、zip 里缺文件、XML 坏了……都是"文件打不开"
-            raise DocumentParseError(f"无法打开 docx 文件:{e}") from e
+        except Exception as e:   # not a zip, missing parts, broken XML... all mean "can't open the file"
+            raise DocumentParseError(f"cannot open the docx file: {e}") from e
 
         elements: list[Element] = []
-        # iter_inner_content 按文档里的先后顺序给出段落和表格;
-        # 分别遍历 paragraphs 和 tables 会丢掉"表格在哪两段之间"的信息
+        # iter_inner_content yields paragraphs and tables in document order; iterating
+        # paragraphs and tables separately would lose which paragraphs a table sits between
         for block in document.iter_inner_content():
             if isinstance(block, Table):
                 rows = _table_rows(block)
@@ -69,7 +71,8 @@ def _paragraph_element(paragraph: Paragraph, document: DocxDocument) -> Element 
 
 
 def _style_chain(style: BaseStyle | None):
-    """段落样式和它继承的上层样式。自定义样式(比如"公司标题")常常是基于"标题 1"改的。"""
+    """A paragraph style and the styles it inherits from. Custom styles (say, "Company Heading")
+    are often based on "Heading 1"."""
     while style is not None:
         yield style
         style = style.base_style
@@ -77,7 +80,7 @@ def _style_chain(style: BaseStyle | None):
 
 def _heading_level(paragraph: Paragraph) -> int | None:
     for style in _style_chain(paragraph.style):
-        if style.name == "Title":   # Word 的"标题"样式,比"标题 1"还高一级;finalize 会重新编号
+        if style.name == "Title":   # Word's "Title" style ranks above "Heading 1"; finalize re-ranks the levels
             return 0
         match = HEADING_STYLE.fullmatch(style.name or "")
         if match:
@@ -86,10 +89,12 @@ def _heading_level(paragraph: Paragraph) -> int | None:
 
 
 def _numbering(paragraph: Paragraph) -> tuple[int, int] | None:
-    """(编号定义 ID, 层级)。不是列表项返回 None。
+    """(numbering definition ID, level), or None if the paragraph is not a list item.
 
-    编号可以直接写在段落上,也可以来自段落样式(比如内置的"列表编号"样式);段落上的优先。
-    列表项显示的 "1." "2." 不在段落文字里,是 Word 按编号定义现画的,所以 text 里没有编号。
+    Numbering can sit on the paragraph itself or come from its style (such as the built-in
+    "List Number" style); the paragraph's own setting wins.
+    The "1." "2." a list item shows is not in the paragraph text: Word draws it from the
+    numbering definition, so text never contains the number.
     """
     ilvl = None
     sources: list[CT_PPr | None] = [paragraph._p.pPr]
@@ -101,13 +106,14 @@ def _numbering(paragraph: Paragraph) -> tuple[int, int] | None:
             ilvl = ppr.numPr.ilvl.val
         if ppr.numPr.numId is not None:
             num_id = ppr.numPr.numId.val
-            return None if num_id == 0 else (num_id, ilvl or 0)   # numId 0 表示"取消编号"
+            return None if num_id == 0 else (num_id, ilvl or 0)   # numId 0 means "numbering removed"
     return None
 
 
 def _is_ordered(document: DocxDocument, num_id: int, ilvl: int) -> bool:
-    """查编号定义里这一层的格式:bullet 是项目符号,decimal / 中文数字等都算编号。
-    没处理 lvlOverride(个别文档会在 num 里覆盖某一层的格式),遇到了再加。"""
+    """Look up this level's format in the numbering definition: bullet means bullets; decimal,
+    roman numerals, letters and so on count as numbered. lvlOverride (a few documents override
+    one level's format inside num) is not handled; add it when a document needs it."""
     numbering = document.part.numbering_part.element
     abstract_ids = numbering.xpath(f'./w:num[@w:numId="{num_id}"]/w:abstractNumId/@w:val')
     if not abstract_ids:
@@ -123,7 +129,7 @@ def _table_rows(table: Table) -> list[tuple[str, ...]]:
         cells = []
         previous = None
         for cell in row.cells:
-            if cell._tc is previous:   # 横向合并的格子,python-docx 会把同一个格子返回多次
+            if cell._tc is previous:   # python-docx returns a horizontally merged cell once per grid column it spans
                 continue
             previous = cell._tc
             cells.append(clean_text(cell.text))

@@ -1,14 +1,15 @@
-"""幂等地创建项目需要的 Kafka topic —— topic 已存在就跳过,不会重复报错。
+"""Create the Kafka topics the project needs, idempotently: a topic that already exists is skipped.
 
-新机器 / `docker compose down -v` 重来后,或者以后接 CI/部署,跑一次这个就把
-项目需要的 topic 都建好,不用再翻记录去手敲 kafka-topics.sh 的一堆参数。
+On a new machine, after `docker compose down -v`, or later in CI/deployment, one run creates
+every topic the project needs, instead of digging up the kafka-topics.sh arguments again.
 
-跑法(用 -m 的原因见 kafka_producer_test.py):
+Run (why -m: see kafka_producer_test.py):
     cd llm-service
     uv run python -m scripts.init_topics
 
-新增 topic 只需要往下面 TOPICS 列表加一行,这里就是"这个项目一共有哪些事件流"的
-唯一权威清单;topic 名字统一从 app/config.py 的 settings 读,不在这里重新拼字符串。
+To add a topic, add one line to TOPICS below; this list is the single authoritative answer to
+"which event streams does this project have". Topic names come from settings in app/config.py,
+never re-typed here.
 """
 from confluent_kafka.admin import AdminClient, NewTopic
 
@@ -18,10 +19,11 @@ BOOTSTRAP_SERVERS = settings.kafka_bootstrap_servers
 
 TOPICS = [
     NewTopic(settings.doc_upload_topic, num_partitions=1, replication_factor=1),
-    # 死信 topic:消费者处理不了的消息(格式坏了 / 重试用尽)转存在这里,不阻塞主流程也不丢。
-    # 名字从主 topic 派生(见 app/config.py),消费者和这个脚本用的是同一个来源。
+    # Dead-letter topic: messages the consumer can't process (malformed / retries exhausted) are
+    # parked here, so they neither block the main flow nor get lost. The name is derived from the
+    # main topic (see app/config.py); the consumer and this script share that one source.
     NewTopic(settings.doc_upload_dlq_topic, num_partitions=1, replication_factor=1),
-    # 以后如果有语义上不同的事件种类,在这里加新的一行,比如:
+    # A semantically different kind of event would get its own line here, for example:
     # NewTopic("document-processing-failed", num_partitions=1, replication_factor=1),
 ]
 
@@ -33,7 +35,7 @@ def main():
     to_create = [t for t in TOPICS if t.topic not in existing]
 
     if not to_create:
-        print("所有 topic 都已存在,无需创建:")
+        print("All topics already exist, nothing to create:")
         for t in TOPICS:
             print(f"  - {t.topic}")
         return
@@ -41,10 +43,10 @@ def main():
     futures = admin.create_topics(to_create)
     for topic, future in futures.items():
         try:
-            future.result()  # 阻塞等待这个 topic 真正建完;失败会在这里抛异常
-            print(f"✅ 创建成功: {topic}")
+            future.result()  # blocks until the topic really exists; a failure raises here
+            print(f"Created: {topic}")
         except Exception as e:
-            print(f"❌ 创建失败: {topic} -> {e}")
+            print(f"FAILED to create {topic}: {e}")
 
 
 if __name__ == "__main__":

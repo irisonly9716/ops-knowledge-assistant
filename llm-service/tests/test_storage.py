@@ -1,4 +1,4 @@
-"""storage_key -> 真实文件路径。重点是路径穿越防御。"""
+"""storage_key -> real file path. The focus is the path traversal defense."""
 import os
 
 import pytest
@@ -11,8 +11,8 @@ from app.consumers.storage import resolve_upload_path
 def upload_dir(tmp_path):
     root = tmp_path / "uploads"
     root.mkdir()
-    (root / "ok.md").write_text("内容", encoding="utf-8")
-    (tmp_path / "secret.txt").write_text("不该被读到", encoding="utf-8")  # 在上传目录【外面】
+    (root / "ok.md").write_text("content", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("must never be read", encoding="utf-8")  # OUTSIDE the upload folder
     return root
 
 
@@ -21,12 +21,12 @@ def test_resolves_a_normal_key(upload_dir):
 
 
 @pytest.mark.parametrize("evil", [
-    "../secret.txt",                 # 最经典的向上穿越
-    "sub/../../secret.txt",          # 先进子目录再向上,绕过"开头不是 .."的简单检查
-    "..\\secret.txt",                # Windows 风格
-    "/etc/passwd",                   # 绝对路径:pathlib 的 `/` 会直接丢掉前面的 base
+    "../secret.txt",                 # the classic climb out
+    "sub/../../secret.txt",          # into a subfolder, then up: beats a naive "doesn't start with .." check
+    "..\\secret.txt",                # Windows style
+    "/etc/passwd",                   # absolute path: pathlib's `/` silently drops the base in front
     "C:\\Windows\\win.ini",
-    ".",                             # 上传目录本身,不是文件
+    ".",                             # the upload folder itself, not a file
     "",
 ])
 def test_paths_that_escape_the_upload_dir_are_permanent_errors(upload_dir, evil):
@@ -35,15 +35,15 @@ def test_paths_that_escape_the_upload_dir_are_permanent_errors(upload_dir, evil)
 
 
 def test_missing_file_is_a_retryable_error_not_a_permanent_one(upload_dir):
-    # 文件不存在可能只是共享卷还没同步好,所以是普通异常(会被重试),不是 PermanentError
+    # A missing file may just be a shared volume not synced yet, so it is an ordinary (retried) exception, not a PermanentError
     with pytest.raises(FileNotFoundError):
         resolve_upload_path("not-there.md", upload_dir)
     assert not issubclass(FileNotFoundError, PermanentError)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Windows 上创建符号链接需要管理员权限")
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks on Windows needs administrator rights")
 def test_a_symlink_pointing_outside_is_rejected(upload_dir, tmp_path):
-    # 字符串检查(key 里有没有 "..")拦不住它,必须先 resolve() 展开真实路径再比较
+    # A string check (does the key contain "..") can't stop this; resolve() to the real path first, then compare
     (upload_dir / "link.md").symlink_to(tmp_path / "secret.txt")
     with pytest.raises(PermanentError):
         resolve_upload_path("link.md", upload_dir)

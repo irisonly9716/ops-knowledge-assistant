@@ -1,10 +1,12 @@
-"""Embedding:把文本变成向量。
+"""Embeddings: turning text into vectors.
 
-调用方(以后的摄入和检索)只依赖 Embedder 这个小接口,不关心背后是 OpenAI 还是别的模型。
-测试里换成假的实现,不联网、不花钱——跟消费者把 Kafka 客户端当参数传进来是同一个思路。
+Callers (ingestion and retrieval, later) depend only on the small Embedder interface, not on
+whether OpenAI or another model is behind it. Tests swap in a fake implementation: no network,
+no cost. It is the same idea as the consumer taking its Kafka client as a parameter.
 
-这里只做"调一次接口"这一件事。大批量切分、限流这些等摄入链路接进来时再加;
-网络错误、429、5xx 的重试 OpenAI SDK 已经自带(max_retries,指数退避)。
+This module does one thing: one API call. Batching large inputs and rate limiting come when
+the ingestion pipeline is wired in; the OpenAI SDK already retries network errors, 429s and
+5xx responses (max_retries, with exponential backoff).
 """
 from dataclasses import dataclass
 from typing import Protocol
@@ -13,15 +15,16 @@ from openai import OpenAI
 
 from app.config import settings
 
-# doc_chunks.embedding 是 VECTOR(1536)。维度对不上的向量写不进数据库,在这里就提前拦住,
-# 报错信息也比数据库那句 "expected 1536 dimensions" 更清楚是哪一步出的问题
+# doc_chunks.embedding is VECTOR(1536). A vector of another size can't be written to the
+# database, so catch it here, with a clearer message about which step went wrong than the
+# database's "expected 1536 dimensions"
 EMBEDDING_DIMENSIONS = 1536
 
 
 @dataclass(frozen=True)
 class EmbeddingBatch:
-    vectors: list[list[float]]  # 每段输入文本一个向量,顺序跟输入一致
-    total_tokens: int           # 这次调用计费的 token 数,按它算成本
+    vectors: list[list[float]]  # one vector per input text, in input order
+    total_tokens: int           # tokens billed for this call; cost is computed from it
 
 
 class Embedder(Protocol):
@@ -38,31 +41,35 @@ class OpenAIEmbedder:
 
     def embed(self, texts: list[str]) -> EmbeddingBatch:
         if not texts:
-            return EmbeddingBatch(vectors=[], total_tokens=0)  # 没东西要算,不发一次没意义的请求
+            return EmbeddingBatch(vectors=[], total_tokens=0)  # nothing to embed, no point sending a request
         if any(not text.strip() for text in texts):
-            # 接口会直接拒绝空字符串;空文本 embedding 出来也没有意义,说明上游切块出了问题
-            raise ValueError("不能对空文本做 embedding")
+            # The API rejects empty strings, and an empty-text embedding means nothing anyway:
+            # it points to a chunking bug upstream
+            raise ValueError("cannot embed empty text")
 
         response = self._client.embeddings.create(
             model=self.model,
             input=texts,
-            # text-embedding-3 系列可以指定输出维度。显式传上,以后换成 3-large 也能输出
-            # 1536 维、放进同一列(维度变小,质量会略降,这是它允许的取舍)
+            # text-embedding-3 models accept an output dimension. Passing it explicitly lets
+            # 3-large also produce 1536 dimensions for the same column (fewer dimensions cost a
+            # little quality; the model allows that trade-off)
             dimensions=self.dimensions,
         )
-        # 每条结果带着它对应输入的位置(index),按它排序,不依赖接口返回的顺序
+        # Each result carries the position (index) of its input; sort by it instead of relying
+        # on the order the API returns
         vectors = [item.embedding for item in sorted(response.data, key=lambda item: item.index)]
         if len(vectors) != len(texts):
-            raise ValueError(f"发了 {len(texts)} 段文本,只收到 {len(vectors)} 个向量")
+            raise ValueError(f"sent {len(texts)} texts but received {len(vectors)} vectors")
         for vector in vectors:
             if len(vector) != self.dimensions:
                 raise ValueError(
-                    f"{self.model} 返回了 {len(vector)} 维向量,数据库的 embedding 列是 {self.dimensions} 维")
+                    f"{self.model} returned a {len(vector)}-dimensional vector; the embedding column "
+                    f"has {self.dimensions} dimensions")
         return EmbeddingBatch(vectors=vectors, total_tokens=response.usage.total_tokens)
 
 
 def openai_embedder_from_settings() -> OpenAIEmbedder:
     if not settings.openai_api_key:
-        raise RuntimeError("没有配置 OPENAI_API_KEY:在仓库根目录的 .env 里填上(.env 不进 git)")
+        raise RuntimeError("OPENAI_API_KEY is not set: add it to .env at the repository root (.env is not in git)")
     client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url, timeout=30)
     return OpenAIEmbedder(client, settings.embedding_model)

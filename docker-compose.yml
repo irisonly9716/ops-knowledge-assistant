@@ -1,21 +1,21 @@
 # ============================================================================
-#  Operations Knowledge Assistant —— 本地开发中间件
-#  用法:  cp .env.example .env  &&  docker compose up -d
+#  Operations Knowledge Assistant -- local development infrastructure
+#  Usage:  cp .env.example .env  &&  docker compose up -d
 #
-#  docker-compose 的四个核心概念(面试要能讲):
-#    services    —— 每个 service 就是一个容器
-#    ports       —— "宿主机端口:容器端口",把容器里的端口映射到你电脑上
-#    volumes     —— 数据卷,让数据库数据在容器重启后不丢
-#    environment —— 传给容器里进程的环境变量(初始密码、配置等)
+#  The four core docker compose concepts:
+#    services    -- each service is one container
+#    ports       -- "host port:container port", maps a container port onto your machine
+#    volumes     -- data volumes, so database data survives container restarts
+#    environment -- environment variables for the process in the container (initial passwords, settings)
 # ============================================================================
 
 services:
 
   # -------------------------------------------------------------------------
   # PostgreSQL + pgvector
-  #   - 同时存"结构化业务表"和"文档向量表"
-  #   - pgvector/pgvector 镜像 = 官方 Postgres + 预装 vector 扩展
-  #   - 建表不在这里做,由下面的 flyway 服务负责
+  #   - holds both the structured business tables and the document vector table
+  #   - the pgvector/pgvector image = official Postgres + the vector extension preinstalled
+  #   - tables are not created here; the flyway service below does that
   # -------------------------------------------------------------------------
   postgres:
     image: pgvector/pgvector:pg16
@@ -35,13 +35,14 @@ services:
       retries: 10
 
   # -------------------------------------------------------------------------
-  # Flyway —— 数据库 schema 迁移。一次性任务:跑完就退出,不是常驻服务
-  #   - db/migration/ 里的 V1__xxx.sql、V2__xxx.sql… 按版本号顺序执行;
-  #     执行过的记在库里的 flyway_schema_history 表,下次只执行新增的
-  #   - 每次 docker compose up 都会跑一次 migrate,没有新迁移就什么都不做
-  #   - 单独一个容器、不放进 Spring Boot:schema 由 Java 和 Python 两个服务共用,
-  #     不该归其中一个管;造数据脚本也不用先启动 Java 后端
-  #   - 查看迁移状态:docker compose run --rm flyway info
+  # Flyway -- database schema migrations. A one-off job: it runs and exits, it is not a long-running service
+  #   - V1__xxx.sql, V2__xxx.sql... in db/migration/ run in version order; applied ones are
+  #     recorded in the flyway_schema_history table, so the next run only applies new ones
+  #   - every docker compose up runs migrate once; with no new migrations it does nothing
+  #   - a container of its own rather than part of Spring Boot: the schema is shared by the Java
+  #     and the Python service and shouldn't belong to either; the mock data script doesn't need
+  #     the Java backend running first either
+  #   - migration status: docker compose run --rm flyway info
   # -------------------------------------------------------------------------
   flyway:
     image: flyway/flyway:13.10.3-alpine
@@ -51,10 +52,10 @@ services:
       FLYWAY_USER: ${POSTGRES_USER}
       FLYWAY_PASSWORD: ${POSTGRES_PASSWORD}
       FLYWAY_LOCATIONS: filesystem:/flyway/sql
-      # 文件名不符合 V<版本>__<描述>.sql 时直接报错。默认是悄悄跳过,
-      # 比如 V4_xxx.sql 少写一个下划线,这个迁移就永远不会执行,也没人发现
+      # Fail on file names that don't match V<version>__<description>.sql. The default silently
+      # skips them: V4_xxx.sql with one underscore missing would never run, and nobody would notice
       FLYWAY_VALIDATE_MIGRATION_NAMING: "true"
-      REDGATE_DISABLE_TELEMETRY: "true"   # 关掉 Flyway 的匿名使用统计
+      REDGATE_DISABLE_TELEMETRY: "true"   # turn off Flyway's anonymous usage statistics
     volumes:
       - ./db/migration:/flyway/sql:ro
     depends_on:
@@ -62,12 +63,12 @@ services:
         condition: service_healthy
 
   # -------------------------------------------------------------------------
-  # Redis —— 查询缓存 + 会话记忆
+  # Redis -- query cache + conversation memory
   # -------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     container_name: oka-redis
-    command: ["redis-server", "--appendonly", "yes"]   # 开 AOF 持久化
+    command: ["redis-server", "--appendonly", "yes"]   # AOF persistence on
     ports:
       - "${REDIS_PORT}:6379"
     volumes:
@@ -79,14 +80,14 @@ services:
       retries: 10
 
   # -------------------------------------------------------------------------
-  # Kafka —— 上传文件与文档处理之间的异步队列
-  #   - KRaft 模式:Kafka 自己管元数据,不再需要单独的 Zookeeper
-  #   - 只在本机开发用一个 broker 就够
-  #   - 三个 listener:
-  #       PLAINTEXT  (:19092) 容器之间连(kafka-ui 用这个)
-  #       CONTROLLER (:9093)  KRaft 选举内部用
-  #       EXTERNAL   (:9092)  宿主机上的程序(IDE 里的 Spring Boot / Python)连
-  #   - 单 broker 所以各种副本因子都设成 1
+  # Kafka -- the asynchronous queue between file uploads and document processing
+  #   - KRaft mode: Kafka manages its own metadata, no separate Zookeeper
+  #   - one broker is enough for local development
+  #   - three listeners:
+  #       PLAINTEXT  (:19092) container to container (kafka-ui uses this one)
+  #       CONTROLLER (:9093)  internal, for KRaft elections
+  #       EXTERNAL   (:9092)  programs on the host (Spring Boot / Python from the IDE)
+  #   - a single broker, so every replication factor is 1
   # -------------------------------------------------------------------------
   kafka:
     image: apache/kafka:3.9.0
@@ -106,8 +107,9 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
-      # 关掉自动建 topic:强制走 scripts/init_topics.py 显式创建,
-      # 避免拼错名字时 Kafka 悄悄用默认配置建一个没人管的 topic(生产标准做法)
+      # Topic auto-creation off: topics are created explicitly by scripts/init_topics.py, so a
+      # misspelled name never makes Kafka quietly create an unmanaged topic with default settings
+      # (standard production practice)
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       KAFKA_LOG_DIRS: "/var/lib/kafka/data"
     volumes:
@@ -119,8 +121,8 @@ services:
       retries: 12
 
   # -------------------------------------------------------------------------
-  # Kafka UI —— 浏览器里看 topic / 消息,调试用(可选)
-  #   打开 http://localhost:8080
+  # Kafka UI -- browse topics / messages in the browser, for debugging (optional)
+  #   open http://localhost:8080
   # -------------------------------------------------------------------------
   kafka-ui:
     image: provectuslabs/kafka-ui:v0.7.2

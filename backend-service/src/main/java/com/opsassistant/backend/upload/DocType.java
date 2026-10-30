@@ -3,9 +3,10 @@ package com.opsassistant.backend.upload;
 import com.fasterxml.jackson.annotation.JsonValue;
 
 /**
- * 对应 db/migration/ 里 documents.doc_type 和 uploads.doc_type 的 CHECK 约束
- * (IN ('sop','campaign_plan','campaign_review'))——这三个值必须跟那条约束
- * 完全一致,改数据库的约束时记得回来改这里,反过来也一样,枚举不会替你自动同步。
+ * Matches the CHECK constraints on documents.doc_type and uploads.doc_type in db/migration/
+ * (IN ('sop','campaign_plan','campaign_review')). The three values must be exactly those of the
+ * constraint: when the constraint changes, change this too, and the other way round; an enum does
+ * not sync itself.
  */
 public enum DocType {
     SOP("sop"),
@@ -24,9 +25,9 @@ public enum DocType {
     }
 
     /**
-     * 是不是必须挂一个 campaign——把这条业务规则放在枚举自己身上(而不是在
-     * UploadController 里写 !"sop".equals(docType)),这样以后新增文档类型时,
-     * 这条规则跟着新增的枚举常量一起写,不会漏掉。
+     * Whether a campaign is required. Keeping this business rule on the enum itself (instead of
+     * !"sop".equals(docType) in UploadController) means a new document type gets the rule written
+     * together with its constant and it can't be forgotten.
      */
     public boolean needsCampaign() {
         return this != SOP;
@@ -41,6 +42,6 @@ public enum DocType {
             }
         }
         throw new IllegalArgumentException(
-                "docType 只能是 sop / campaign_plan / campaign_review,收到:" + raw);
+                "docType must be sop / campaign_plan / campaign_review, got: " + raw);
     }
 }

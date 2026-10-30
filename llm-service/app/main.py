@@ -1,9 +1,10 @@
-"""llm-service 的 HTTP 入口(FastAPI)。
+"""HTTP entry point of llm-service (FastAPI).
 
-目前只有 /health。后续会挂 POST /query:RAG 问答、Text-to-SQL、查询路由、会话记忆与缓存。
+Only /health for now. POST /query comes later: RAG Q&A, Text-to-SQL, query routing,
+conversation memory and caching.
 
-注意:Kafka 消费者【不在】这里启动,它是独立的 worker 进程
-(python -m app.consumers.upload_consumer),理由见 app/consumers/upload_consumer.py。
+Note: the Kafka consumer is NOT started here. It is a separate worker process
+(python -m app.consumers.upload_consumer); see app/consumers/upload_consumer.py for why.
 """
 from fastapi import FastAPI
 

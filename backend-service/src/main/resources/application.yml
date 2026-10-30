@@ -3,22 +3,23 @@ spring:
     name: backend-service
 
   datasource:
-    # ${VAR:默认值} —— 读不到 VAR 就用冒号后面的默认值。
-    # VAR 现在真的能从仓库根目录的 .env 读到(见 config/DotenvEnvironmentPostProcessor.java——
-    # Java 本身不认识 .env,这是我们自己补的)。冒号后面的默认值只是最后一道保险,
-    # 正常情况下不会用到;生产环境要覆盖,应该设真正的操作系统环境变量
-    # (优先级比 .env 高,见 DotenvEnvironmentPostProcessor 里 addLast 的说明)。
+    # ${VAR:default} -- use the value after the colon when VAR is not set.
+    # VAR really is read from .env at the repository root (see config/DotenvEnvironmentPostProcessor.java;
+    # Java doesn't read .env by itself). The default after the colon is only a last resort and is
+    # normally never used; to override in production, set a real operating-system environment
+    # variable (it takes priority over .env, see addLast in DotenvEnvironmentPostProcessor).
     url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:ops_assistant}
     username: ${POSTGRES_USER:ops}
-    # 密码故意【不给默认值】:没配置时启动直接报 "Could not resolve placeholder 'POSTGRES_PASSWORD'",
-    # 比拿一个写死在仓库里(公开可见)的密码去连、再报一个让人摸不着头脑的认证失败要清楚。
+    # Deliberately NO default password: without configuration, startup fails with "Could not resolve
+    # placeholder 'POSTGRES_PASSWORD'", which is clearer than connecting with a password hard-coded
+    # in a public repository and getting a puzzling authentication failure.
     password: ${POSTGRES_PASSWORD}
 
   jpa:
     hibernate:
-      # db/migration/ 下的 Flyway 迁移是 schema 的唯一来源,所以用 validate——
-      # 启动时检查 Entity 跟数据库表是否一致,不一致直接报错,但绝不会自己改表结构。
-      # "表长什么样"完全由迁移文件说了算。
+      # The Flyway migrations in db/migration/ are the only source of the schema, hence validate:
+      # at startup Hibernate checks that the entities match the tables and fails if they don't,
+      # but it never changes the schema itself. The migrations alone decide what tables look like.
       ddl-auto: validate
     properties:
       hibernate:
@@ -28,43 +29,43 @@ spring:
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
-      # Spring Boot 不会帮你猜序列化方式,必须显式配置,不然启动会报错要你选一个。
-      # 用最朴素的字符串序列化,我们自己把 Java 对象转成 JSON 字符串再发——
-      # 跟 llm-service 那边 Python 用 json.dumps() 发的消息格式完全一致,
-      # 两边不用为了"Java 特有的对象格式"额外多写一层转换代码。
+      # Spring Boot doesn't guess the serialization; it must be configured explicitly.
+      # Plain string serialization: we turn the Java object into a JSON string ourselves, the same
+      # format Python's json.dumps() produces in llm-service, so neither side needs an extra layer
+      # for a Java-specific object format.
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
       properties:
-        # 实测发现:topic 不存在/Kafka 连不上时,send() 自己会阻塞 60 秒(Kafka 默认的
-        # max.block.ms)才报错,HTTP 请求整整卡一分钟,占着一个 Tomcat 线程。
-        # 三个超时要配套:delivery.timeout.ms 必须 >= request.timeout.ms + linger.ms,
-        # 否则 Kafka 启动就拒绝这套配置。
-        max.block.ms: 5000        # send() 等元数据(topic 是否存在、broker 地址)最多等 5 秒
-        request.timeout.ms: 5000  # 单次请求 broker 的超时
-        delivery.timeout.ms: 10000  # 从 send() 返回起,10 秒内一定给出"成功"或"失败"的确定结果
+        # Measured: with the topic missing or Kafka unreachable, send() itself blocks for 60 seconds
+        # (Kafka's default max.block.ms) before failing, holding the HTTP request and a Tomcat thread
+        # for a full minute. The three timeouts go together: delivery.timeout.ms must be
+        # >= request.timeout.ms + linger.ms, or Kafka rejects the configuration at startup.
+        max.block.ms: 5000        # send() waits at most 5 seconds for metadata (does the topic exist, broker addresses)
+        request.timeout.ms: 5000  # timeout of a single request to the broker
+        delivery.timeout.ms: 10000  # within 10 seconds of send() returning, a definite "succeeded" or "failed"
 
 document:
-  # 跟 llm-service 的 app/config.py 读的是同一个 .env 变量,单一数据源,
-  # 不在这里重新拼一遍字符串(早期就踩过这个坑)。
+  # The same .env variable llm-service's app/config.py reads: one source, not a second copy of the string.
   upload-topic: ${DOC_UPLOAD_TOPIC:document-upload-events}
-  # 下面两项是写测试时"逼"出来的:原先一个硬编码成 uploads,一个硬编码成 15 秒,
-  # 结果测试要么往真实目录写文件,要么测"结果不确定"分支得真等 15 秒。
-  # 变成配置项后,测试可以指到临时目录、把超时改成 300 毫秒。
-  # 上传文件的存放根目录,backend 写、llm-service 读——两边读同一个 .env 变量 UPLOAD_DIR。
-  # 默认 ../uploads 是相对【各服务自己的目录】的:backend-service/ 和 llm-service/ 是兄弟目录,
-  # 各自从自己目录运行时,../uploads 恰好都指向仓库根的 uploads/,不用写死绝对路径。
-  # (以后上 Docker,两个容器挂同一个共享卷,把这个变量设成挂载点即可;再往后换成 S3,
-  #  消息里的 storageKey 不变,只换存储后端。)
+  # The two settings below are configurable so tests can point the upload folder at a temporary
+  # directory and shorten the send timeout to 300 ms, instead of writing into the real folder or
+  # actually waiting 15 seconds for the "outcome unknown" branch.
+  # Root folder of uploaded files: the backend writes, llm-service reads; both read the .env variable UPLOAD_DIR.
+  # The default ../uploads is relative to EACH SERVICE'S OWN FOLDER: backend-service/ and llm-service/
+  # are siblings, so run from their own folders, ../uploads in both points at uploads/ at the
+  # repository root, with no absolute path hard-coded.
+  # (In Docker, both containers mount one shared volume and this variable is set to the mount
+  #  point; later, with S3, the storageKey in the message stays and only the storage backend changes.)
   upload-dir: ${UPLOAD_DIR:../uploads}
-  send-timeout-ms: 15000  # 等 Kafka 发送结果的上限;必须大于 delivery.timeout.ms(10 秒),见上面 producer 配置
+  send-timeout-ms: 15000  # upper bound for waiting on Kafka's send result; must exceed delivery.timeout.ms (10 s), see the producer settings above
 
 server:
-  # 8080 是 Spring Boot 默认端口,但我们的 kafka-ui 已经占了 8080,
-  # 用 architecture.md 里规划好的 8081,避免端口冲突。
+  # 8080 is Spring Boot's default port, but kafka-ui already uses it; 8081 is the port
+  # planned in architecture.md.
   port: ${BACKEND_PORT:8081}
 
 management:
   endpoints:
     web:
       exposure:
-        include: health # /actuator/env 只在调试时临时打开,平时不暴露(会连敏感配置项名字一起透出去)
+        include: health # /actuator/env is only opened temporarily while debugging (it exposes sensitive configuration names)

@@ -1,1 +1,1 @@
-# 查询路由。判断"查文档 / 查数据 / 两者都要",分发并合并回答。
+# Query routing: decides "documents / data / both", dispatches and merges the answer.

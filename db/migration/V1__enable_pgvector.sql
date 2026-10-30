@@ -1,9 +1,10 @@
 -- ============================================================================
---  V1 —— 开启 pgvector 扩展,之后才能用 vector 类型和相似度检索
+--  V1 -- enable the pgvector extension (the vector type and similarity search)
 --
---  db/migration/ 下的文件由 Flyway 按版本号顺序执行(见 docker-compose.yml 的
---  flyway 服务)。已经执行过的迁移文件不能再改:Flyway 记着每个文件的校验和,
---  改了会在下次 migrate 时报错。要改表结构,新建一个版本号更大的文件。
+--  Flyway runs the files in db/migration/ in version order (see the flyway
+--  service in docker-compose.yml). An applied migration must never be edited:
+--  Flyway stores each file's checksum and the next migrate fails if it changed.
+--  To change the schema, add a file with a higher version number.
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS vector;

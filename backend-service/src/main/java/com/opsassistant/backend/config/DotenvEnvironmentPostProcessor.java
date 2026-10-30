@@ -11,32 +11,33 @@ import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.MapPropertySource;
 
 /**
- * Java 默认不认识仓库根目录那个 .env 文件——这个类是我们自己补的"读 .env 的能力",
- * 让 application.yml 里 ${POSTGRES_USER:ops} 这种占位符真的有机会从 .env 拿到值,
- * 而不是永远退到冒号后面写死的默认值(这是开发中发现的一个真实 bug 的修复)。
+ * Java does not read the .env file at the repository root by itself; this class adds that ability,
+ * so placeholders like ${POSTGRES_USER:ops} in application.yml really get their value from .env
+ * instead of always falling back to the default after the colon.
  *
- * EnvironmentPostProcessor 是 Spring Boot 提供的一个扩展点:启动过程中,
- * 比读 application.yml 还早的阶段,会调用所有注册了的 EnvironmentPostProcessor。
- * 我们在这里手动解析 .env,塞进 Spring 的 Environment 里。
+ * EnvironmentPostProcessor is a Spring Boot extension point: during startup, even before
+ * application.yml is read, every registered EnvironmentPostProcessor is called. This one parses
+ * .env by hand and adds it to Spring's Environment.
  *
- * 这个类不像 @Component / @RestController 那样靠"扫描注解"被发现——
- * EnvironmentPostProcessor 跑的时候,Spring 的容器(能扫描注解那套机制)还没建好,
- * 所以必须用更原始的方式注册,见 resources/META-INF/spring.factories。
+ * Unlike @Component / @RestController, it is not discovered by annotation scanning: when an
+ * EnvironmentPostProcessor runs, Spring's container (the machinery that scans annotations) does not
+ * exist yet, so it has to be registered the more primitive way, in resources/META-INF/spring.factories.
  *
- * 注意接口的包名:Spring Boot 4 把它从 org.springframework.boot.env 搬到了 org.springframework.boot,
- * 旧位置的那个标了 @Deprecated(forRemoval = true)。import 和 spring.factories 里的注册键
- * 必须【同时】用新名字:只改一处,Spring 启动时会直接抛 "not assignable to factory type"(实测),
- * 是大声失败。真正会【悄悄失效】的是"没注册"(spring.factories 缺失/键名写错成别的)——
- * 那样 .env 不再被读,application.yml 退回冒号后面的默认值(就是上面说的那个 bug)。
+ * Mind the interface's package: Spring Boot 4 moved it from org.springframework.boot.env to
+ * org.springframework.boot and marked the old one @Deprecated(forRemoval = true). The import and the
+ * registration key in spring.factories must BOTH use the new name: changing only one makes startup
+ * throw "not assignable to factory type" (verified), a loud failure. What fails SILENTLY is not
+ * registering it at all (spring.factories missing or the key misspelled): .env is then never read
+ * and application.yml falls back to the defaults after the colon.
  */
 public class DotenvEnvironmentPostProcessor implements EnvironmentPostProcessor {
 
     @Override
     public void postProcessEnvironment(ConfigurableEnvironment environment, SpringApplication application) {
-        // backend-service/ 的上一级就是仓库根目录,.env 放在那里
+        // .env lives at the repository root, the parent of backend-service/
         Path envFile = Path.of("..", ".env");
         if (!Files.exists(envFile)) {
-            return; // 没有 .env 不报错——生产环境该用真正的操作系统环境变量,不依赖这个文件
+            return; // no .env is fine: production should use real operating-system environment variables
         }
 
         Map<String, Object> values = new LinkedHashMap<>();
@@ -50,12 +51,12 @@ public class DotenvEnvironmentPostProcessor implements EnvironmentPostProcessor 
                 values.put(trimmed.substring(0, eq).trim(), trimmed.substring(eq + 1).trim());
             }
         } catch (IOException e) {
-            throw new IllegalStateException("读取 .env 失败: " + envFile.toAbsolutePath(), e);
+            throw new IllegalStateException("failed to read .env: " + envFile.toAbsolutePath(), e);
         }
 
-        // addLast:优先级设成最低。如果真的在部署环境里设了货真价实的操作系统环境变量,
-        // 那个优先级更高会覆盖 .env 里的同名值——.env 只在没有真环境变量时兜底,
-        // 跟 docker-compose 自己读 .env 的角色定位一致。
+        // addLast: lowest priority. A real operating-system environment variable set in a deployment
+        // wins over the same name in .env; .env is only the fallback when no real variable exists,
+        // the same role it plays for docker compose.
         environment.getPropertySources().addLast(new MapPropertySource("dotenv", values));
     }
 }
