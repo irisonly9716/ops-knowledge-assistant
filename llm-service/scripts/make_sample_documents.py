@@ -1,19 +1,22 @@
-"""用本机的文字处理软件把 Markdown 样例转成 docx 和 PDF,给解析层的测试当样例。
+"""Convert the Markdown samples to docx and PDF with this machine's word processor; the results are
+the fixtures for the parsing tests.
 
-只能在装了 Word 或 WPS 的 Windows 上跑。流程:
-    Markdown --(markdown-it-py)--> HTML --(导入)--> 另存为 docx、另存为 PDF
-导入 HTML 时 <h1>/<h2> 变成内置的"标题 1 / 标题 2"样式、<ol>/<ul> 变成自动编号列表、
-<table> 变成表格,跟人在软件里排版得到的文件结构一样。
+Runs only on Windows with Word or WPS installed. The flow:
+    Markdown --(markdown-it-py)--> HTML --(import)--> save as docx, save as PDF
+On import, <h1>/<h2> become the built-in "Heading 1 / Heading 2" styles, <ol>/<ul> become
+automatic numbered lists and <table> becomes a table: the same structure a person gets by
+formatting the document in the application.
 
-通过 COM 接口 Word.Application 调用。同时装了 WPS 的机器上,WPS 会把这个接口的 64 位注册
-指向自己(wps.exe),所以现在仓库里的样例实际是 WPS 生成的:docx 里写着 "WPS Office",
-PDF 的 Creator 是 "WPS 文字"。两种软件存出来的都是标准 docx / PDF,解析器不区分。
-WPS 导入时有一处改动:编号列表里嵌套的项目符号列表,被它改成了编号(PDF 里能看到 "1. 申诉通过")。
+It goes through the COM interface Word.Application. On a machine that also has WPS installed,
+WPS points the 64-bit registration of that interface at itself (wps.exe), so the fixtures in the
+repository were actually produced by WPS: the docx says "WPS Office" and the PDF's Creator is
+WPS. Both applications save standard docx / PDF and the parsers don't care which one it was.
+WPS changes one thing on import: a bullet list nested inside a numbered list becomes numbered.
 
-生成的文件提交进仓库(tests/fixtures/documents/),跑测试不需要 Word。
-Markdown 原文改了之后要重新跑一次,否则"三种格式解析结果一致"的测试会失败。
+The generated files are committed (tests/fixtures/documents/), so running the tests needs no Word.
+Rerun this after changing a Markdown source, or the "all three formats parse the same" test fails.
 
-跑法:
+Run:
     cd llm-service
     uv run python -m scripts.make_sample_documents
 """
@@ -28,15 +31,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = REPO_ROOT / "llm-service" / "tests" / "fixtures" / "documents"
 
 SOURCES = [
-    REPO_ROOT / "sop_docs" / "风控问题处理流程.md",           # 有两级列表
-    REPO_ROOT / "sop_docs" / "主播签约考核流程-3C数码.md",
-    REPO_ROOT / "campaign_docs" / "美妆618大促-复盘.md",      # 有表格
+    REPO_ROOT / "sop_docs" / "account-restriction-handling.md",            # two list levels
+    REPO_ROOT / "sop_docs" / "host-onboarding-and-review-electronics.md",
+    REPO_ROOT / "campaign_docs" / "beauty-black-friday-live-review.md",     # tables
 ]
 
-# 真实的 Word 文档没有 YAML frontmatter,转换前去掉
+# Real Word documents have no YAML frontmatter; strip it before converting
 FRONTMATTER = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
 
-# 表格加上边框:Word 里新建表格默认就有边框;没有边框的话,PDF 里也就没有表格线
+# Give tables borders: a new table in Word has borders by default, and without them the PDF
+# has no ruling lines either
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>table {{ border-collapse: collapse; }} th, td {{ border: 1px solid #000; padding: 2px 6px; }}</style>
@@ -45,14 +49,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </body></html>
 """
 
-# Word 的 COM 接口只能从 Windows 程序里调,PowerShell 是最省事的一个。
-# 文件路径(含中文)用参数传进去,脚本本身只能有 ASCII:PowerShell 5.1 把没有 BOM 的
-# 脚本按系统 ANSI 编码读,写中文注释会读成乱码。所以说明都写在这里:
-#   Documents.Add()   基于默认模板新建,跟用户新建一个空白文档一样
-#   SaveAs2(..., 16)  wdFormatDocumentDefault,即 .docx
-#   SaveAs2(..., 17)  wdFormatPDF,等于"另存为 PDF"
-#   Quit 包在 try 里:实测关掉最后一个文档后,这台机器上的 Word 进程有时已经自己退出了,
-#   这时再调 Quit 会报 RPC 失败(0x800706BE);文件此前已经保存好,不影响结果
+# Word's COM interface can only be called from a Windows program; PowerShell is the simplest.
+# File paths are passed as arguments and the script itself stays ASCII-only: PowerShell 5.1
+# reads a script without a BOM in the system ANSI code page, so non-ASCII text would be garbled.
+# That is why the notes live here:
+#   Documents.Add()   a new document from the default template, like a user creating a blank one
+#   SaveAs2(..., 16)  wdFormatDocumentDefault, i.e. .docx
+#   SaveAs2(..., 17)  wdFormatPDF, the same as "Save as PDF"
+#   Quit is wrapped in try: on this machine the Word process has been seen to exit on its own
+#   after its last document closes, and calling Quit then fails with an RPC error (0x800706BE);
+#   the files were saved before that, so the result is unaffected
 WORD_SCRIPT = r"""
 param([string]$Html, [string]$Docx, [string]$Pdf)
 $ErrorActionPreference = 'Stop'

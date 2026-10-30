@@ -1,4 +1,4 @@
-"""把消息里的 storage_key 翻译成本机上真实的文件路径。"""
+"""Turn the storage_key in a message into the real file path on this machine."""
 from pathlib import Path
 
 from app.config import settings
@@ -6,25 +6,28 @@ from app.consumers.errors import PermanentError
 
 
 def resolve_upload_path(storage_key: str, upload_dir: str | Path | None = None) -> Path:
-    """storage_key -> 上传目录里的真实文件。
+    """storage_key -> the real file inside the upload folder.
 
-    消息来自 Kafka,虽然是内部通道,也【不能信任它的内容】:如果 storage_key 是
-    "../../etc/passwd" 或者一个绝对路径,直接拼路径去读,就是路径穿越(path traversal)。
-    所以拼完之后必须确认结果仍然落在上传目录内部。
+    The message comes from Kafka. It is an internal channel, but its content still CANNOT be
+    trusted: if storage_key is "../../etc/passwd" or an absolute path, joining it onto the
+    folder and reading the result is path traversal. So after joining, check that the result
+    is still inside the upload folder.
 
-    做法是先 resolve()(把 .. 、符号链接全部展开成真实路径)再比较——不能只检查
-    storage_key 里有没有 ".." 字样:符号链接、绝对路径、大小写/编码花样都能绕过字符串检查。
+    resolve() first (expanding .. and symlinks into the real path), then compare. Checking
+    storage_key for ".." is not enough: symlinks, absolute paths and case/encoding tricks all
+    get past a string check.
 
-    两种失败的性质不同,所以抛不同的异常(见 errors.py):
-      越界      -> PermanentError:这条消息永远是坏的,重试没意义
-      文件不存在 -> FileNotFoundError(普通异常):可能只是共享卷还没同步好之类的暂时问题,
-                   让上层按指数退避重试几次,仍不行再进死信
+    The two failures are different in nature, so they raise different exceptions (see errors.py):
+      outside the folder -> PermanentError: the message is broken forever, retrying is pointless
+      file not found     -> FileNotFoundError (an ordinary exception): may be temporary, e.g. a
+                            shared volume not synced yet; the caller retries with exponential
+                            backoff and only then sends it to the dead-letter topic
     """
     base = Path(upload_dir if upload_dir is not None else settings.upload_dir).resolve()
-    candidate = (base / storage_key).resolve()  # 注意:storage_key 若是绝对路径,`/` 会直接丢掉 base
+    candidate = (base / storage_key).resolve()  # careful: if storage_key is absolute, `/` drops base entirely
 
     if candidate == base or not candidate.is_relative_to(base):
-        raise PermanentError(f"storage_key 越出了上传目录,拒绝: {storage_key!r}")
+        raise PermanentError(f"storage_key points outside the upload folder, rejected: {storage_key!r}")
     if not candidate.is_file():
-        raise FileNotFoundError(f"上传目录里找不到文件: {storage_key!r}(目录: {base})")
+        raise FileNotFoundError(f"file not found in the upload folder: {storage_key!r} (folder: {base})")
     return candidate

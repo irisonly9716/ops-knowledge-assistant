@@ -11,11 +11,11 @@ import lombok.NoArgsConstructor;
 import lombok.Setter;
 
 /**
- * 对应 docs/data-schema.md 里的 departments 表——权限模型的基础表之一
- * (每个 campaign / anchor / user 都会挂在某个 department 下)。
+ * The departments table from docs/data-schema.md, one of the base tables of the permission model
+ * (every campaign / host / user belongs to a department).
  *
- * Lombok 的 @Getter/@Setter/构造器注解:省掉手写一堆 getXxx()/setXxx(),
- * pom.xml 里的 lombok 依赖 + IDE 装 Lombok 插件后,这些方法在编译期自动生成。
+ * Lombok's @Getter/@Setter/constructor annotations save writing getXxx()/setXxx() by hand: with the
+ * lombok dependency in pom.xml (and the Lombok plugin in the IDE) they are generated at compile time.
  */
 @Entity
 @Table(name = "departments")

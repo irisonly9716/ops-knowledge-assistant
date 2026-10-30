@@ -1,14 +1,17 @@
-"""消费者里两类失败的区分——这个区分决定了"重试"还是"直接进死信"。"""
+"""Two kinds of failure in the consumer; which one it is decides "retry" vs "straight to the dead-letter topic"."""
 
 
 class PermanentError(Exception):
-    """输入本身有问题,重试一万次结果也一样:消息不是合法 JSON、字段不符合契约、
-    storage_key 试图越出上传目录……
+    """The input itself is broken and retrying will never help: the message is not valid
+    JSON, fields break the contract, storage_key tries to escape the upload folder...
 
-    遇到它立刻进死信队列,不浪费重试次数,更不能让它卡住后面的消息。
+    It goes to the dead-letter queue at once: no wasted retries, and it must not block the
+    messages behind it.
 
-    除此之外的所有异常(文件暂时读不到、下游服务超时、网络抖动……)默认都当作
-    "可能是暂时的",会按指数退避重试,重试用尽才进死信。
-    默认当暂时的、明确知道无解的才标 Permanent,是有意的:误把暂时错误当永久错误,
-    会让一条本来能成功的消息直接进死信;反过来只是多重试几次,代价小得多。
+    Every other exception (file temporarily unreadable, downstream timeout, network blip...)
+    is treated as possibly temporary and retried with exponential backoff; only when the
+    retries run out does the message go to the dead-letter topic.
+    Defaulting to "temporary" and marking only known-hopeless cases as permanent is deliberate:
+    treating a temporary error as permanent sends a message that could have succeeded to the
+    dead-letter topic, while the opposite mistake only costs a few extra retries.
     """

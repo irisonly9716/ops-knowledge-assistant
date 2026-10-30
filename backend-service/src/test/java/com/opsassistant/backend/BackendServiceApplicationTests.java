@@ -5,15 +5,15 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 
 /**
- * 集成测试:启动【完整】的 Spring 容器,连真实的 Postgres。
+ * Integration test: starts the FULL Spring container against a real Postgres.
  *
- * 它真正验证的东西比名字"contextLoads"看起来的多:因为 application.yml 里是
- * ddl-auto: validate,容器启动时 Hibernate 会拿每个 @Entity 去比对真实数据库的表结构——
- * 所以这个测试同时是一个"Entity 跟 db/migration/ 的迁移是否漂移"的检测器。
- * 以后有人改了 schema 忘了改 Entity(或反过来),这里会直接红。
+ * It checks more than the name "contextLoads" suggests: application.yml has ddl-auto: validate,
+ * so at startup Hibernate compares every @Entity with the real database tables. That makes this
+ * test a detector for drift between the entities and the migrations in db/migration/: if someone
+ * changes the schema and forgets an entity (or the other way round), it fails.
  *
- * 因为依赖外部基础设施(docker compose 里的 Postgres 要在跑),默认不跑——
- * 见 pom.xml 里的 excludedGroups。想跑它:
+ * It needs external infrastructure (the Postgres from docker compose must be running), so it is
+ * skipped by default; see excludedGroups in pom.xml. To run it:
  *   .\mvnw.cmd test -DexcludedGroups=none -Dgroups=integration
  */
 @Tag("integration")

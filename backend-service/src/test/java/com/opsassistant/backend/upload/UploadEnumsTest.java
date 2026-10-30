@@ -12,9 +12,10 @@ import org.junit.jupiter.params.provider.ValueSource;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * 纯单元测试:不启动 Spring、不连任何外部服务,跑起来是毫秒级。
- * 这几个枚举是"Java 内部类型"和"外界约定的字符串"(数据库 CHECK 约束、Python 消费者)
- * 之间的翻译层,翻译错了不会报错、只会悄悄对不上,所以值得钉死。
+ * Plain unit tests: no Spring, no external services, milliseconds to run.
+ * These enums translate between Java's internal types and the strings agreed with the outside
+ * (database CHECK constraints, the Python consumer). A wrong translation raises no error, it just
+ * silently stops matching, so it is worth pinning down.
  */
 class UploadEnumsTest {
 
@@ -28,12 +29,12 @@ class UploadEnumsTest {
     @ValueSource(strings = {"campain_plan", "SOP", "Sop", "", " sop", "sop "})
     @NullSource
     void docType_fromValue_rejects_typos_case_variants_and_null(String raw) {
-        // 特别注意 "SOP"(大写)也要被拒绝:线上约定的写法是小写 sop,
-        // 不能因为枚举常量名恰好叫 SOP 就悄悄放行
+        // Note that "SOP" (uppercase) must be rejected too: the wire format is lowercase sop,
+        // and the enum constant happening to be named SOP must not let it through
         assertThatThrownBy(() -> DocType.fromValue(raw))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("docType 只能是")
-                .hasMessageContaining("收到:" + raw); // 报错信息要把用户实际传的值带回去,方便排查
+                .hasMessageContaining("docType must be")
+                .hasMessageContaining("got: " + raw); // the message echoes the value actually sent, for troubleshooting
     }
 
     @Test
@@ -52,22 +53,23 @@ class UploadEnumsTest {
 
         assertThat(TableType.fromValue("campaign_products")).isEqualTo(TableType.CAMPAIGN_PRODUCTS);
         assertThat(TableType.fromValue("campaign_customer_behavior")).isEqualTo(TableType.CAMPAIGN_CUSTOMER_BEHAVIOR);
-        assertThatThrownBy(() -> TableType.fromValue("campaign_product")) // 少个 s
+        assertThatThrownBy(() -> TableType.fromValue("campaign_product")) // missing an s
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("campaign_product");
     }
 
     /**
-     * 最重要的一个:枚举序列化进 JSON 后必须是小写下划线("campaign_plan"),
-     * 不是 Java 枚举常量名("CAMPAIGN_PLAN")。这是跟 Python 消费者、数据库 CHECK 约束的
-     * 跨语言约定——@JsonValue 一旦被误删,编译不报错、其它测试也可能不报错,
-     * 只有下游消费者收到 "CAMPAIGN_PLAN" 才炸。
+     * The most important one: serialized to JSON, an enum must be lowercase with underscores
+     * ("campaign_plan"), not the Java constant name ("CAMPAIGN_PLAN"). That is the cross-language
+     * agreement with the Python consumer and the database CHECK constraints. If @JsonValue is
+     * deleted by mistake, nothing fails to compile and other tests may stay green; only the
+     * downstream consumer blows up when it receives "CAMPAIGN_PLAN".
      */
     @Test
     @SuppressWarnings("unchecked")
     void event_serializes_enums_as_the_lowercase_wire_format() throws Exception {
         UploadEvent event = new UploadEvent(
                 "u-1", "u-1-x.md", ContentKind.DOCUMENT, DocType.CAMPAIGN_REVIEW, null,
-                "美妆运营", 3L, null, Source.MANUAL);
+                "Beauty", 1L, null, Source.MANUAL);
 
         JsonMapper mapper = JsonMapper.builder().build();
         Map<String, Object> wire = mapper.readValue(mapper.writeValueAsString(event), Map.class);
@@ -76,7 +78,7 @@ class UploadEnumsTest {
                 .containsEntry("contentKind", "document")
                 .containsEntry("docType", "campaign_review")
                 .containsEntry("source", "manual")
-                .containsEntry("campaignId", 3)
-                .containsEntry("tableType", null); // 不适用的字段是显式的 null,不是缺失
+                .containsEntry("campaignId", 1)
+                .containsEntry("tableType", null); // a field that does not apply is an explicit null, not missing
     }
 }

@@ -1,1 +1,1 @@
-# Redis 查询缓存 + 会话记忆(多轮对话上下文、追问澄清)。
+# Redis query cache + conversation memory (multi-turn context, clarifying follow-ups).

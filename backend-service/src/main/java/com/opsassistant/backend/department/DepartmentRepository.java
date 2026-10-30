@@ -3,17 +3,17 @@ package com.opsassistant.backend.department;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 /**
- * Spring Data JPA 的套路:只要继承 JpaRepository<实体类型, 主键类型>,
- * save() / findAll() / findById() 这些方法都不用自己写,框架在运行时生成实现。
- * 所以一个"最简单的 Entity + Repository"正常情况下就是这么短。
+ * The Spring Data JPA pattern: extend JpaRepository<entity type, id type> and save() / findAll() /
+ * findById() need no code; the framework generates the implementation at runtime. That is why the
+ * simplest Entity + Repository pair is this short.
  */
 public interface DepartmentRepository extends JpaRepository<Department, Long> {
 
     /**
-     * 方法名本身就是查询——Spring Data JPA 看到 existsByName 这个方法签名,
-     * 按"按 By 拆开、后面跟的是字段名"这个约定,自动生成
-     * "SELECT EXISTS (SELECT 1 FROM departments WHERE name = ?)" 这样的查询,
-     * 不用写一行 SQL/JPQL。用来在 UploadController 里校验"这个部门名真的存在吗"。
+     * The method name is the query. Spring Data JPA splits existsByName at "By", treats the rest as
+     * a field name and generates something like
+     * "SELECT EXISTS (SELECT 1 FROM departments WHERE name = ?)" without a line of SQL/JPQL.
+     * UploadController uses it to check that a department name really exists.
      */
     boolean existsByName(String name);
 }

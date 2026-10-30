@@ -2,7 +2,7 @@ package com.opsassistant.backend.upload;
 
 import com.fasterxml.jackson.annotation.JsonValue;
 
-/** 运营上传的结构化表格,对应 db/migration/ 里建的两张表。 */
+/** Structured tables uploaded by ops staff; the two tables created in db/migration/. */
 public enum TableType {
     CAMPAIGN_PRODUCTS("campaign_products"),
     CAMPAIGN_CUSTOMER_BEHAVIOR("campaign_customer_behavior");
@@ -27,6 +27,6 @@ public enum TableType {
             }
         }
         throw new IllegalArgumentException(
-                "tableType 只能是 campaign_products / campaign_customer_behavior,收到:" + raw);
+                "tableType must be campaign_products / campaign_customer_behavior, got: " + raw);
     }
 }

@@ -1,21 +1,25 @@
-"""生成模拟数据,插入 departments / users / anchors / campaigns / campaign_metrics /
-campaign_products / campaign_customer_behavior。
+"""Generate mock data for departments / users / hosts / campaigns / campaign_metrics /
+campaign_products / campaign_customer_behavior.
 
-后两张表模拟的是"运营上传的结构化表格"(商品售卖数据、顾客行为数据)——现实中这些
-本来就该是别的系统算好/导出给我们的,不是我们自己造的分析引擎,这里只是伪造几行
-方便下游代码有数据可查。
+The last two tables stand in for structured tables that ops staff upload (product sales,
+customer behavior). In reality another system computes and exports them; we are not
+building an analytics engine, these rows only give downstream code something to query.
 
-不接真实阿里数据,自己造。documents / doc_chunks 不在这里造——那两张表(SOP、
-策划案、复盘文档)要等真正的"上传 -> 解析 -> 切片 -> embedding"链路
-跑起来才有数据,不是假数据。
+documents / doc_chunks are not generated here: SOPs, plans and reviews only get there
+through the real upload -> parse -> chunk -> embed pipeline.
 
-跑法:
+Run:
     cd llm-service
     uv run python -m scripts.generate_mock_data
 
-幂等:每次跑都会先清空这几张表再重新生成(TRUNCATE ... RESTART IDENTITY CASCADE),
-方便反复调整数据量重跑。**这只是因为这些数据本来就是假的、可以随便丢**——
-真实业务数据的迁移脚本绝不能这样写。
+Reproducible: random and Faker are both seeded, and every date is computed from the
+fixed AS_OF date instead of today, so each run produces exactly the same rows.
+campaign_docs/ quotes numbers from this data; they stay valid as long as this script and
+the pinned faker version don't change.
+
+Idempotent: every run empties these tables first (TRUNCATE ... RESTART IDENTITY CASCADE)
+so you can rerun it freely. **That is only acceptable because the data is fake** --
+a migration of real business data must never do this.
 """
 import random
 from datetime import date, timedelta
@@ -26,32 +30,55 @@ from psycopg.types.json import Jsonb
 
 from app.config import settings
 
-fake = Faker("zh_CN")
-# 固定 random 的种子:数量、金额、粉丝数、活动名、主播分配这些每次都一样。
-# 已知问题:主播名字和各种日期来自 Faker。Faker 用自己的随机数生成器,没有设种子,
-# 而且日期是相对"今天"算的,所以这两类值每次运行都不一样。
-random.seed(42)
+SEED = 42
+random.seed(SEED)
+fake = Faker("en_US")
+fake.seed_instance(SEED)
 
-# 部门名字是业务领域知识,Faker 编不出来,手写固定列表——
-# 这几个名字后面 sop_docs/ 里的 SOP 文档、以及策划案/复盘文档也会用到,必须
-# 完全一致(纯字符串匹配,见 docs/permission-model.md:documents.department 不是外键)。
-DEPARTMENTS = ["美妆运营", "3C数码运营", "食品生鲜运营", "日用百货运营"]
+# The data is a snapshot "as of" this date: campaign statuses, the last day of metrics and
+# every relative date are computed from it, never from today.
+AS_OF = date(2026, 10, 15)
 
-CAMPAIGN_TEMPLATES = ["618大促", "双11大促", "新品首发", "日常直播专场", "粉丝节", "清仓特卖", "周年庆"]
-
-# 每个部门卖的商品,也是业务领域知识,手写
-PRODUCTS_BY_DEPT = {
-    "美妆运营": ["口红", "粉底液", "眼影盘", "面膜", "精华液", "防晒霜", "洗面奶"],
-    "3C数码运营": ["蓝牙耳机", "充电宝", "手机壳", "智能手表", "数据线", "音箱", "平板支架"],
-    "食品生鲜运营": ["车厘子", "牛肉卷", "坚果礼盒", "螺蛳粉", "大闸蟹", "有机蔬菜包", "速冻水饺"],
-    "日用百货运营": ["抽纸", "洗衣液", "垃圾袋", "收纳箱", "保温杯", "拖把", "衣架套装"],
+# Department names are domain knowledge Faker can't invent. sop_docs/ and campaign_docs/
+# use the same names and must match exactly (plain string matching, see
+# docs/permission-model.md: documents.department is not a foreign key).
+# Value: (short label used in campaign names, prefix for customer_ref)
+DEPARTMENTS = {
+    "Beauty": ("Beauty", "BEA"),
+    "Consumer Electronics": ("Electronics", "ELE"),
+    "Fresh Grocery": ("Grocery", "GRO"),
+    "Home Goods": ("Home", "HOM"),
 }
 
-REGIONS = ["华东", "华南", "华北", "华中", "西南", "东北"]
+# Seasonal campaigns only start inside their window: (month, first day, last day).
+# Every department runs each of them once, so "Beauty Black Friday Live" names exactly one campaign.
+SEASONAL_CAMPAIGNS = {
+    "Black Friday Live": (11, 10, 20),
+    "Holiday Sale": (12, 1, 10),
+    "Summer Sale": (6, 1, 12),
+    "Back to School": (8, 1, 10),
+    "Anniversary Sale": (9, 1, 12),
+}
+# Year-round campaigns can run any time and repeat; their start date tells them apart
+EVERGREEN_CAMPAIGNS = ["New Product Launch", "Weekly Live Special", "Fan Appreciation Day", "Clearance Sale"]
 
-# 每个部门一个固定的"顾客池",campaign 之间从池子里抽样——这样同一个顾客
-# (同一个 customer_ref)有机会出现在这个部门的多场 campaign 里,以后想算
-# "复购率"才有意义(不然每场活动的顾客都是全新的,永远查不出复购)。
+# What each department sells -- domain knowledge too, written by hand
+PRODUCTS_BY_DEPT = {
+    "Beauty": ["Lipstick", "Foundation", "Eyeshadow Palette", "Sheet Mask", "Serum", "Sunscreen",
+               "Facial Cleanser"],
+    "Consumer Electronics": ["Wireless Earbuds", "Power Bank", "Phone Case", "Smartwatch",
+                             "Charging Cable", "Bluetooth Speaker", "Tablet Stand"],
+    "Fresh Grocery": ["Fresh Cherries", "Ribeye Steak", "Mixed Nut Gift Box", "Instant Ramen",
+                      "Snow Crab Legs", "Organic Veggie Box", "Frozen Dumplings"],
+    "Home Goods": ["Paper Towels", "Laundry Detergent", "Trash Bags", "Storage Bins",
+                   "Insulated Tumbler", "Spin Mop", "Hanger Set"],
+}
+
+REGIONS = ["Northeast", "Southeast", "Midwest", "Southwest", "Mountain West", "West Coast"]
+
+# One fixed customer pool per department; campaigns sample from it, so the same customer
+# (same customer_ref) can appear in several campaigns of a department. Without that,
+# every campaign has brand-new customers and repeat-purchase rate is always zero.
 CUSTOMER_POOL_SIZE = 150
 
 
@@ -65,15 +92,32 @@ def connect():
     )
 
 
+def seasonal_start(month: int, first_day: int, last_day: int) -> date:
+    """The most recent occurrence of the window that ends at least two weeks before AS_OF."""
+    year = AS_OF.year if date(AS_OF.year, month, last_day) <= AS_OF - timedelta(days=14) else AS_OF.year - 1
+    return date(year, month, random.randint(first_day, last_day))
+
+
+def campaign_plan(dept_short: str) -> list[tuple[str, date]]:
+    """(name, start date) of every campaign of one department within the year before AS_OF."""
+    plan = [(f"{dept_short} {template}", seasonal_start(*window))
+            for template, window in SEASONAL_CAMPAIGNS.items()]
+    for _ in range(random.randint(5, 10)):
+        start = AS_OF - timedelta(days=random.randint(14, 365))
+        plan.append((f"{dept_short} {random.choice(EVERGREEN_CAMPAIGNS)}", start))
+    return sorted(plan, key=lambda campaign: campaign[1])
+
+
 def main():
     with connect() as conn:
         with conn.cursor() as cur:
-            # RESTART IDENTITY:自增 id 也归零,重跑几次 id 都从 1 开始,不会越跑越大
-            # CASCADE:department 被 users/anchors/campaigns 外键引用,级联清空。
-            #   注意它会顺着外键一路清下去:uploads(引用 users)、documents 和 doc_chunks
-            #   (引用 campaigns / uploads)也会被清空,已经入库的文档要重新上传
+            # RESTART IDENTITY: ids start from 1 again on every run instead of growing
+            # CASCADE: departments are referenced by users/hosts/campaigns, so empty those too.
+            #   It follows every foreign key: uploads (references users), documents and
+            #   doc_chunks (reference campaigns / uploads) are emptied as well, so documents
+            #   that were already ingested have to be uploaded again
             cur.execute("""
-                TRUNCATE departments, users, anchors, campaigns, campaign_metrics,
+                TRUNCATE departments, users, hosts, campaigns, campaign_metrics,
                          campaign_products, campaign_customer_behavior
                 RESTART IDENTITY CASCADE
             """)
@@ -87,7 +131,7 @@ def main():
                 )
                 dept_ids[name] = cur.fetchone()[0]
 
-            # ---- users:每个部门 5-8 人,一个 manager,其余 staff ----
+            # ---- users: 5-8 per department, one manager, the rest staff ----
             for dept_name, dept_id in dept_ids.items():
                 n_staff = random.randint(4, 7)
                 cur.execute(
@@ -98,67 +142,59 @@ def main():
                     "INSERT INTO users (name, department_id, role) VALUES (%s, %s, 'staff')",
                     [(fake.name(), dept_id) for _ in range(n_staff)],
                 )
-            # 不属于任何运营部门的两个角色(department_id 为空,见 docs/permission-model.md):
-            #   admin     系统管理员:能看全部、做系统维护,但不改任何业务内容
-            #   executive 创始人/CEO:能看全部、审批经理的申请,但从不上传
-            # 名字写死:两个固定的特殊账号,一眼能认出来;也不调用 random,不会打乱后面的随机序列
+            # Two roles outside every ops department (department_id is NULL, see docs/permission-model.md):
+            #   admin     system administrator: sees everything and maintains the system,
+            #             never edits business content
+            #   executive founder/CEO: sees everything and approves managers' requests, never uploads
+            # Fixed names: two special accounts that are easy to recognize
             cur.executemany(
                 "INSERT INTO users (name, department_id, role) VALUES (%s, NULL, %s)",
-                [("系统管理员", "admin"), ("创始人兼CEO", "executive")],
+                [("System Administrator", "admin"), ("Founder & CEO", "executive")],
             )
 
-            # ---- anchors:每个部门 3-5 个,记下 anchor_id 给 campaigns 用 ----
-            anchor_ids_by_dept = {}
+            # ---- hosts: 3-5 per department; keep host_id for campaigns ----
+            host_ids_by_dept = {}
             for dept_name, dept_id in dept_ids.items():
-                n_anchors = random.randint(3, 5)
                 ids = []
-                for _ in range(n_anchors):
+                for _ in range(random.randint(3, 5)):
                     cur.execute(
-                        """INSERT INTO anchors (name, department_id, category, fans_count, join_date)
-                           VALUES (%s, %s, %s, %s, %s) RETURNING anchor_id""",
+                        """INSERT INTO hosts (name, department_id, category, fans_count, join_date)
+                           VALUES (%s, %s, %s, %s, %s) RETURNING host_id""",
                         (
                             fake.name(),
                             dept_id,
-                            dept_name.replace("运营", ""),
+                            dept_name,
                             random.randint(1_000, 500_000),
-                            fake.date_between(start_date="-2y", end_date="today"),
+                            fake.date_between(start_date=AS_OF - timedelta(days=730), end_date=AS_OF),
                         ),
                     )
                     ids.append(cur.fetchone()[0])
-                anchor_ids_by_dept[dept_name] = ids
+                host_ids_by_dept[dept_name] = ids
 
-            # ---- 每个部门一个固定顾客池,供 campaign_customer_behavior 抽样 ----
-            customer_pool_by_dept = {
-                dept_name: [f"CUST-{dept_name[:2]}-{i:04d}" for i in range(CUSTOMER_POOL_SIZE)]
-                for dept_name in dept_ids
-            }
-
-            # ---- campaigns + campaign_metrics:每个部门 10-15 个活动,
-            #      每个活动 15-60 天的每日指标 ----
+            # ---- campaigns + campaign_metrics: every seasonal campaign plus 5-10 year-round
+            #      ones per department, with daily metrics for 15-45 days each ----
             for dept_name, dept_id in dept_ids.items():
-                n_campaigns = random.randint(10, 15)
-                for _ in range(n_campaigns):
-                    duration = random.randint(15, 60)
-                    start = fake.date_between(start_date="-1y", end_date="-2M")
-                    end = start + timedelta(days=duration)
-                    status = "finished" if end < date.today() else random.choice(["running", "planned"])
-                    name = f"{dept_name.replace('运营', '')}{random.choice(CAMPAIGN_TEMPLATES)}"
-                    # 从本部门的主播里挑一个当主责主播——不跨部门挑,保持
-                    # campaign 的部门和主播的部门一致(避免以后按部门过滤时数据自相矛盾)
-                    anchor_id = random.choice(anchor_ids_by_dept[dept_name])
+                dept_short, customer_prefix = DEPARTMENTS[dept_name]
+                customer_pool = [f"CUST-{customer_prefix}-{i:04d}" for i in range(CUSTOMER_POOL_SIZE)]
+                for name, start in campaign_plan(dept_short):
+                    duration = random.randint(15, 45)
+                    end = start + timedelta(days=duration - 1)
+                    status = "finished" if end < AS_OF else "running"
+                    # The lead host comes from the same department, so filtering by department
+                    # never finds a campaign whose host belongs elsewhere
+                    host_id = random.choice(host_ids_by_dept[dept_name])
 
-                    # 先把每日 gmv 算出来(还不需要 campaign_id),这样才能拿到 total_gmv
-                    # 去校准运营成本和商品销售额——不然三张表的数字会各算各的、互相对不上
-                    # (之前 campaign_products 的销售额加起来会超过 campaign_metrics 的 GMV,
-                    # 就是因为两边完全独立生成,没有互相校准)。
+                    # Compute daily GMV first (no campaign_id needed yet) to get total_gmv,
+                    # which calibrates operating cost and product sales. Generated
+                    # independently, the product sales of a campaign could add up to more
+                    # than its GMV in campaign_metrics.
                     base_gmv = random.uniform(5_000, 50_000)
                     daily = []
                     for day_offset in range(duration):
                         d = start + timedelta(days=day_offset)
-                        if d > date.today():
+                        if d > AS_OF:
                             break
-                        wobble = random.uniform(0.6, 1.5)  # 随手加点每日波动,不追求真实
-                        gmv = round(base_gmv * wobble, 2)
+                        gmv = round(base_gmv * random.uniform(0.6, 1.5), 2)   # some day-to-day noise
                         dau = int(gmv / random.uniform(8, 15))
                         daily.append((
                             d, gmv, dau,
@@ -169,19 +205,19 @@ def main():
                         ))
                     total_gmv = sum(row[1] for row in daily)
 
-                    # 运营成本(坑位费+推广+赠品,不含商品成本):按 GMV 的一个粗略比例定计划成本,
-                    # 实际成本在计划上下浮动——活动结束账单和预算本来就会有出入,这正是要分开
-                    # 记两个字段的原因。只有"finished"的活动才填得出实际成本,没跑完的还不知道。
+                    # Operating cost (placement fees + promotion + giveaways, no product cost):
+                    # the plan is a rough share of GMV and the actual cost lands around it --
+                    # invoices never match the budget exactly, which is why there are two
+                    # fields. Only finished campaigns have an actual cost.
                     planned_cost = round(total_gmv * random.uniform(0.1, 0.2), 2)
                     actual_cost = round(planned_cost * random.uniform(0.85, 1.25), 2) if status == "finished" else None
 
                     cur.execute(
                         """INSERT INTO campaigns
-                           (name, department_id, anchor_id, category, start_date, end_date, status,
+                           (name, department_id, host_id, category, start_date, end_date, status,
                             planned_operating_cost, actual_operating_cost)
                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING campaign_id""",
-                        (name, dept_id, anchor_id, dept_name.replace("运营", ""), start, end, status,
-                         planned_cost, actual_cost),
+                        (name, dept_id, host_id, dept_name, start, end, status, planned_cost, actual_cost),
                     )
                     campaign_id = cur.fetchone()[0]
 
@@ -193,14 +229,14 @@ def main():
                         [(campaign_id, *row) for row in daily],
                     )
 
-                    # ---- campaign_products:这场活动卖了哪些商品(运营上传的表,假装是)。
-                    # 销售额校准到 total_gmv 的一个比例以内(留一部分给长尾/未追踪的商品),
-                    # 保证"主推品销售额加起来"永远不会超过这场活动的总 GMV。
-                    # cost_price/profit/profit_margin 现实中应该跟 units_sold 这些一样,
-                    # 是这份上传表格自带的字段(财务系统算好的),不是我们衍生计算的——
-                    # 这里只是为了让假数据内部数字对得上(profit = 销售额 - 商品成本),才顺手推一下。
+                    # ---- campaign_products: what this campaign sold (pretending ops uploaded it).
+                    # Sales are capped at a share of total_gmv (the rest is long-tail or untracked
+                    # products), so the featured products never add up to more than the GMV.
+                    # cost_price / profit / profit_margin would come with the uploaded table
+                    # (computed by finance), like units_sold; we derive them here only so the
+                    # fake numbers agree with each other (profit = sales - product cost).
                     dept_products = PRODUCTS_BY_DEPT[dept_name]
-                    campaign_products = random.sample(dept_products, k=min(len(dept_products), random.randint(3, 6)))
+                    campaign_products = random.sample(dept_products, k=random.randint(3, 6))
                     product_pool = total_gmv * random.uniform(0.6, 0.9)
                     weights = [random.random() for _ in campaign_products]
                     weight_total = sum(weights)
@@ -210,7 +246,7 @@ def main():
                         sales_amount = round(product_pool * weight / weight_total, 2)
                         unit_price = random.uniform(30, 300)
                         units = max(1, round(sales_amount / unit_price))
-                        cost_price = round(unit_price * random.uniform(0.4, 0.7), 2)  # 成本价是售价的 40%-70%
+                        cost_price = round(unit_price * random.uniform(0.4, 0.7), 2)  # 40-70% of the price
                         profit = round(sales_amount - cost_price * units, 2)
                         profit_margin = round(profit / sales_amount, 4) if sales_amount else 0
                         product_rows.append((
@@ -230,11 +266,8 @@ def main():
                         product_rows,
                     )
 
-                    # ---- campaign_customer_behavior:这场活动的顾客行为(同样是运营上传的表) ----
-                    sampled_customers = random.sample(
-                        customer_pool_by_dept[dept_name],
-                        k=min(len(customer_pool_by_dept[dept_name]), random.randint(15, 40)),
-                    )
+                    # ---- campaign_customer_behavior: this campaign's customers (also an uploaded table) ----
+                    sampled_customers = random.sample(customer_pool, k=random.randint(15, 40))
                     cur.executemany(
                         """INSERT INTO campaign_customer_behavior
                            (campaign_id, customer_ref, region, dwell_time_minutes,
@@ -244,7 +277,7 @@ def main():
                             (
                                 campaign_id, customer_ref, random.choice(REGIONS),
                                 round(random.uniform(0.5, 45), 2),
-                                Jsonb(random.sample(campaign_products, k=min(len(campaign_products), random.randint(1, 3)))),
+                                Jsonb(random.sample(campaign_products, k=random.randint(1, 3))),
                                 round(random.uniform(20, 2000), 2),
                                 fake.ipv4(),
                             )
@@ -252,9 +285,9 @@ def main():
                         ],
                     )
 
-        conn.commit()  # 整个脚本一个事务:中途报错就整体回滚,不会留下"造了一半"的脏数据
+        conn.commit()  # one transaction for the whole script: an error rolls everything back
 
-    print("✅ 模拟数据生成完毕")
+    print("Mock data generated")
 
 
 if __name__ == "__main__":

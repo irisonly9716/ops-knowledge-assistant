@@ -1,1 +1,1 @@
-# Kafka 消费者。监听 document-upload-events,驱动 解析→chunk→embed→入库。
+# Kafka consumers. Listens to document-upload-events and drives parse -> chunk -> embed -> store.

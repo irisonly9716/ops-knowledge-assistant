@@ -42,18 +42,20 @@ import org.springframework.test.web.servlet.MvcResult;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * UploadController 的接口测试。@WebMvcTest 只加载 Web 层(Controller、请求解析、
- * 异常处理、JSON 序列化),不启动整个应用——所以不需要 Postgres/Kafka 在跑,
- * 依赖的三个外部组件用 @MockitoBean 换成"假的",这样才能【按我们的要求让 Kafka 出故障】,
- * 这是真的 Kafka 做不到的(你没法可靠地让它恰好在这一刻抛某个异常)。
+ * Endpoint tests for UploadController. @WebMvcTest loads only the web layer (controller, request
+ * parsing, exception handling, JSON serialization), not the whole application, so Postgres and Kafka
+ * don't need to run. The three external dependencies are replaced with fakes via @MockitoBean, which
+ * is what lets the tests MAKE KAFKA FAIL ON DEMAND -- impossible with a real Kafka (you can't reliably
+ * make it throw a particular exception at a particular moment).
  *
- * 分组:成功路径(消息内容对不对) / 参数校验(该拒的都拒了、且什么副作用都没有) /
- * Kafka 故障路径(实测发现过三个 bug 的地方,每个 bug 对应一个回归测试)。
+ * Groups: success path (is the message right) / parameter validation (everything that should be
+ * rejected is, with no side effects) / Kafka failure paths (where testing found three real bugs; each
+ * has a regression test).
  */
 @WebMvcTest(UploadController.class)
 class UploadControllerTest {
 
-    /** 上传的文件写到这个临时目录,不碰真实的 backend-service/uploads。 */
+    /** Uploaded files go to this temporary folder, never the real backend-service/uploads. */
     @TempDir
     static Path uploadDir;
 
@@ -61,7 +63,7 @@ class UploadControllerTest {
     static void properties(DynamicPropertyRegistry registry) {
         registry.add("document.upload-dir", () -> uploadDir.toString());
         registry.add("document.upload-topic", () -> "test-topic");
-        // 生产是 15 秒;测"结果不确定"分支要真等一次超时,改成 300 毫秒
+        // 15 seconds in production; the "outcome unknown" test really waits for one timeout, so 300 ms
         registry.add("document.send-timeout-ms", () -> "300");
     }
 
@@ -80,14 +82,14 @@ class UploadControllerTest {
     @BeforeEach
     void setUp() throws IOException {
         try (Stream<Path> files = Files.list(uploadDir)) {
-            files.forEach(p -> p.toFile().delete()); // 每个测试从空目录开始
+            files.forEach(p -> p.toFile().delete()); // every test starts with an empty folder
         }
-        // 只有这个部门、这个 campaign 在"库"里存在;其它一律 Mockito 默认的 false
-        when(departmentRepository.existsByName("美妆运营")).thenReturn(true);
+        // only this department and this campaign exist in the "database"; everything else gets Mockito's default false
+        when(departmentRepository.existsByName("Beauty")).thenReturn(true);
         when(campaignRepository.existsById(3L)).thenReturn(true);
     }
 
-    // ------------------------------------------------------------------ 成功路径
+    // ------------------------------------------------------------------ success path
 
     @Test
     void sop_upload_is_accepted_and_published_message_uses_the_lowercase_wire_format() throws Exception {
@@ -105,17 +107,17 @@ class UploadControllerTest {
         ArgumentCaptor<String> value = ArgumentCaptor.forClass(String.class);
         verify(kafkaTemplate).send(eq("test-topic"), key.capture(), value.capture());
 
-        assertThat(key.getValue()).isEqualTo(uploadId); // 用 uploadId 当 Kafka key
+        assertThat(key.getValue()).isEqualTo(uploadId); // the uploadId is the Kafka key
         Map<String, Object> message = readMap(value.getValue());
         assertThat(message)
                 .containsEntry("uploadId", uploadId)
-                .containsEntry("storageKey", uploadId + "-note.md") // 逻辑键(文件名),不是物理路径
-                .containsEntry("contentKind", "document") // 小写,不是 DOCUMENT
+                .containsEntry("storageKey", uploadId + "-note.md") // a logical key (the file name), not a physical path
+                .containsEntry("contentKind", "document") // lowercase, not DOCUMENT
                 .containsEntry("docType", "sop")
                 .containsEntry("department", "ALL")
                 .containsEntry("source", "manual");
         assertThat(message.get("campaignId")).isNull();
-        assertThat(uploadDir.resolve(uploadId + "-note.md")).exists(); // 文件真的存了
+        assertThat(uploadDir.resolve(uploadId + "-note.md")).exists(); // the file really was saved
     }
 
     @Test
@@ -123,7 +125,7 @@ class UploadControllerTest {
         kafkaSendSucceeds();
 
         mockMvc.perform(request(Map.of("contentKind", "document", "docType", "campaign_review",
-                        "department", "美妆运营", "campaignId", "3")))
+                        "department", "Beauty", "campaignId", "3")))
                 .andExpect(status().isAccepted());
 
         ArgumentCaptor<String> value = ArgumentCaptor.forClass(String.class);
@@ -131,7 +133,7 @@ class UploadControllerTest {
         assertThat(readMap(value.getValue()))
                 .containsEntry("docType", "campaign_review")
                 .containsEntry("campaignId", 3)
-                .containsEntry("department", "美妆运营");
+                .containsEntry("department", "Beauty");
     }
 
     @Test
@@ -139,7 +141,7 @@ class UploadControllerTest {
         kafkaSendSucceeds();
 
         mockMvc.perform(request(Map.of("contentKind", "data_table", "tableType", "campaign_products",
-                        "department", "美妆运营", "campaignId", "3")))
+                        "department", "Beauty", "campaignId", "3")))
                 .andExpect(status().isAccepted());
 
         ArgumentCaptor<String> value = ArgumentCaptor.forClass(String.class);
@@ -152,9 +154,10 @@ class UploadControllerTest {
     }
 
     /**
-     * 文件名是客户端随便填的。"../../evil.md" 如果原样拼进磁盘路径,就能写到上传目录之外。
-     * 这里验证:恶意文件名被压成一个单层的安全名字,文件确实落在上传目录里,
-     * 且发出去的 storageKey 里没有任何路径分隔符(消费者拿它拼路径也不会越界)。
+     * The file name is whatever the client sent. Joined onto the disk path as is, "../../evil.md"
+     * would write outside the upload folder. This checks that a malicious name is flattened into a
+     * safe single-level name, the file really lands in the upload folder, and the published
+     * storageKey has no path separator (so the consumer can't escape either when it joins the path).
      */
     @Test
     void a_malicious_filename_cannot_escape_the_upload_directory() throws Exception {
@@ -172,7 +175,7 @@ class UploadControllerTest {
 
         assertThat(storageKey).doesNotContain("/").doesNotContain("\\");
         assertThat(fileCount()).isEqualTo(1);
-        assertThat(uploadDir.resolve(storageKey)).exists(); // 就在上传目录里
+        assertThat(uploadDir.resolve(storageKey)).exists(); // right inside the upload folder
         assertThat(uploadDir.resolve(storageKey).normalize().getParent()).isEqualTo(uploadDir.normalize());
     }
 
@@ -182,7 +185,7 @@ class UploadControllerTest {
             "../../evil.md          | .._.._evil.md",
             "C:\\Windows\\sys.md     | C__Windows_sys.md",
             "a/b\\c.md              | a_b_c.md",
-            "风控 SOP.md            | 风控 SOP.md",
+            "Café SOP.md            | Café SOP.md",
             "..                     | upload",
             "NULL                   | upload",
     })
@@ -190,45 +193,45 @@ class UploadControllerTest {
         assertThat(UploadController.sanitizeFilename(input)).isEqualTo(expected);
     }
 
-    // ------------------------------------------------------------------ 参数校验
+    // ------------------------------------------------------------------ parameter validation
 
     record BadCase(String name, Map<String, String> params, String expectedFragment) {
         @Override
         public String toString() {
-            return name; // 测试报告里显示这个名字,一眼看出哪个场景挂了
+            return name; // shown in the test report, so a failing case is obvious at a glance
         }
     }
 
     static Stream<BadCase> badRequests() {
         return Stream.of(
-                new BadCase("document 没传 docType",
-                        Map.of("contentKind", "document", "department", "美妆运营"), "docType"),
-                new BadCase("docType 拼错(campain_plan)",
+                new BadCase("document without docType",
+                        Map.of("contentKind", "document", "department", "Beauty"), "docType"),
+                new BadCase("misspelled docType (campain_plan)",
                         Map.of("contentKind", "document", "docType", "campain_plan",
-                                "department", "美妆运营", "campaignId", "3"), "campain_plan"),
-                new BadCase("contentKind 非法(video)",
-                        Map.of("contentKind", "video", "department", "美妆运营"), "video"),
-                new BadCase("campaign_review 没带 campaignId",
+                                "department", "Beauty", "campaignId", "3"), "campain_plan"),
+                new BadCase("invalid contentKind (video)",
+                        Map.of("contentKind", "video", "department", "Beauty"), "video"),
+                new BadCase("campaign_review without campaignId",
                         Map.of("contentKind", "document", "docType", "campaign_review",
-                                "department", "美妆运营"), "必须带 campaignId"),
-                new BadCase("sop 却带了 campaignId",
+                                "department", "Beauty"), "requires a campaignId"),
+                new BadCase("sop with a campaignId",
                         Map.of("contentKind", "document", "docType", "sop",
-                                "department", "美妆运营", "campaignId", "3"), "不能带 campaignId"),
-                new BadCase("data_table 没传 tableType",
-                        Map.of("contentKind", "data_table", "department", "美妆运营",
+                                "department", "Beauty", "campaignId", "3"), "must not have a campaignId"),
+                new BadCase("data_table without tableType",
+                        Map.of("contentKind", "data_table", "department", "Beauty",
                                 "campaignId", "3"), "tableType"),
-                new BadCase("tableType 拼错(少个 s)",
+                new BadCase("misspelled tableType (missing an s)",
                         Map.of("contentKind", "data_table", "tableType", "campaign_product",
-                                "department", "美妆运营", "campaignId", "3"), "campaign_product"),
-                new BadCase("data_table 没带 campaignId",
+                                "department", "Beauty", "campaignId", "3"), "campaign_product"),
+                new BadCase("data_table without campaignId",
                         Map.of("contentKind", "data_table", "tableType", "campaign_products",
-                                "department", "美妆运营"), "必须带 campaignId"),
-                new BadCase("部门不存在(美妆运运)",
-                        Map.of("contentKind", "document", "docType", "sop", "department", "美妆运运"),
-                        "department 不存在"),
-                new BadCase("campaignId 不存在(99999)",
+                                "department", "Beauty"), "requires a campaignId"),
+                new BadCase("unknown department (Beuaty)",
+                        Map.of("contentKind", "document", "docType", "sop", "department", "Beuaty"),
+                        "unknown department"),
+                new BadCase("unknown campaignId (99999)",
                         Map.of("contentKind", "document", "docType", "campaign_review",
-                                "department", "美妆运营", "campaignId", "99999"), "campaignId 不存在"));
+                                "department", "Beauty", "campaignId", "99999"), "unknown campaignId"));
     }
 
     @ParameterizedTest(name = "{0}")
@@ -239,17 +242,17 @@ class UploadControllerTest {
                 .andReturn();
 
         assertThat((String) readMap(body(result)).get("error")).contains(bad.expectedFragment());
-        verifyNoInteractions(kafkaTemplate); // 被拒的请求不能往 Kafka 发任何东西
-        assertThat(fileCount()).isZero();    // 也不能在磁盘上留下任何文件
+        verifyNoInteractions(kafkaTemplate); // a rejected request must not send anything to Kafka
+        assertThat(fileCount()).isZero();    // nor leave any file on disk
     }
 
-    // ------------------------------------------------------------------ Kafka 故障路径
+    // ------------------------------------------------------------------ Kafka failure paths
 
     /**
-     * 回归测试:之前抓到的 bug ②。topic 不存在时 KafkaTemplate.send() 【自己】抛出
-     * org.apache.kafka.common.errors.TimeoutException(不是返回一个失败的 Future)。
-     * 当时代码 catch 的是 java.util.concurrent.TimeoutException——同名不同包,
-     * 异常漏过去,变成 Spring 默认的笼统 500,且遗留孤儿文件(bug ③)。
+     * Regression test. When the topic doesn't exist, KafkaTemplate.send() ITSELF throws
+     * org.apache.kafka.common.errors.TimeoutException (instead of returning a failed Future).
+     * Catching java.util.concurrent.TimeoutException instead -- same name, different package -- lets
+     * the exception slip through as Spring's generic 500 and leaves an orphan file behind.
      */
     @Test
     void send_throwing_kafkas_own_TimeoutException_gives_503_and_cleans_up_the_file() throws Exception {
@@ -261,8 +264,8 @@ class UploadControllerTest {
                 .andExpect(status().isServiceUnavailable())
                 .andReturn();
 
-        assertThat((String) readMap(body(result)).get("error")).contains("暂不可用");
-        assertThat(fileCount()).isZero(); // 确定没发出去 -> 孤儿文件必须被清理
+        assertThat((String) readMap(body(result)).get("error")).contains("unavailable");
+        assertThat(fileCount()).isZero(); // definitely not sent -> the orphan file must be removed
     }
 
     @Test
@@ -273,29 +276,31 @@ class UploadControllerTest {
         mockMvc.perform(request(sopParams()))
                 .andExpect(status().isServiceUnavailable());
 
-        assertThat(fileCount()).isZero(); // Future 以异常结束 = 确定失败 -> 清理
+        assertThat(fileCount()).isZero(); // the Future completed exceptionally = certain failure -> clean up
     }
 
     /**
-     * "超时 ≠ 失败":等发送结果超时了,消息【可能已经发出去了】,消费者随后会来读这个文件。
-     * 这时删文件会造成"有消息、没文件",比留一个孤儿更糟——所以必须保留。
+     * "Timeout != failure": when waiting for the send result times out, the message MAY ALREADY HAVE
+     * GONE OUT and the consumer will come for the file. Deleting it then leaves "message without file",
+     * worse than an orphan, so the file must stay.
      */
     @Test
     void timeout_waiting_for_the_send_result_is_ambiguous_so_the_file_is_KEPT() throws Exception {
         when(kafkaTemplate.send(anyString(), anyString(), anyString()))
-                .thenReturn(new CompletableFuture<>()); // 永远不完成
+                .thenReturn(new CompletableFuture<>()); // never completes
 
         MvcResult result = mockMvc.perform(request(sopParams()))
                 .andExpect(status().isServiceUnavailable())
                 .andReturn();
 
-        assertThat((String) readMap(body(result)).get("error")).contains("不确定");
-        assertThat(fileCount()).isEqualTo(1); // 结果不确定 -> 不能删
+        assertThat((String) readMap(body(result)).get("error")).contains("outcome unknown");
+        assertThat(fileCount()).isEqualTo(1); // outcome unknown -> must not delete
     }
 
     /**
-     * 线程被中断:文件保留,并且【中断标志必须被恢复】。InterruptedException 抛出时 JVM 已经
-     * 把线程的中断标志清掉了,如果 catch 里直接吞掉,"有人要求这个线程停下"的信号就丢了。
+     * Thread interrupted: the file stays, and THE INTERRUPT FLAG MUST BE RESTORED. When
+     * InterruptedException is thrown the JVM has already cleared the thread's flag; swallowing it in the
+     * catch loses the signal "someone asked this thread to stop".
      */
     @Test
     @SuppressWarnings("unchecked")
@@ -309,14 +314,14 @@ class UploadControllerTest {
 
             assertThat(fileCount()).isEqualTo(1);
             assertThat(Thread.currentThread().isInterrupted())
-                    .as("catch InterruptedException 之后必须调用 Thread.currentThread().interrupt() 恢复标志")
+                    .as("after catching InterruptedException, Thread.currentThread().interrupt() must restore the flag")
                     .isTrue();
         } finally {
-            Thread.interrupted(); // 清掉标志,别影响后面的测试
+            Thread.interrupted(); // clear the flag so later tests are unaffected
         }
     }
 
-    // ------------------------------------------------------------------ 辅助方法
+    // ------------------------------------------------------------------ helpers
 
     private static Map<String, String> sopParams() {
         return Map.of("contentKind", "document", "docType", "sop", "department", "ALL");
@@ -325,12 +330,12 @@ class UploadControllerTest {
     private static org.springframework.test.web.servlet.request.MockMultipartHttpServletRequestBuilder request(
             Map<String, String> params) {
         var builder = multipart("/documents/upload")
-                .file(new MockMultipartFile("file", "note.md", "text/markdown", "# 内容".getBytes(UTF_8)));
+                .file(new MockMultipartFile("file", "note.md", "text/markdown", "# Content".getBytes(UTF_8)));
         params.forEach(builder::param);
         return builder;
     }
 
-    /** MockHttpServletResponse 默认按 ISO-8859-1 解码,中文错误信息必须显式指定 UTF-8。 */
+    /** MockHttpServletResponse decodes as ISO-8859-1 by default; non-ASCII error messages need UTF-8 explicitly. */
     private static String body(MvcResult result) throws Exception {
         return result.getResponse().getContentAsString(UTF_8);
     }
@@ -347,10 +352,10 @@ class UploadControllerTest {
     }
 
     /**
-     * 顺序很重要:先把 future 完整构造好,再去 stub kafkaTemplate。
-     * 不能写成 when(kafkaTemplate.send(...)).thenReturn(succeededFuture())——
-     * succeededFuture() 内部自己也在 when(...) stub 别的 mock,而 Mockito 不允许在
-     * 一个 stubbing 还没写完时嵌套另一个(UnfinishedStubbingException)。
+     * The order matters: build the future completely first, then stub kafkaTemplate.
+     * when(kafkaTemplate.send(...)).thenReturn(succeededFuture()) does not work: succeededFuture()
+     * stubs other mocks with when(...) itself, and Mockito doesn't allow starting a stubbing while
+     * another is unfinished (UnfinishedStubbingException).
      */
     private void kafkaSendSucceeds() {
         CompletableFuture<SendResult<String, String>> future = succeededFuture();

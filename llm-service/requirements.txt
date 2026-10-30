@@ -1,44 +1,44 @@
-# ---- Web 服务 / 配置 ----
+# ---- web service / configuration ----
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic-settings==2.7.1
 python-dotenv==1.0.1
 
-# ---- Kafka(消费者服务和调试脚本都用它)----
+# ---- Kafka (used by the consumer service and the debug scripts) ----
 confluent-kafka==2.6.1
 
-# ---- 造假数据 + 直连 Postgres ----
+# ---- mock data + direct Postgres access ----
 faker==33.1.0
 psycopg[binary]==3.2.3
 
-# ---- 测试 ----
+# ---- tests ----
 pytest==9.1.1
-httpx==0.28.1   # FastAPI 的 TestClient 依赖它
+httpx==0.28.1   # required by FastAPI's TestClient
 
 # ---- embedding + LLM ----
 openai==3.29.0
 
-# ---- 文档解析(每种格式一个小库;为什么不用 unstructured 见 docs/architecture.md)----
+# ---- document parsing (one small library per format; why not unstructured: docs/architecture.md) ----
 markdown-it-py==4.2.0
 python-docx==1.2.0
 pdfplumber==0.11.10
-pyyaml==6.0.3   # Markdown frontmatter;uvicorn[standard] 也会带上它,这里写明是因为代码直接 import
+pyyaml==6.0.3   # Markdown frontmatter; uvicorn[standard] pulls it in too, listed because the code imports it directly
 
-# ---- 后续功能用到时再解开注释 ----
+# ---- uncomment when the feature needs it ----
 # chunking
 # langchain==0.3.14
 # langchain-community==0.3.14
 #
-# LangChain 的 OpenAI 适配层(编排时用)
+# LangChain's OpenAI adapter (for orchestration)
 # langchain-openai==0.2.14
-# 或本地模型: sentence-transformers==3.3.1
+# or a local model: sentence-transformers==3.3.1
 #
-# 向量库(psycopg 已经在上面装了,这里再装 pgvector 的 Python 适配层)
+# vector store (psycopg is installed above; this is pgvector's Python adapter)
 # pgvector==0.3.6
 # sqlalchemy==2.0.36
 #
-# Text-to-SQL 安全校验
+# Text-to-SQL safety checks
 # sqlglot==26.0.1
 #
-# Redis 缓存 / 会话记忆
+# Redis cache / conversation memory
 # redis==5.2.1
