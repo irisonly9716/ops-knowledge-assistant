@@ -221,6 +221,63 @@ def test_a_permanent_error_from_the_handler_skips_retries(calls):
     assert producer.sent[0]["headers"]["x-attempts"] == "1"
 
 
+# ------------------------------------------------------------------ recording the failure (on_failure)
+
+
+def recording_failures(calls):
+    def on_failure(event, reason):
+        calls.append(("failed", event.upload_id, reason))
+    return on_failure
+
+
+@pytest.mark.parametrize("error, attempts", [
+    (PermanentError("cannot parse the file"), 1),
+    (ConnectionError("downstream timeout"), 3),
+], ids=["permanent", "retries exhausted"])
+def test_a_dead_lettered_upload_is_recorded_as_failed_after_the_dlq_write(calls, error, attempts):
+    handler = recording_handler(calls, fail_times=99, error=error)
+    worker, _, _ = make(calls, [FakeMessage(VALID, offset=8)], handler, on_failure=recording_failures(calls))
+
+    worker.poll_once(0)
+
+    upload_id = CONTRACT[0]["uploadId"]
+    # order: the dead letter is safe first, then the status is recorded, then the offset is committed
+    assert calls[-3:] == [("dlq", "document-upload-events.dlq"), ("failed", upload_id, calls[-2][2]), ("commit", 8)]
+    assert str(error) in calls[-2][2]
+
+
+def test_an_unparseable_message_has_no_upload_to_record(calls):
+    worker, _, _ = make(calls, [FakeMessage(b"not json", offset=2)], recording_handler(calls),
+                        on_failure=recording_failures(calls))
+
+    worker.poll_once(0)
+
+    assert not [c for c in calls if c[0] == "failed"]
+    assert calls[-1] == ("commit", 2)
+
+
+def test_a_success_records_no_failure(calls):
+    worker, _, _ = make(calls, [FakeMessage(VALID, offset=3)], recording_handler(calls),
+                        on_failure=recording_failures(calls))
+
+    worker.poll_once(0)
+
+    assert not [c for c in calls if c[0] == "failed"]
+
+
+def test_if_recording_the_failure_fails_the_offset_is_still_committed(calls):
+    # The dead letter already holds the message; a database outage while recording the status must not
+    # make the consumer retry a message that is already safe
+    def broken_on_failure(event, reason):
+        raise RuntimeError("database down")
+    handler = recording_handler(calls, fail_times=99, error=PermanentError("bad file"))
+    worker, _, _ = make(calls, [FakeMessage(VALID, offset=5)], handler, on_failure=broken_on_failure)
+
+    worker.poll_once(0)
+
+    assert calls[-2:] == [("dlq", "document-upload-events.dlq"), ("commit", 5)]
+
+
 # ------------------------------------------------------------------ dead-letter write fails: never commit
 
 

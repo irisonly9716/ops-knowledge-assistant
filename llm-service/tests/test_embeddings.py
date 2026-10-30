@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.rag import embeddings
-from app.rag.embeddings import EMBEDDING_DIMENSIONS, OpenAIEmbedder
+from app.rag.embeddings import EMBEDDING_DIMENSIONS, OpenAIEmbedder, embed_in_batches
 
 
 class FakeEmbeddingsApi:
@@ -77,3 +77,11 @@ def test_factory_refuses_to_start_without_an_api_key(monkeypatch):
     monkeypatch.setattr(embeddings.settings, "openai_api_key", "")
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         embeddings.openai_embedder_from_settings()
+
+
+def test_embed_in_batches_sends_one_request_per_batch_and_keeps_the_order():
+    embedder, api = make_embedder(tokens=5)
+    batch = embed_in_batches(embedder, [f"text {i}" for i in range(5)], batch_size=2)
+    assert [call["input"] for call in api.calls] == [["text 0", "text 1"], ["text 2", "text 3"], ["text 4"]]
+    assert [v[0] for v in batch.vectors] == [0.0, 1.0, 0.0, 1.0, 0.0]   # each batch's vectors in its own input order
+    assert batch.total_tokens == 15                                     # billed tokens add up over the requests

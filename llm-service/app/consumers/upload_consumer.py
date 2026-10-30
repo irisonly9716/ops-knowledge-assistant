@@ -37,11 +37,14 @@ from pydantic import ValidationError
 from app.config import settings
 from app.consumers.errors import PermanentError
 from app.consumers.events import UploadEvent
-from app.consumers.handlers import handle_upload
+from app.consumers.handlers import UploadHandler
+from app.rag.embeddings import openai_embedder_from_settings
 
 log = logging.getLogger("upload_consumer")
 
 Handler = Callable[[UploadEvent], None]
+# Called with the event and the reason once a message has been dead-lettered (to record the failure)
+FailureCallback = Callable[[UploadEvent, str], None]
 
 
 def parse_event(raw: bytes | None) -> UploadEvent:
@@ -62,9 +65,9 @@ def parse_event(raw: bytes | None) -> UploadEvent:
 
 
 class UploadConsumer:
-    """The consume loop. consumer / dlq_producer / handler / sleep are all passed in (dependency
-    injection), so tests can swap in fakes and cover every branch without a real Kafka and
-    without actually waiting out the backoff."""
+    """The consume loop. consumer / dlq_producer / handler / on_failure / sleep are all passed in
+    (dependency injection), so tests can swap in fakes and cover every branch without a real Kafka
+    and without actually waiting out the backoff."""
 
     def __init__(
         self,
@@ -76,6 +79,7 @@ class UploadConsumer:
         dlq_topic: str,
         max_attempts: int = 3,
         backoff_seconds: float = 0.5,
+        on_failure: FailureCallback | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._consumer = consumer
@@ -85,6 +89,7 @@ class UploadConsumer:
         self._dlq_topic = dlq_topic
         self._max_attempts = max_attempts
         self._backoff = backoff_seconds
+        self._on_failure = on_failure
         self._sleep = sleep
 
     # ------------------------------------------------------------------ main loop
@@ -135,7 +140,7 @@ class UploadConsumer:
                 self._handler(event)
             except PermanentError as e:
                 log.error("upload_id=%s failed permanently, dead-lettering: %s", event.upload_id, e)
-                self._dead_letter(msg, str(e), attempts=attempt)
+                self._dead_letter(msg, str(e), attempts=attempt, event=event)
                 return
             except Exception as e:  # noqa: BLE001 -- catching ANY failure is the point; PermanentError above does the sorting
                 last_error = f"{type(e).__name__}: {e}"
@@ -150,9 +155,9 @@ class UploadConsumer:
 
         log.error("upload_id=%s still failing after %d attempts, dead-lettering: %s",
                   event.upload_id, self._max_attempts, last_error)
-        self._dead_letter(msg, last_error, attempts=self._max_attempts)
+        self._dead_letter(msg, last_error, attempts=self._max_attempts, event=event)
 
-    def _dead_letter(self, msg, reason: str, attempts: int) -> None:
+    def _dead_letter(self, msg, reason: str, attempts: int, event: UploadEvent | None = None) -> None:
         """Forward the original message (the raw bytes, not re-serialized) with the failure reason
         to the dead-letter topic, then commit the offset.
 
@@ -164,6 +169,10 @@ class UploadConsumer:
         after a failed dead-letter write makes the message vanish. So a failed write raises and
         crashes the process: after restart the offset is uncommitted and the message is
         redelivered. Better to stop than to lose data.
+
+        Once the dead letter is safely written, on_failure records the failure (the upload's status
+        becomes failed). That is best effort: if it fails, the message is still safe in the dead-letter
+        topic, so the error is logged and the offset committed anyway.
         """
         errors: list = []
 
@@ -188,6 +197,11 @@ class UploadConsumer:
         if still_queued or errors:
             raise RuntimeError(f"dead-letter write failed ({still_queued} undelivered, errors {errors}); "
                                "not committing the offset so the message is not lost")
+        if event is not None and self._on_failure is not None:
+            try:
+                self._on_failure(event, reason)
+            except Exception:  # noqa: BLE001 -- the dead letter is the safety net; recording the status is a bonus
+                log.exception("upload_id=%s: could not record the failure", event.upload_id)
         self._commit(msg)
 
     def _commit(self, msg) -> None:
@@ -214,9 +228,11 @@ def main() -> None:
         "enable.auto.commit": False,
     })
     producer = Producer({"bootstrap.servers": settings.kafka_bootstrap_servers})
+    # Fails right here if OPENAI_API_KEY is missing: better at startup than on the first message
+    handler = UploadHandler(openai_embedder_from_settings())
 
     worker = UploadConsumer(
-        consumer, producer, handle_upload,
+        consumer, producer, handler, on_failure=handler.mark_failed,
         topic=settings.doc_upload_topic,
         dlq_topic=settings.doc_upload_dlq_topic,
         max_attempts=settings.doc_consumer_max_attempts,
