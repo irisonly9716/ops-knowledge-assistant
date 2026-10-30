@@ -3,6 +3,7 @@ package com.opsassistant.backend.upload;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -12,6 +13,8 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 import com.opsassistant.backend.campaign.CampaignRepository;
 import com.opsassistant.backend.department.DepartmentRepository;
+import com.opsassistant.backend.user.User;
+import com.opsassistant.backend.user.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -21,6 +24,7 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -52,6 +56,8 @@ public class UploadController {
     private final ObjectMapper objectMapper; // the Jackson instance Spring Boot auto-configures
     private final DepartmentRepository departmentRepository;
     private final CampaignRepository campaignRepository;
+    private final UserRepository userRepository;
+    private final UploadRepository uploadRepository;
 
     @Value("${document.upload-topic}")
     private String uploadTopic;
@@ -64,14 +70,18 @@ public class UploadController {
 
     @PostMapping("/upload")
     public ResponseEntity<Map<String, String>> upload(
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
             @RequestParam("file") MultipartFile file,
             @RequestParam("contentKind") String contentKindRaw,
             @RequestParam(value = "docType", required = false) String docTypeRaw,
             @RequestParam(value = "tableType", required = false) String tableTypeRaw,
             @RequestParam("department") String department,
             @RequestParam(value = "campaignId", required = false) Long campaignId,
+            @RequestParam(value = "title", required = false) String title,
             @RequestParam(value = "category", required = false) String category
     ) throws IOException {
+        // Who is uploading comes first: an unknown caller gets 401 before any parameter is looked at
+        User uploader = resolveUser(userIdHeader);
         ContentKind contentKind = parseOrBadRequest(() -> ContentKind.fromValue(contentKindRaw));
         DocType docType = null;
         TableType tableType = null;
@@ -94,6 +104,16 @@ public class UploadController {
             }
         }
 
+        // An SOP is identified by its department + title (the natural key in documents), so it must have
+        // one. Plan and review titles are generated from the campaign, so a title there is a mistake.
+        String cleanTitle = title == null || title.isBlank() ? null : title.strip();
+        if (docType == DocType.SOP && cleanTitle == null) {
+            throw badRequest("docType=sop requires a title");
+        }
+        if (docType != DocType.SOP && cleanTitle != null) {
+            throw badRequest("title is only for sop; campaign document titles are generated from the campaign");
+        }
+
         // department / campaignId are not a fixed set of values baked into the schema like
         // doc_type; they are business data (a new department or campaign can appear any day),
         // so no enum. They still have to be checked against the real tables.
@@ -112,7 +132,8 @@ public class UploadController {
                 uploadId, dest.getFileName().toString(), contentKind, docType, tableType,
                 department, campaignId, category, Source.MANUAL
         );
-        sendToKafka(uploadId, event, dest);
+        Upload upload = recordUpload(event, uploader, cleanTitle, file.getOriginalFilename(), dest);
+        sendToKafka(uploadId, event, dest, upload);
 
         log.info("upload accepted uploadId={} contentKind={} published to topic {}", uploadId, contentKind.value(), uploadTopic);
         return ResponseEntity.accepted().body(Map.of("uploadId", uploadId, "status", "accepted"));
@@ -138,6 +159,66 @@ public class UploadController {
 
     private ResponseStatusException badRequest(String message) {
         return new ResponseStatusException(HttpStatus.BAD_REQUEST, message);
+    }
+
+    /**
+     * X-User-Id -> the user. Missing, not a number, or no such user are all 401: the caller is not
+     * identified. (The header is simulated identity; real authentication is designed, not built --
+     * see docs/permission-model.md.)
+     */
+    private User resolveUser(String userIdHeader) {
+        if (userIdHeader == null || userIdHeader.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "missing X-User-Id header");
+        }
+        try {
+            return userRepository.findById(Long.valueOf(userIdHeader.strip()))
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "unknown user: " + userIdHeader));
+        } catch (NumberFormatException e) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "X-User-Id must be a user id, got: " + userIdHeader);
+        }
+    }
+
+    /**
+     * Writes the uploads row with status received, BEFORE the message is published: the consumer
+     * looks the upload up by its id and moves it on to processing -> done / failed, so the row must
+     * already exist when the message arrives. If the row can't be written, the file is removed and
+     * nothing is published.
+     */
+    private Upload recordUpload(UploadEvent event, User uploader, String title, String originalFilename, Path savedFile) {
+        Upload upload = new Upload();
+        upload.setUploadId(UUID.fromString(event.uploadId()));
+        upload.setSource(event.source().value());
+        upload.setUploadedBy(uploader.getUserId());
+        upload.setContentKind(event.contentKind().value());
+        upload.setDocType(event.docType() == null ? null : event.docType().value());
+        upload.setTableType(event.tableType() == null ? null : event.tableType().value());
+        upload.setDepartment(event.department());
+        upload.setCampaignId(event.campaignId());
+        upload.setTitle(title);
+        upload.setOriginalFilename(originalFilename == null ? event.storageKey() : originalFilename);
+        upload.setStorageKey(event.storageKey());
+        upload.setCreatedAt(Instant.now());
+        upload.changeStatus(Upload.RECEIVED, null);
+        try {
+            return uploadRepository.save(upload);
+        } catch (RuntimeException e) {
+            deleteQuietly(savedFile);
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "failed to record the upload; it did not take effect", e);
+        }
+    }
+
+    /**
+     * After a CERTAIN send failure the upload is marked failed, so its status says what happened instead
+     * of staying received forever. An uncertain outcome leaves it received: the message may still arrive.
+     */
+    private void markFailed(Upload upload, String reason) {
+        try {
+            upload.changeStatus(Upload.FAILED, reason);
+            uploadRepository.save(upload);
+        } catch (RuntimeException e) {
+            log.warn("uploadId={} could not be marked failed: {}", upload.getUploadId(), reason, e);
+        }
     }
 
     private Path saveFile(MultipartFile file, String uploadId) throws IOException {
@@ -184,7 +265,7 @@ public class UploadController {
      * delivery.timeout.ms to 10 seconds while get() here waits 15, so Kafka itself gives a definite
      * answer first and the "uncertain" branch is almost never reached.
      */
-    private void sendToKafka(String uploadId, UploadEvent event, Path savedFile) {
+    private void sendToKafka(String uploadId, UploadEvent event, Path savedFile, Upload upload) {
         // The package is tools.jackson.*, not the com.fasterxml.jackson.* of most tutorials:
         // Spring Boot 4 switched to Jackson 3 (even the Maven groupId changed). Annotations such as
         // @JsonValue/@JsonCreator stayed in com.fasterxml.jackson.annotation.*, so mixing the two
@@ -196,6 +277,7 @@ public class UploadController {
             json = objectMapper.writeValueAsString(event);
         } catch (JacksonException e) {
             deleteQuietly(savedFile); // serialization failed before anything was sent = certain failure
+            markFailed(upload, "failed to serialize the message");
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "failed to serialize the message", e);
         }
 
@@ -211,6 +293,7 @@ public class UploadController {
             // not java.util.concurrent.TimeoutException. Same simple name, different packages;
             // catching the wrong one lets the exception slip through as Spring's generic 500.
             deleteQuietly(savedFile);
+            markFailed(upload, "message queue unavailable: " + e.getMessage());
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
                     "message queue unavailable; the upload did not take effect, please retry later", e);
         }
@@ -221,6 +304,7 @@ public class UploadController {
                     result.getRecordMetadata().partition(), result.getRecordMetadata().offset());
         } catch (ExecutionException e) {
             deleteQuietly(savedFile); // the Future completed exceptionally = certain failure
+            markFailed(upload, "failed to send the message: " + e.getMessage());
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
                     "failed to send the message; the upload did not take effect, please retry later", e);
         } catch (TimeoutException e) {

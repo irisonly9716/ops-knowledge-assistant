@@ -81,7 +81,9 @@ Jackson 2 (`com.fasterxml.jackson.databind.ObjectMapper`), and copying them does
 ### `POST /documents/upload`
 
 Implements the "two ingestion pipelines share one topic" design in
-[docs/architecture.md](../docs/architecture.md). `multipart/form-data`, fields:
+[docs/architecture.md](../docs/architecture.md). `multipart/form-data` with an `X-User-Id` header naming the
+uploader (a `user_id` from `users`; missing, not a number or unknown → `401`, checked before anything else).
+Fields:
 
 | Field | Required | Notes |
 |---|---|---|
@@ -91,12 +93,16 @@ Implements the "two ingestion pipelines share one topic" design in
 | `tableType` | when `contentKind=data_table` | `campaign_products` / `campaign_customer_behavior` |
 | `department` | yes | department name, or `ALL` (`sop` only) |
 | `campaignId` | for everything except `sop` | `campaign_plan` / `campaign_review` / `data_table` all belong to a campaign |
+| `title` | `sop` only | an SOP is identified by department + title; plan and review titles are generated from the campaign, so sending one is a `400` |
 | `category` | no | |
 
 Success returns `202 Accepted` + `{"uploadId": "..."}`. The file is stored in `UPLOAD_DIR` (set in `.env`,
 default `../uploads`, i.e. `uploads/` at the repository root, gitignored; llm-service reads the same
-variable), and a JSON message is published to `document-upload-events` (the topic name comes from
-`DOC_UPLOAD_TOPIC` in `.env`).
+variable), **an `uploads` row is written with status `received`**, and only then is a JSON message
+published to `document-upload-events` (the topic name comes from `DOC_UPLOAD_TOPIC` in `.env`). The order
+matters: the consumer looks the upload up by its id and moves it on to `processing → done / failed`, so the
+row must exist before the message does. If the row can't be written, the file is removed and nothing is
+published (`500`).
 
 **The message carries `storageKey` (a logical key = the file name), not a file path**: a path relative to
 this folder, with Windows backslashes, can't be resolved by another service. The single source of truth for
@@ -120,11 +126,16 @@ drift tests catch it when they aren't).
 
 **Failure semantics** (all verified):
 - invalid parameters → `400` + the specific reason
+- unknown or missing `X-User-Id` → `401`, before any parameter is looked at
 - Kafka unavailable / topic missing → `503` within about 5 seconds (the producer has `max.block.ms` and
-  related timeouts), and **the already-saved file is removed**, so no orphan is left
-- waiting for the send result times out / is interrupted → `503`, but **the file is kept**: with an
-  uncertain outcome the message may actually have gone out, and deleting the file would leave "message
-  without file", worse than an orphan
+  related timeouts), **the already-saved file is removed** so no orphan is left, and the uploads row is
+  marked `failed` with the reason
+- waiting for the send result times out / is interrupted → `503`, but **the file is kept** and the row stays
+  `received`: with an uncertain outcome the message may actually have gone out, and deleting the file would
+  leave "message without file", worse than an orphan
+- known gap: if the backend dies between writing the row and publishing, the row stays `received` with no
+  message behind it (a dual write across two systems; the transactional outbox pattern is the designed fix,
+  see docs/architecture.md)
 
 `department` / `campaignId` are **not** enums: they are business data (a new department or campaign can
 appear any day), not a fixed set of values baked into the schema. They are checked against the real
@@ -133,15 +144,16 @@ tables instead (`DepartmentRepository.existsByName` / `CampaignRepository.exists
 
 Check it:
 ```bash
-curl -X POST http://localhost:8081/documents/upload \
-  -F "file=@some.md" -F "contentKind=document" -F "docType=sop" -F "department=ALL"
+curl -X POST http://localhost:8081/documents/upload -H "X-User-Id: 2" \
+  -F "file=@some.md" -F "contentKind=document" -F "docType=sop" -F "department=ALL" -F "title=Some SOP"
 ```
-Then confirm the message arrived with `llm-service/scripts/kafka_consumer_test.py` or `kafka-console-consumer`.
+Then check the row with `SELECT status, error FROM uploads ORDER BY created_at DESC LIMIT 1;` (with the
+consumer running it moves on to `done`), or read the message with `llm-service/scripts/kafka_consumer_test.py`.
 
 ## Tests
 
 ```bash
-.\mvnw.cmd test                                                # default: 39 unit/slice tests, no Docker needed, a few seconds
+.\mvnw.cmd test                                                # default: 46 unit/slice tests, no Docker needed, a few seconds
 .\mvnw.cmd test -DexcludedGroups=none -Dgroups=integration     # integration test: needs Postgres running
 .\mvnw.cmd test -Dtest=UploadControllerTest                    # one class only
 ```
@@ -149,7 +161,7 @@ Then confirm the message arrived with `llm-service/scripts/kafka_consumer_test.p
 | Test class | Kind | Covers |
 |---|---|---|
 | `UploadEnumsTest` (13) | plain unit | the enums' `fromValue` (typos / case / null), `needsCampaign`, **the JSON wire format must be lowercase** (`@JsonValue`) |
-| `UploadControllerTest` (25) | `@WebMvcTest` slice | success paths (including the JSON actually sent), 10 kinds of invalid parameters each returning 400 + the reason + **no side effects**, 4 Kafka failure regression tests, malicious file names can't escape the upload folder, 7 inputs to `sanitizeFilename` |
+| `UploadControllerTest` (32) | `@WebMvcTest` slice | success paths (including the JSON actually sent and the uploads row written), missing / unknown `X-User-Id` → 401, 13 kinds of invalid parameters each returning 400 + the reason + **no side effects**, 4 Kafka failure regression tests and what each does to the uploads row, a failed row write publishes nothing, malicious file names can't escape the upload folder, 7 inputs to `sanitizeFilename` |
 | `UploadEventContractTest` (1) | contract | every example in `contracts/upload-event.examples.json`, deserialized and re-serialized by Java, must equal the original |
 | `BackendServiceApplicationTests` (1) | integration, `@Tag("integration")` | the full container + a real Postgres; with `ddl-auto: validate` it also detects **drift between the entities and the migrations in `db/migration/`** |
 

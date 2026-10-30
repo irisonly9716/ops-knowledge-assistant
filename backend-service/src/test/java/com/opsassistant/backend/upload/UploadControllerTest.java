@@ -2,6 +2,7 @@ package com.opsassistant.backend.upload;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -14,10 +15,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.opsassistant.backend.campaign.CampaignRepository;
 import com.opsassistant.backend.department.DepartmentRepository;
+import com.opsassistant.backend.user.User;
+import com.opsassistant.backend.user.UserRepository;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
@@ -48,9 +53,9 @@ import tools.jackson.databind.json.JsonMapper;
  * is what lets the tests MAKE KAFKA FAIL ON DEMAND -- impossible with a real Kafka (you can't reliably
  * make it throw a particular exception at a particular moment).
  *
- * Groups: success path (is the message right) / parameter validation (everything that should be
- * rejected is, with no side effects) / Kafka failure paths (where testing found three real bugs; each
- * has a regression test).
+ * Groups: success path (is the message right, is the uploads row written) / identity and parameter
+ * validation (everything that should be rejected is, with no side effects) / Kafka failure paths
+ * (where testing found three real bugs; each has a regression test) and what they do to the uploads row.
  */
 @WebMvcTest(UploadController.class)
 class UploadControllerTest {
@@ -76,6 +81,13 @@ class UploadControllerTest {
     DepartmentRepository departmentRepository;
     @MockitoBean
     CampaignRepository campaignRepository;
+    @MockitoBean
+    UserRepository userRepository;
+    @MockitoBean
+    UploadRepository uploadRepository;
+
+    /** Every uploads row the controller saved, in order (a row saved twice appears twice). */
+    private final List<String> savedStatuses = new java.util.ArrayList<>();
 
     private final JsonMapper json = JsonMapper.builder().build();
 
@@ -87,6 +99,14 @@ class UploadControllerTest {
         // only this department and this campaign exist in the "database"; everything else gets Mockito's default false
         when(departmentRepository.existsByName("Beauty")).thenReturn(true);
         when(campaignRepository.existsById(3L)).thenReturn(true);
+        // user 5 is a Beauty staff member; any other id is unknown
+        when(userRepository.findById(5L)).thenReturn(Optional.of(new User(5L, "Test Staff", 1L, "staff")));
+        savedStatuses.clear();
+        when(uploadRepository.save(any(Upload.class))).thenAnswer(invocation -> {
+            Upload upload = invocation.getArgument(0);
+            savedStatuses.add(upload.getStatus());
+            return upload;
+        });
     }
 
     // ------------------------------------------------------------------ success path
@@ -95,8 +115,7 @@ class UploadControllerTest {
     void sop_upload_is_accepted_and_published_message_uses_the_lowercase_wire_format() throws Exception {
         kafkaSendSucceeds();
 
-        MvcResult result = mockMvc.perform(request(Map.of(
-                        "contentKind", "document", "docType", "sop", "department", "ALL")))
+        MvcResult result = mockMvc.perform(request(sopParams()))
                 .andExpect(status().isAccepted())
                 .andReturn();
         Map<String, Object> response = readMap(body(result));
@@ -118,6 +137,18 @@ class UploadControllerTest {
                 .containsEntry("source", "manual");
         assertThat(message.get("campaignId")).isNull();
         assertThat(uploadDir.resolve(uploadId + "-note.md")).exists(); // the file really was saved
+
+        // the uploads row was written before the message, with who uploaded it and the SOP title
+        ArgumentCaptor<Upload> row = ArgumentCaptor.forClass(Upload.class);
+        verify(uploadRepository).save(row.capture());
+        Upload upload = row.getValue();
+        assertThat(upload.getUploadId()).hasToString(uploadId);
+        assertThat(upload.getStatus()).isEqualTo("received");
+        assertThat(upload.getUploadedBy()).isEqualTo(5L);
+        assertThat(upload.getTitle()).isEqualTo("Account Restriction Handling");
+        assertThat(upload.getStorageKey()).isEqualTo(uploadId + "-note.md");
+        assertThat(upload.getOriginalFilename()).isEqualTo("note.md");
+        assertThat(upload.getDocType()).isEqualTo("sop");
     }
 
     @Test
@@ -166,6 +197,7 @@ class UploadControllerTest {
                 "file", "../../evil.md", "text/markdown", "x".getBytes(UTF_8));
 
         mockMvc.perform(multipart("/documents/upload").file(evil)
+                        .header("X-User-Id", "5").param("title", "Evil")
                         .param("contentKind", "document").param("docType", "sop").param("department", "ALL"))
                 .andExpect(status().isAccepted());
 
@@ -227,8 +259,17 @@ class UploadControllerTest {
                         Map.of("contentKind", "data_table", "tableType", "campaign_products",
                                 "department", "Beauty"), "requires a campaignId"),
                 new BadCase("unknown department (Beuaty)",
-                        Map.of("contentKind", "document", "docType", "sop", "department", "Beuaty"),
-                        "unknown department"),
+                        Map.of("contentKind", "document", "docType", "sop", "department", "Beuaty",
+                                "title", "Inventory Check"), "unknown department"),
+                new BadCase("sop without a title",
+                        Map.of("contentKind", "document", "docType", "sop", "department", "Beauty"),
+                        "requires a title"),
+                new BadCase("sop with a blank title",
+                        Map.of("contentKind", "document", "docType", "sop", "department", "Beauty",
+                                "title", "   "), "requires a title"),
+                new BadCase("campaign_review with a title",
+                        Map.of("contentKind", "document", "docType", "campaign_review", "department", "Beauty",
+                                "campaignId", "3", "title", "My review"), "title is only for sop"),
                 new BadCase("unknown campaignId (99999)",
                         Map.of("contentKind", "document", "docType", "campaign_review",
                                 "department", "Beauty", "campaignId", "99999"), "unknown campaignId"));
@@ -243,7 +284,34 @@ class UploadControllerTest {
 
         assertThat((String) readMap(body(result)).get("error")).contains(bad.expectedFragment());
         verifyNoInteractions(kafkaTemplate); // a rejected request must not send anything to Kafka
+        verifyNoInteractions(uploadRepository); // nor record an upload
         assertThat(fileCount()).isZero();    // nor leave any file on disk
+    }
+
+    @ParameterizedTest(name = "X-User-Id = {0}")
+    @CsvSource(nullValues = "NULL", value = {"NULL", "99", "abc"})
+    void unknown_or_missing_user_gets_401_before_anything_else(String header) throws Exception {
+        var builder = multipart("/documents/upload")
+                .file(new MockMultipartFile("file", "note.md", "text/markdown", "# Content".getBytes(UTF_8)));
+        if (header != null) {
+            builder.header("X-User-Id", header);
+        }
+        sopParams().forEach(builder::param);
+
+        mockMvc.perform(builder).andExpect(status().isUnauthorized());
+
+        verifyNoInteractions(kafkaTemplate, uploadRepository);
+        assertThat(fileCount()).isZero();
+    }
+
+    @Test
+    void if_the_uploads_row_cannot_be_written_nothing_is_published_and_the_file_is_removed() throws Exception {
+        when(uploadRepository.save(any(Upload.class))).thenThrow(new RuntimeException("database down"));
+
+        mockMvc.perform(request(sopParams())).andExpect(status().isInternalServerError());
+
+        verifyNoInteractions(kafkaTemplate);
+        assertThat(fileCount()).isZero();
     }
 
     // ------------------------------------------------------------------ Kafka failure paths
@@ -266,6 +334,7 @@ class UploadControllerTest {
 
         assertThat((String) readMap(body(result)).get("error")).contains("unavailable");
         assertThat(fileCount()).isZero(); // definitely not sent -> the orphan file must be removed
+        assertThat(savedStatuses).containsExactly("received", "failed"); // written first, then marked failed
     }
 
     @Test
@@ -277,6 +346,7 @@ class UploadControllerTest {
                 .andExpect(status().isServiceUnavailable());
 
         assertThat(fileCount()).isZero(); // the Future completed exceptionally = certain failure -> clean up
+        assertThat(savedStatuses).containsExactly("received", "failed");
     }
 
     /**
@@ -295,6 +365,7 @@ class UploadControllerTest {
 
         assertThat((String) readMap(body(result)).get("error")).contains("outcome unknown");
         assertThat(fileCount()).isEqualTo(1); // outcome unknown -> must not delete
+        assertThat(savedStatuses).containsExactly("received"); // and the row stays received: the message may still arrive
     }
 
     /**
@@ -324,13 +395,15 @@ class UploadControllerTest {
     // ------------------------------------------------------------------ helpers
 
     private static Map<String, String> sopParams() {
-        return Map.of("contentKind", "document", "docType", "sop", "department", "ALL");
+        return Map.of("contentKind", "document", "docType", "sop", "department", "ALL",
+                "title", "Account Restriction Handling");
     }
 
     private static org.springframework.test.web.servlet.request.MockMultipartHttpServletRequestBuilder request(
             Map<String, String> params) {
         var builder = multipart("/documents/upload")
-                .file(new MockMultipartFile("file", "note.md", "text/markdown", "# Content".getBytes(UTF_8)));
+                .file(new MockMultipartFile("file", "note.md", "text/markdown", "# Content".getBytes(UTF_8)))
+                .header("X-User-Id", "5");
         params.forEach(builder::param);
         return builder;
     }
