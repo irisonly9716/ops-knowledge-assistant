@@ -27,7 +27,7 @@ On top of that, conversations have **multi-turn memory**, and **department-level
 
 - As an **operations specialist** whose live stream was just flagged by the platform's risk control, I want to ask what to do and get the steps and the teams to contact from our SOPs, so that I can react in minutes instead of searching through documents.
 - As a **campaign manager**, I want to ask for the GMV and conversion rate of a past campaign in plain language, so that I don't have to dig through spreadsheets or write SQL.
-- As an **operations lead planning a new campaign**, I want recommendations that combine our playbooks with the results of comparable past campaigns (anchors, products, costs, ROI), so that the plan is grounded in what actually worked.
+- As an **operations lead planning a new campaign**, I want recommendations that combine our playbooks with the results of comparable past campaigns (hosts, products, costs, ROI), so that the plan is grounded in what actually worked.
 - As **any user**, I want to ask follow-up questions without repeating the context, so that the conversation feels natural.
 - As an **operations specialist**, I want to upload SOPs, campaign plans, post-mortems and data exports such as product sales and customer behavior, so that the assistant's knowledge stays current.
 - As a **department head**, I want each employee to see only their own department's documents and data (company-wide SOPs excepted), so that sensitive campaign numbers don't leak across teams.
@@ -153,4 +153,4 @@ ops-knowledge-assistant/
 └── docker-compose.yml # Postgres+pgvector, Flyway, Redis, Kafka, Kafka UI
 ```
 
-Sample documents and the design notes under `docs/` are written in Chinese, since the target users are Chinese-speaking operations teams. Local setup instructions are in [docs/development.md](docs/development.md).
+Local setup instructions are in [docs/development.md](docs/development.md).

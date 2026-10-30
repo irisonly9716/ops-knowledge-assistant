@@ -1,37 +1,37 @@
 # backend-service
 
-Spring Boot / Java。对外 REST API、文件上传、结构化业务表(JPA)、Kafka producer。
+Spring Boot / Java. Public REST API, file uploads, structured business tables (JPA), Kafka producer.
 
-项目骨架用下面的 Spring Initializr 配置生成(通过 `curl` 直接调 start.spring.io)。
-实际拿到的是 **Spring Boot 4.1.1**(比下面写的 3.3.x/3.4.x 新——start.spring.io 默认版本
-一直在往前走,不影响我们用的这几个 starter)。
+The project skeleton was generated with the Spring Initializr settings below (calling start.spring.io
+with `curl`). What came back was **Spring Boot 4.1.1** (newer than the 3.3.x/3.4.x listed below:
+start.spring.io's default version keeps moving forward, which doesn't affect the starters we use).
 
-## 用 Spring Initializr 生成
+## Generating with Spring Initializr
 
-打开 https://start.spring.io/ ,或 IntelliJ IDEA 里 `New Project → Spring Boot`,按下面选:
+Open https://start.spring.io/, or `New Project → Spring Boot` in IntelliJ IDEA, and choose:
 
-| 项 | 值 |
+| Setting | Value |
 |---|---|
 | Project | Maven |
 | Language | Java |
-| Spring Boot | 选默认的稳定版(3.3.x / 3.4.x) |
+| Spring Boot | the default stable version (3.3.x / 3.4.x) |
 | Group | `com.opsassistant` |
 | Artifact | `backend-service` |
 | Package name | `com.opsassistant.backend` |
 | Packaging | Jar |
-| Java | 生成时选的 21,**现已改为 25**(见下方 Java 版本说明) |
+| Java | 21 when generated, **now 25** (see the Java version note below) |
 
 Dependencies:
 - Spring Web
 - Spring Data JPA
 - PostgreSQL Driver
 - Spring for Apache Kafka
-- Spring Boot Actuator(顺便,`/actuator/health` 现成的健康检查)
-- Lombok(可选,少写 getter/setter)
+- Spring Boot Actuator (a ready-made health check at `/actuator/health`)
+- Lombok (optional, fewer getters/setters to write)
 
-生成后解压,把里面的 `pom.xml` / `src/` / `mvnw*` 拷到本目录(覆盖这个 README 所在的文件夹)。
+Unzip the result and copy its `pom.xml` / `src/` / `mvnw*` into this folder (the one this README is in).
 
-### 命令行下载(可选,替代网页操作)
+### Downloading from the command line (optional, instead of the web page)
 
 ```bash
 curl https://start.spring.io/starter.zip \
@@ -40,123 +40,138 @@ curl https://start.spring.io/starter.zip \
   -d packageName=com.opsassistant.backend -d name=backend-service \
   -d dependencies=web,data-jpa,postgresql,kafka,actuator,lombok \
   -o backend-service.zip
-# 解压到当前目录
+# unzip into the current folder
 ```
 
-## Java 版本说明
+## Java version
 
-你本机是 **Java 25**,项目的编译目标(`pom.xml` 里的 `<java.version>`)也是 **25**。
+The machine runs **Java 25**, and the project's compile target (`<java.version>` in `pom.xml`) is **25** too.
 
-生成项目时选的是 21(JDK 25 跑 21 目标的构建本身没问题,Maven 构建一直是好的)。
-**后来改成了 25**,原因出在编辑器而不是构建:VS Code 的 Java 扩展用 Eclipse 编译器加自带的
-Lombok(1.18.39),在语言级别 21 下对 Lombok 生成的构造函数(`@AllArgsConstructor` 等)报
-`Flexible Constructor Bodies is only available with source level 25`——文件标红,而且它还会把残缺的
-class 写进 `target/classes`,Maven 看到比源码新就不重编,启动时 `ClassFormatError`。
-语言级别设成 25 后这个特性是允许的,问题消失。代价是以后 Docker / 部署要用 Java 25 的基础镜像。
-(上面 Initializr 表格里的 21 是当初生成项目用的选项,现在以 `pom.xml` 为准。)
+The project was generated with 21 (JDK 25 builds a 21 target fine; the Maven build always worked).
+**It was changed to 25** because of the editor, not the build: the VS Code Java extension uses the
+Eclipse compiler with its bundled Lombok (1.18.39), which at language level 21 rejects Lombok-generated
+constructors (`@AllArgsConstructor` and friends) with
+`Flexible Constructor Bodies is only available with source level 25`. Files show red, and it also writes
+broken classes into `target/classes`; Maven sees them as newer than the sources, doesn't recompile, and
+startup fails with `ClassFormatError`. At language level 25 the feature is allowed and the problem is gone.
+The cost: Docker / deployment needs a Java 25 base image. (The 21 in the Initializr table above is the
+option used to generate the project; `pom.xml` is authoritative now.)
 
-## 跑起来
+## Running it
 
 ```bash
 cd backend-service
 .\mvnw.cmd spring-boot:run      # WSL/macOS/Linux: ./mvnw spring-boot:run
 ```
 
-- `application.yml` 的数据源配置从仓库根的 `.env` 读(主机/端口/库名有默认值,**密码没有默认值,必须在 `.env` 里设置**),要先 `docker compose up -d` 把 Postgres/Kafka 起起来
-- 访问 `http://localhost:8081/health` → `{"status":"ok","service":"backend-service"}`
-- 访问 `http://localhost:8081/actuator/health` → `{"status":"UP",...}`
+- The datasource settings in `application.yml` come from `.env` at the repository root (host/port/database
+  have defaults, **the password has none and must be set in `.env`**); start Postgres/Kafka first with `docker compose up -d`
+- `http://localhost:8081/health` → `{"status":"ok","service":"backend-service"}`
+- `http://localhost:8081/actuator/health` → `{"status":"UP",...}`
 
-## Jackson 版本注意
+## Jackson version
 
-Spring Boot 4 默认用 **Jackson 3**,Maven 坐标和 Java 包名都从 `com.fasterxml.jackson.*`
-换成了 **`tools.jackson.*`**——网上大部分教程/StackOverflow 答案还是 Jackson 2 的写法
-(`com.fasterxml.jackson.databind.ObjectMapper`),照抄会编译不过。`JacksonException` 也从
-Jackson 2 的受检异常(`extends IOException`)变成了非受检异常。
+Spring Boot 4 uses **Jackson 3** by default: both the Maven coordinates and the Java packages moved from
+`com.fasterxml.jackson.*` to **`tools.jackson.*`**. Most tutorials and StackOverflow answers still show
+Jackson 2 (`com.fasterxml.jackson.databind.ObjectMapper`), and copying them doesn't compile.
+`JacksonException` also changed from Jackson 2's checked exception (`extends IOException`) to an unchecked one.
 
-## 已实现的接口
+## Implemented endpoints
 
 ### `POST /documents/upload`
 
-对应 [docs/architecture.md](../docs/architecture.md) 的"两条摄入管道共用一个 topic"设计。
-`multipart/form-data`,字段:
+Implements the "two ingestion pipelines share one topic" design in
+[docs/architecture.md](../docs/architecture.md). `multipart/form-data`, fields:
 
-| 字段 | 必填 | 说明 |
+| Field | Required | Notes |
 |---|---|---|
-| `file` | 是 | 要上传的文件 |
-| `contentKind` | 是 | `document`(SOP/策划案/复盘,走 RAG)或 `data_table`(商品表/顾客行为表,直接落表) |
-| `docType` | `contentKind=document` 时必填 | `sop` / `campaign_plan` / `campaign_review` |
-| `tableType` | `contentKind=data_table` 时必填 | `campaign_products` / `campaign_customer_behavior` |
-| `department` | 是 | 部门名或 `ALL`(仅 `sop` 可用) |
-| `campaignId` | 除 `sop` 外必填 | `campaign_plan`/`campaign_review`/`data_table` 都要挂一个 campaign |
-| `category` | 否 | |
+| `file` | yes | the file to upload |
+| `contentKind` | yes | `document` (SOP / plan / review, goes through RAG) or `data_table` (product / customer behavior table, stored as rows) |
+| `docType` | when `contentKind=document` | `sop` / `campaign_plan` / `campaign_review` |
+| `tableType` | when `contentKind=data_table` | `campaign_products` / `campaign_customer_behavior` |
+| `department` | yes | department name, or `ALL` (`sop` only) |
+| `campaignId` | for everything except `sop` | `campaign_plan` / `campaign_review` / `data_table` all belong to a campaign |
+| `category` | no | |
 
-成功返回 `202 Accepted` + `{"uploadId": "..."}`。文件存到 `UPLOAD_DIR`(`.env` 里配,默认 `../uploads`,
-即仓库根的 `uploads/`,gitignore 了不进仓库;llm-service 读的是同一个变量),
-同时发一条 JSON 消息到 `document-upload-events`(topic 名从 `.env` 的 `DOC_UPLOAD_TOPIC` 读)。
+Success returns `202 Accepted` + `{"uploadId": "..."}`. The file is stored in `UPLOAD_DIR` (set in `.env`,
+default `../uploads`, i.e. `uploads/` at the repository root, gitignored; llm-service reads the same
+variable), and a JSON message is published to `document-upload-events` (the topic name comes from
+`DOC_UPLOAD_TOPIC` in `.env`).
 
-**消息里是 `storageKey`(逻辑键 = 文件名),不是文件路径**——最初的版本发的是 `path`(相对本目录、
-带 Windows 反斜杠),写消费者去读文件时才发现别的服务根本解析不了。契约的唯一事实来源是
-[contracts/upload-event.examples.json](../contracts/upload-event.examples.json),`UploadEventContractTest`
-和 Python 侧 `tests/test_events.py` 对着同一份文件验证。
+**The message carries `storageKey` (a logical key = the file name), not a file path**: a path relative to
+this folder, with Windows backslashes, can't be resolved by another service. The single source of truth for
+the contract is [contracts/upload-event.examples.json](../contracts/upload-event.examples.json);
+`UploadEventContractTest` and the Python side's `tests/test_events.py` validate against the same file.
 
-**文件名清理**:`getOriginalFilename()` 是客户端随便填的(`../../evil.md`、Windows 风格的 `C:\x\y.md`、
-控制字符、null),`sanitizeFilename` 把路径分隔符/Windows 非法字符/控制字符统一替换成 `_`,
-得到任何操作系统上都只能是单层文件名的字符串;中文原样保留。
+**File name sanitizing**: `getOriginalFilename()` is whatever the client sent (`../../evil.md`, a
+Windows-style `C:\x\y.md`, control characters, null). `sanitizeFilename` replaces path separators,
+characters Windows forbids and control characters with `_`, giving a string that can only be a
+single-level file name on any operating system; ordinary characters, including non-ASCII letters, are kept.
 
-**注意是 `upload_id` 不是 `doc_id`**——`documents.doc_id` 是 Postgres 自增列,要等
-消费者真正执行 `INSERT` 才会产生,上传这一刻还不存在,不可能提前塞进消息里。
+**It is `upload_id`, not `doc_id`**: `documents.doc_id` is a Postgres identity column that only exists
+once the consumer runs the `INSERT`. At upload time it doesn't exist yet, so it can't go into the message.
 
-`contentKind`/`docType`/`tableType`/`source` 在 Java 代码里是枚举(`upload/` 包下的
-`ContentKind`/`DocType`/`TableType`/`Source`),不是裸字符串——防止手滑拼错值。
-`@JsonValue` 保证序列化成 JSON 时还是这四张表约定好的小写字符串(`"sop"` 不是
-`"SOP"`),枚举只让 Java 这一侧更安全,不改变线上的消息格式,也不会自动跟数据库
-的 CHECK 约束或 Python 那边保持同步——这三处仍然要靠人记得同时改。
+`contentKind` / `docType` / `tableType` / `source` are enums in the Java code (`ContentKind` / `DocType` /
+`TableType` / `Source` in the `upload/` package), not raw strings, so a value can't be misspelled.
+`@JsonValue` keeps the JSON in the agreed lowercase strings (`"sop"`, not `"SOP"`). The enums only make the
+Java side safer: they don't change the wire format, and they don't sync themselves with the database CHECK
+constraints or the Python side -- those three places still have to be changed together (the contract and
+drift tests catch it when they aren't).
 
-**失败语义**(都实测过):
-- 参数不合法 → `400` + 具体原因
-- Kafka 不可用/topic 不存在 → `503`,约 5 秒内返回(producer 配了 `max.block.ms` 等超时),
-  **已存盘的文件会被清理**,不留孤儿
-- 等发送结果超时/被中断 → `503`,但**文件保留**——这种"结果不确定"的情况消息可能其实已经
-  发出去了,此时删文件会造成"有消息没文件",比留个孤儿更糟
+**Failure semantics** (all verified):
+- invalid parameters → `400` + the specific reason
+- Kafka unavailable / topic missing → `503` within about 5 seconds (the producer has `max.block.ms` and
+  related timeouts), and **the already-saved file is removed**, so no orphan is left
+- waiting for the send result times out / is interrupted → `503`, but **the file is kept**: with an
+  uncertain outcome the message may actually have gone out, and deleting the file would leave "message
+  without file", worse than an orphan
 
-`department`/`campaignId` **不是**枚举——它们是业务数据(哪天可能多一个新部门/新
-campaign),不是写死在 schema 里的固定几个值。这两个改成查真实的表验证存在性
-(`DepartmentRepository.existsByName` / `CampaignRepository.existsById`),不存在就
-400。`ALL` 是 sop 专用的哨兵值,不在 `departments` 表里,单独放行。
+`department` / `campaignId` are **not** enums: they are business data (a new department or campaign can
+appear any day), not a fixed set of values baked into the schema. They are checked against the real
+tables instead (`DepartmentRepository.existsByName` / `CampaignRepository.existsById`); unknown values get
+400. `ALL` is the sop-only sentinel, not a row in `departments`, and is let through.
 
-验证:
+Check it:
 ```bash
 curl -X POST http://localhost:8081/documents/upload \
   -F "file=@some.md" -F "contentKind=document" -F "docType=sop" -F "department=ALL"
 ```
-然后用 `llm-service/scripts/kafka_consumer_test.py` 或 `kafka-console-consumer` 确认收到。
+Then confirm the message arrived with `llm-service/scripts/kafka_consumer_test.py` or `kafka-console-consumer`.
 
-## 测试
+## Tests
 
 ```bash
-.\mvnw.cmd test                                                # 默认:39 个单元/切片测试,不需要 Docker,几秒钟
-.\mvnw.cmd test -DexcludedGroups=none -Dgroups=integration     # 集成测试:需要 Postgres 在跑
-.\mvnw.cmd test -Dtest=UploadControllerTest                    # 只跑某个类
+.\mvnw.cmd test                                                # default: 39 unit/slice tests, no Docker needed, a few seconds
+.\mvnw.cmd test -DexcludedGroups=none -Dgroups=integration     # integration test: needs Postgres running
+.\mvnw.cmd test -Dtest=UploadControllerTest                    # one class only
 ```
 
-| 测试类 | 类型 | 内容 |
+| Test class | Kind | Covers |
 |---|---|---|
-| `UploadEnumsTest`(13) | 纯单元 | 枚举的 `fromValue`(拼错/大小写/null)、`needsCampaign`、**JSON 线上格式必须小写**(`@JsonValue`) |
-| `UploadControllerTest`(25) | `@WebMvcTest` 切片 | 成功路径(含实际发出去的 JSON)、10 种参数错误各自返回 400 + 具体原因 + **零副作用**、4 个 Kafka 故障回归测试、恶意文件名不能逃出上传目录、`sanitizeFilename` 的 7 种输入 |
-| `UploadEventContractTest`(1) | 契约 | `contracts/upload-event.examples.json` 里每条样例经 Java 反序列化再序列化,必须与原文一致 |
-| `BackendServiceApplicationTests`(1) | 集成,`@Tag("integration")` | 完整容器 + 真实 Postgres;因为 `ddl-auto: validate`,它同时检测 **Entity 是否跟 `db/migration/` 的迁移漂移** |
+| `UploadEnumsTest` (13) | plain unit | the enums' `fromValue` (typos / case / null), `needsCampaign`, **the JSON wire format must be lowercase** (`@JsonValue`) |
+| `UploadControllerTest` (25) | `@WebMvcTest` slice | success paths (including the JSON actually sent), 10 kinds of invalid parameters each returning 400 + the reason + **no side effects**, 4 Kafka failure regression tests, malicious file names can't escape the upload folder, 7 inputs to `sanitizeFilename` |
+| `UploadEventContractTest` (1) | contract | every example in `contracts/upload-event.examples.json`, deserialized and re-serialized by Java, must equal the original |
+| `BackendServiceApplicationTests` (1) | integration, `@Tag("integration")` | the full container + a real Postgres; with `ddl-auto: validate` it also detects **drift between the entities and the migrations in `db/migration/`** |
 
-要点:
-- `@WebMvcTest` 只加载 Web 层,Kafka / 两个 Repository 用 `@MockitoBean` 换成假的——这样才能**按需让 Kafka 出故障**(真 Kafka 做不到"恰好在这一刻抛某个异常")
-- 上传目录和发送超时是配置项(`document.upload-dir` / `document.send-timeout-ms`),测试指向临时目录、把 15 秒改成 300 毫秒。**这是写测试"逼"出来的设计改进**:硬编码的路径和超时让代码没法测
-- Spring Boot 4 的测试类换了包:`@WebMvcTest` 在 `org.springframework.boot.webmvc.test.autoconfigure`,`@MockBean` 已被 `@MockitoBean` 取代,JUnit 是 6.x——别照抄 Boot 3 时代的教程
-- **变异验证过**:故意把 5 个 bug 改回去(catch 错异常类型 / 不清理孤儿文件 / 不恢复中断标志 / 超时也删文件 / 误删 `@JsonValue`),每个都被对应的测试抓到变红。没见过它失败的测试,不能证明它有用
+Notes:
+- `@WebMvcTest` loads only the web layer; Kafka and the two repositories are replaced with fakes via
+  `@MockitoBean`, which is what lets the tests **make Kafka fail on demand** (a real Kafka can't be made to
+  throw a particular exception at a particular moment)
+- The upload folder and the send timeout are settings (`document.upload-dir` / `document.send-timeout-ms`),
+  so tests point at a temporary folder and cut 15 seconds to 300 ms. Hard-coded paths and timeouts would
+  have made the code untestable
+- Spring Boot 4 moved the test classes: `@WebMvcTest` is in
+  `org.springframework.boot.webmvc.test.autoconfigure`, `@MockBean` is replaced by `@MockitoBean`, and JUnit
+  is 6.x -- don't copy Boot 3 era tutorials
+- **Mutation-tested**: 5 bugs were put back on purpose (catching the wrong exception type / not removing the
+  orphan file / not restoring the interrupt flag / deleting the file on timeout too / deleting `@JsonValue`),
+  and each one turned its test red. A test you have never seen fail proves nothing
 
-## 接口一览
+## Endpoint overview
 
-| 接口 | 状态 | 说明 |
+| Endpoint | Status | Notes |
 |---|---|---|
-| `GET /health`、`GET /actuator/health` | 已实现 | 健康检查 |
-| `POST /documents/upload` | 已实现 | 上传文件 → 存盘 → 发 Kafka `document-upload-events` |
-| `POST /query` | 规划中 | 转发给 llm-service /query(带 `X-User-Id`) |
-| 结构化数据只读接口 | 规划中 | campaigns / campaign_metrics / anchors 查询(给前端看板用,可选) |
+| `GET /health`, `GET /actuator/health` | implemented | health checks |
+| `POST /documents/upload` | implemented | upload file → store → publish to Kafka `document-upload-events` |
+| `POST /query` | planned | forwards to llm-service /query (with `X-User-Id`) |
+| read-only structured data endpoints | planned | campaigns / campaign_metrics / hosts queries (for a frontend dashboard, optional) |

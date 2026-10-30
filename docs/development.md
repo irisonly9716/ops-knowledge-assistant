@@ -36,7 +36,7 @@ uv run python -m app.consumers.upload_consumer
 
 # 6. Upload a document (third terminal, from the repo root); the consumer log should show the file being read.
 #    In PowerShell, type curl.exe instead of curl (plain `curl` is an alias for a different command there).
-curl -X POST http://localhost:8081/documents/upload -F "file=@sop_docs/风控问题处理流程.md" -F "contentKind=document" -F "docType=sop" -F "department=ALL"
+curl -X POST http://localhost:8081/documents/upload -F "file=@sop_docs/account-restriction-handling.md" -F "contentKind=document" -F "docType=sop" -F "department=ALL"
 ```
 
 `docker compose down -v` deletes all volumes (Postgres data and Kafka topics). The next `up` rebuilds the schema from the migrations; run steps 2 and 3 again afterwards.

@@ -1,10 +1,10 @@
 # llm-service
 
-Python / FastAPI。负责 embedding、RAG、Text-to-SQL、查询路由、会话记忆。
+Python / FastAPI. Embeddings, RAG, Text-to-SQL, query routing, conversation memory.
 
-## 本地跑起来
+## Running it locally
 
-Python 版本锁定 **3.12**(见 `.python-version`)。推荐用 [uv](https://docs.astral.sh/uv/):
+Python is pinned to **3.12** (see `.python-version`). [uv](https://docs.astral.sh/uv/) is recommended:
 
 ```bash
 cd llm-service
@@ -14,15 +14,15 @@ uv pip install -r requirements.txt
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
-打开 http://localhost:8000/health,返回 `{"status":"ok",...}` 就算成功。
-http://localhost:8000/docs 是自动生成的接口文档。
+http://localhost:8000/health returning `{"status":"ok",...}` means it works.
+http://localhost:8000/docs is the generated API documentation.
 
 <details>
-<summary>没有 uv,用标准 venv</summary>
+<summary>Without uv, using a standard venv</summary>
 
 ```bash
 cd llm-service
-py -3.12 -m venv .venv          # 需要先装好 Python 3.12
+py -3.12 -m venv .venv          # needs Python 3.12 installed first
 .venv\Scripts\Activate.ps1      # WSL/macOS: source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
@@ -30,83 +30,96 @@ uvicorn app.main:app --reload --port 8000
 ```
 </details>
 
-## 目录
+## Layout
 
 ```
 app/
-├── main.py        FastAPI 入口(现在只有 /health)
-├── config.py      读环境变量(根目录 .env)
-├── consumers/     Kafka 消费者(文档处理链路),独立的 worker 进程
-│   ├── upload_consumer.py   消费循环:手动提交 + 重试 + 死信 + 优雅退出;入口 main()
-│   ├── events.py            消息契约的 Python 一半(pydantic,镜像 Java 的 UploadEvent)
-│   ├── storage.py           storageKey -> 上传目录里的真实文件(含路径穿越防御)
-│   ├── handlers.py          收到合法事件后具体干什么(解析/切片/向量化/入库逐步往里加)
-│   └── errors.py            PermanentError:重试无意义的错误,直接进死信
-├── rag/           解析 / chunk / embed / 检索 / 问答
-│   ├── parsing/             Markdown / docx / PDF -> 统一的带类型元素(标题、段落、列表项、表格)
-│   └── embeddings.py        Embedder 接口 + OpenAI 实现
-├── sql_agent/     Text-to-SQL + 安全校验 + 行级过滤
-├── router/        查询路由 + 综合回答
-└── memory/        Redis 缓存 + 会话记忆
-tests/             pytest;test_events(契约/跨语言漂移) test_storage(路径穿越)
-                   test_upload_consumer(消费循环所有分支) test_health
-                   test_embeddings(假的 OpenAI 客户端) test_parsing(三种格式解析结果一致)
-tests/fixtures/documents/   docx / PDF 样例,由 scripts/make_sample_documents.py 从 Markdown 生成
+├── main.py        FastAPI entry point (only /health for now)
+├── config.py      environment variables (the repository-root .env)
+├── consumers/     Kafka consumer (the document pipeline), a separate worker process
+│   ├── upload_consumer.py   consume loop: manual commits + retries + dead-letter topic + graceful shutdown; entry point main()
+│   ├── events.py            the Python half of the message contract (pydantic, mirrors Java's UploadEvent)
+│   ├── storage.py           storageKey -> the real file in the upload folder (with path traversal defense)
+│   ├── handlers.py          what happens to a valid event (parsing/chunking/embedding/storing are added step by step)
+│   └── errors.py            PermanentError: errors where retrying is pointless, straight to the dead-letter topic
+├── rag/           parsing / chunking / embedding / retrieval / Q&A
+│   ├── parsing/             Markdown / docx / PDF -> the same typed elements (headings, paragraphs, list items, tables)
+│   └── embeddings.py        Embedder interface + OpenAI implementation
+├── sql_agent/     Text-to-SQL + safety checks + row-level filtering
+├── router/        query routing + combined answers
+└── memory/        Redis cache + conversation memory
+tests/             pytest; test_events (contract / cross-language drift) test_storage (path traversal)
+                   test_upload_consumer (every branch of the consume loop) test_health
+                   test_embeddings (fake OpenAI client) test_parsing (all three formats parse the same)
+tests/fixtures/documents/   docx / PDF fixtures, generated from Markdown by scripts/make_sample_documents.py
 ```
 
-## 文档解析
+## Document parsing
 
-`app.rag.parsing.parse_file(path)` 按扩展名选解析器(`.md` / `.docx` / `.pdf`),输出一串元素:
-类型(标题 / 段落 / 列表项 / 表格)、级别、所在的标题路径,PDF 还带页码。后面的切块只认这些元素,
-不关心原文件是什么格式。
+`app.rag.parsing.parse_file(path)` picks a parser by extension (`.md` / `.docx` / `.pdf`) and returns a
+sequence of elements: kind (heading / paragraph / list item / table), level, heading path, and for PDFs the
+page number. Chunking works only with these elements and doesn't care about the original format.
 
-- **Markdown**(markdown-it-py)、**docx**(python-docx):格式本身有结构,直接读
-- **PDF**(pdfplumber):只有"在什么位置用多大的字画了什么",结构靠字号、缩进、行距推断。
-  只支持有文字层的数字版 PDF;扫描件会报错(需要 OCR)
-- 文件坏了、格式不支持、编码不对、PDF 没有文字层 → `DocumentParseError`,重试也没用
+- **Markdown** (markdown-it-py), **docx** (python-docx): the formats carry their structure, it is read directly
+- **PDF** (pdfplumber): only "what was drawn where, at which size"; structure is inferred from font size,
+  indentation and line spacing, and spaces from the gaps between letters. Only digital PDFs with a text
+  layer are supported; scans are rejected (they need OCR)
+- broken file, unsupported format, wrong encoding, PDF without a text layer → `DocumentParseError`; retrying won't help
 
-样例的 Markdown 改了之后要重新生成 docx / PDF(需要 Windows + Word 或 WPS):
+After changing a sample Markdown file, regenerate the docx / PDF (needs Windows + Word or WPS):
 
 ```bash
 uv run python -m scripts.make_sample_documents
 ```
 
-## 跑消费者
+## Running the consumer
 
 ```bash
 uv run python -m app.consumers.upload_consumer
 ```
 
-**它是独立于 FastAPI 的进程**(`uvicorn app.main:app` 是另一个)。前置:Kafka 起着、
-topic 已建(`init_topics`,其中包含死信 topic `document-upload-events.dlq`)。
-启动日志会打出实际解析到的 `upload_dir`——上传目录对不上(两个服务指向不同目录)是最常见的部署问题。
+**It is a process separate from FastAPI** (`uvicorn app.main:app` is the other one). Prerequisites: Kafka
+running and the topics created (`init_topics`, which includes the dead-letter topic
+`document-upload-events.dlq`). The startup log prints the resolved `upload_dir`: mismatched upload folders
+(the two services pointing at different directories) is the most common deployment problem.
 
-行为要点(设计理由见 [docs/architecture.md](../docs/architecture.md)):
-- **至少一次**:关掉自动提交,处理完(或确定进了死信)才提交 offset
-- 消息本身坏了(非 JSON / 不符合契约 / 路径越界)→ 不重试,直接进死信 `document-upload-events.dlq`
-- 其它异常 → 指数退避重试(默认共尝试 3 次 = 第一次 + 2 次重试,中间等 0.5s、1s),用尽进死信;死信里带失败原因、尝试次数、来源 offset
-- 死信写不进去 → 不提交 offset 并崩溃(宁可停也不丢消息)
-- 被强杀后重启,新消费者要等旧成员的**会话超时**(约 45 秒)才会接手分区;Ctrl+C 优雅退出则立刻让位
+Behavior (design reasons in [docs/architecture.md](../docs/architecture.md)):
+- **at least once**: auto-commit off; the offset is committed only after processing (or once the message is safely dead-lettered)
+- broken message (not JSON / breaks the contract / path outside the upload folder) → no retry, straight to the dead-letter topic `document-upload-events.dlq`
+- any other exception → exponential backoff (3 attempts in total by default = first try + 2 retries, waiting 0.5 s, 1 s), then the dead-letter topic; dead letters carry the failure reason, attempt count and source offset
+- dead-letter write fails → no commit, and the process crashes (better to stop than to lose a message)
+- after being killed hard, a restarted consumer waits for the old member's **session timeout** (about 45 seconds) before taking over the partitions; a graceful Ctrl+C hands over immediately
 
-不经过 Java 后端,单独验证消费者:`uv run python -m scripts.kafka_producer_test`
-(往上传目录写一个文件,并发一条符合契约的事件)。
+To check the consumer without the Java backend: `uv run python -m scripts.kafka_producer_test`
+(writes a file into the upload folder and publishes a contract-compliant event).
 
-## 初始化 Kafka topic
+## Creating the Kafka topics
 
 ```bash
 uv run python -m scripts.init_topics
 ```
 
-幂等:topic 已存在就跳过。项目需要哪些 topic,都集中列在这个脚本的 `TOPICS` 里 ——
-新机器 / `docker compose down -v` 重来后,跑一次这个,不用再手敲 `kafka-topics.sh`。
+Idempotent: existing topics are skipped. Every topic the project needs is listed in the script's `TOPICS`;
+on a new machine or after `docker compose down -v`, run it once instead of typing `kafka-topics.sh` by hand.
 
-## 测试
+## Mock data
 
 ```bash
-uv run pytest        # pytest / httpx 已在 requirements.txt 里,不用另装
+uv run python -m scripts.generate_mock_data
 ```
 
-全部用假的 Consumer/Producer/sleep,不需要 Kafka 在跑,不真等退避时间。
-`test_events.py` 里有跨语言漂移检测:按版本顺序读 `db/migration/` 下的迁移文件,断言
-`DocType` / `TableType` / `ContentKind` / `Source` 枚举跟对应的 CHECK 约束一致——有人改了 SQL 忘了改 Python,测试会红。
-另有一个 Windows 上会被跳过的测试(符号链接需要管理员权限),属正常。
+Reproducible: `random` and Faker are seeded and every date is computed from a fixed `AS_OF` date, so every
+run produces the same rows (the campaign documents in `campaign_docs/` quote them). It empties and refills
+the business tables, and through the foreign keys also uploads / documents / chunks.
+
+## Tests
+
+```bash
+uv run pytest        # pytest / httpx are in requirements.txt, nothing extra to install
+```
+
+Everything uses fake Consumer / Producer / sleep: no running Kafka needed, no real backoff waits.
+`test_events.py` detects cross-language drift: it reads the migrations under `db/migration/` in version order
+and asserts that the `DocType` / `TableType` / `ContentKind` / `Source` enums match the corresponding CHECK
+constraints. If someone changes the SQL and forgets the Python, the test fails.
+One test is skipped on Windows (symlinks need administrator rights); that is expected.
