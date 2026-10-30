@@ -76,7 +76,7 @@ processing (or once the message is safely in the dead-letter topic). Failures ar
   llm-service Kafka consumer
       │  1. download / read the file
       │  2. parse (Markdown / docx / digital PDF → headings, paragraphs, list items, tables)
-      │  3. chunking (RecursiveCharacterTextSplitter)
+      │  3. chunking (by section, up to 600 tokens, contextual header; RecursiveCharacterTextSplitter only for oversized units)
       │  4. embedding (one vector per chunk)
       │  5. write to Postgres: INSERT documents (only now does the real doc_id exist) + doc_chunks
       │  6. set the status to done
@@ -160,6 +160,15 @@ backend /query ──forwards──▶ llm-service /query
   fragments; nested Markdown lists were flattened too. The three small libraries total 54 MB, the PDF
   structure rules are our own, and all three formats parse into the same structure, text included (covered
   by tests). Scanned PDFs would get an OCR implementation behind the same interface (say, Amazon Textract).
+- **Why chunks follow sections instead of a fixed size**: an SOP question is usually about one procedure,
+  and a fixed-size cut can split a step in half or glue the end of one section to the start of the next.
+  Chunks never cross a heading; inside a section, elements are packed up to 600 tokens and a step with its
+  nested items is never split. Measured on the samples: a whole procedure is 233-303 tokens and a single
+  step only about 50, so one chunk per step would be too small to embed well, and "how do I handle X"
+  would get back only the top-k steps of seven. Every chunk starts with a contextual header (document type,
+  department, campaign, date, host, heading path) that is embedded with the text. LangChain's
+  `RecursiveCharacterTextSplitter` is only used for a unit larger than the limit by itself, overlapping by
+  whole sentences. Section-level vs step-level chunks is a question for the eval; the limit is one parameter.
 - **Why vectors and structured data both live in Postgres**: one less piece of infrastructure to run, and
   `doc_chunks` and the business tables can be queried in the same transaction / connection.
 - **Why `department` is built into the schema from the start**: added at the end, the vector table, SQL

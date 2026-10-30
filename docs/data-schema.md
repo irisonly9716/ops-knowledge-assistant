@@ -1,6 +1,7 @@
 # Data schema
 
-> The actual DDL lives in the Flyway migrations under [db/migration/](../db/migration/), applied in
+> The actual DDL lives in the Flyway migrations under [db/migration/](../db/migration/) (V1 pgvector, V2 base
+> schema, V3 uploads / roles / chunk department, V4 the `document_catalog` view), applied in
 > version order (this document explains them; the SQL files are authoritative for column types).
 > The data is mock data generated with Python + Faker (see `llm-service/scripts/generate_mock_data.py`).
 
@@ -177,14 +178,39 @@ For `campaign_plan` / `campaign_review` the `department` should equal the campai
 The host of a document can be traced through `documents.campaign_id -> campaigns.host_id`, so
 `documents` does not store a redundant `host_id`.
 
-`steps` jsonb shape (so questions like "first step / last step / which team" can be answered directly):
+`steps` jsonb shape (so questions like "first step / last step / how many steps" can be answered without
+a vector search). Filled from the parsed document by `sop_steps()` in `llm-service/app/rag/chunking.py`:
+every top-level numbered list item, numbered within its list, with its nested items:
 ```json
 [
-  {"order": 1, "action": "Identify the triggered policy and the account in the seller center", "owner": "the ops owner"},
-  {"order": 2, "action": "File an appeal ticket with the stream recording attached", "owner": "the ops owner"},
-  {"order": 3, "action": "Notify the Trust & Safety contact and wait for the review", "owner": "Trust & Safety team"}
+  {"section": "Account Restriction Handling > Procedure", "order": 1,
+   "text": "Identify the rule and the account: Log in to the platform's seller center ...", "substeps": []},
+  {"section": "Account Restriction Handling > Procedure", "order": 7,
+   "text": "Follow up on the result:",
+   "substeps": ["Appeal approved: confirm every feature is restored ...", "Appeal rejected: ask the Trust & Safety contact ..."]}
 ]
 ```
+
+Which values a row gets: `title` and `department` always come from the upload (form + the uploader's
+identity), never from the file, because the department decides visibility and approval. A Markdown
+frontmatter only fills `responsible_team`, and `category` when the form left it empty; a frontmatter that
+disagrees is ignored with a warning (`llm-service/app/rag/document_fields.py`).
+
+### document_catalog (view)
+
+One row per document, computed from `documents` + `campaigns` + `hosts` (a view, not stored columns, so a
+renamed campaign or host never leaves a stale copy behind):
+
+| Column | Example |
+|---|---|
+| `display_name` | `SOP_All_Account Restriction Handling`, `Review_2025-11-18_Beauty_Tommy Walter_Beauty Black Friday Live` |
+| `type_label` | `SOP` / `Campaign plan` / `Post-campaign review` |
+| `department_label` | the department, or `All departments` for `ALL` |
+| `campaign_name`, `start_date`, `host_name` | empty for SOPs |
+
+The display name is for people (citations, chunk headers, later storage paths); retrieval filters on the
+structured columns, never on a name. The labels are defined only in this view, and the contextual chunk
+header is built from them.
 
 ### doc_chunks (chunks + vectors)
 | Column | Type | Notes |
@@ -193,10 +219,10 @@ The host of a document can be traced through `documents.campaign_id -> campaigns
 | doc_id | bigint not null | together with `department`, a composite foreign key to documents |
 | department | text | **deliberately redundant**: retrieval and RLS filter on this column without a JOIN |
 | chunk_index | int | position of the chunk; `(doc_id, chunk_index)` is unique |
-| content | text | chunk text |
+| content | text | contextual header + chunk text: exactly what was embedded (see "Chunking" in `llm-service/README.md`) |
 | embedding | vector(1536) | dimension of the embedding model (text-embedding-3-small = 1536) |
 | embedding_model | text | the model that produced the vector. Only tells apart models of the same dimension; a model with another dimension needs another column or table |
-| metadata | jsonb | per-chunk retrieval details such as the heading path |
+| metadata | jsonb | only what belongs to the chunk: `{"heading_path": [...], "pages": [...], "token_count": n}`. `doc_type`, `campaign_id` and the rest are joined from `documents` when needed, not copied onto every chunk |
 
 The redundant `department` is kept correct by a **composite foreign key**: `(doc_id, department)`
 references `documents(doc_id, department)`, so a chunk's department can only be its document's

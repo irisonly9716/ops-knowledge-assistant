@@ -44,6 +44,8 @@ app/
 │   └── errors.py            PermanentError: errors where retrying is pointless, straight to the dead-letter topic
 ├── rag/           parsing / chunking / embedding / retrieval / Q&A
 │   ├── parsing/             Markdown / docx / PDF -> the same typed elements (headings, paragraphs, list items, tables)
+│   ├── chunking.py          elements -> chunks: by section, token limit, contextual header, SOP steps
+│   ├── document_fields.py   which values a documents row gets (the upload decides, the frontmatter fills gaps)
 │   └── embeddings.py        Embedder interface + OpenAI implementation
 ├── sql_agent/     Text-to-SQL + safety checks + row-level filtering
 ├── router/        query routing + combined answers
@@ -51,6 +53,7 @@ app/
 tests/             pytest; test_events (contract / cross-language drift) test_storage (path traversal)
                    test_upload_consumer (every branch of the consume loop) test_health
                    test_embeddings (fake OpenAI client) test_parsing (all three formats parse the same)
+                   test_chunking (steps stay whole, sections stay apart, oversized units split with overlap)
 tests/fixtures/documents/   docx / PDF fixtures, generated from Markdown by scripts/make_sample_documents.py
 ```
 
@@ -71,6 +74,32 @@ After changing a sample Markdown file, regenerate the docx / PDF (needs Windows 
 ```bash
 uv run python -m scripts.make_sample_documents
 ```
+
+## Chunking
+
+`app.rag.chunking.chunk_document(parsed, info)` turns the elements into chunks:
+
+- **one section at a time**: a chunk never crosses a heading. A section's elements are packed in order up
+  to 600 tokens; a step (top-level numbered list item) and its nested items are never split. Every sample
+  SOP section fits into one chunk (a whole procedure is 233-303 tokens with its header), so "how do I handle X" retrieves
+  the whole procedure
+- **only a unit larger than the limit on its own is cut further**: a table by rows, repeating the header
+  row; text by LangChain's `RecursiveCharacterTextSplitter`, overlapping by whole sentences (up to 80 tokens)
+- **a contextual header** on every chunk, embedded and stored with the text:
+  ```
+  SOP | All departments
+  Account Restriction Handling > Procedure
+
+  1. Identify the rule and the account: ...
+  ```
+  The labels come from the `document_catalog` view (`db/migration/V4`)
+- list numbers are written back (`3. Collect appeal evidence`), since docx and PDF don't store them as text
+- `sop_steps(parsed)` gives the `documents.steps` value; `document_fields(...)` decides title / department /
+  category / responsible_team (title and department always come from the upload, never from the file)
+
+Lengths are tokens of the embedding model's tokenizer (`tiktoken`, `cl100k_base`). **tiktoken downloads its
+1.7 MB encoding file on first use** and caches it, so the first test run needs the network; a deployment
+image should download it at build time (set `TIKTOKEN_CACHE_DIR` and call `tiktoken.get_encoding` once).
 
 ## Running the consumer
 
