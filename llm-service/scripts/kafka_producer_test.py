@@ -4,10 +4,15 @@ Java backend, to check the consumer on its own. Run it with -m, not with a file 
     cd llm-service
     uv run python -m scripts.kafka_producer_test
 
-It writes a real file into the upload folder first and then publishes a valid event pointing at
-it. The consumer should receive the event and read the file: the whole Python side of the
-pipeline in one check. (A made-up message that breaks contracts/upload-event.examples.json
-would correctly end up in the dead-letter topic instead.)
+It does what the backend does: writes a file into the upload folder, records the upload in the
+uploads table (status received, uploaded by the first staff user), then publishes a valid event
+pointing at it. The consumer should ingest it end to end: the whole Python side of the pipeline in
+one check. (The consumer rejects a message without an uploads row, and a made-up message that breaks
+contracts/upload-event.examples.json ends up in the dead-letter topic.)
+
+Each run creates a real SOP titled "Kafka smoke test <id>" for ALL departments (with real embeddings,
+a fraction of a cent). Remove them afterwards with
+    DELETE FROM documents WHERE title LIKE 'Kafka smoke test %';
 
 Why `-m scripts.xxx` and not `python scripts/xxx.py`: the latter sets sys.path[0] to the
 scripts/ folder itself, so `import app.config` can't find the app package. With `-m`, Python
@@ -20,6 +25,7 @@ from pathlib import Path
 
 from confluent_kafka import Producer
 
+from app import db
 from app.config import settings
 
 BOOTSTRAP_SERVERS = settings.kafka_bootstrap_servers   # a script on the host connects to the EXTERNAL listener
@@ -45,6 +51,16 @@ def main():
     upload_dir.mkdir(parents=True, exist_ok=True)
     (upload_dir / storage_key).write_text(
         "# Kafka smoke test\n\nWritten to the upload folder by kafka_producer_test.py.\n", encoding="utf-8")
+
+    # Then the uploads row, before publishing: the consumer looks the upload up by its id
+    title = f"Kafka smoke test {upload_id[:8]}"
+    with db.connect() as conn:
+        uploader = conn.execute("SELECT user_id FROM users WHERE role = 'staff' ORDER BY user_id LIMIT 1").fetchone()[0]
+        conn.execute(
+            """INSERT INTO uploads (upload_id, source, uploaded_by, content_kind, doc_type, department, title,
+                                    original_filename, storage_key, status)
+               VALUES (%s, 'manual', %s, 'document', 'sop', 'ALL', %s, 'smoke-test.md', %s, 'received')""",
+            (upload_id, uploader, title, storage_key))
 
     producer = Producer({"bootstrap.servers": BOOTSTRAP_SERVERS})
     event = {  # field names and values must match contracts/upload-event.examples.json (camelCase)

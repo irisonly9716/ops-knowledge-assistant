@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     # ---- LLM / embeddings ----
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
+    # The SDK retries connection errors, 408/409/429 and 5xx by itself, with exponential backoff and
+    # honoring Retry-After; 5 retries ride out a short rate-limit burst. The consumer's own retries
+    # (doc_consumer_max_attempts) come on top of these
+    openai_max_retries: int = 5
     embedding_model: str = "text-embedding-3-small"
     # The cheapest tier by default. Switching a task to a stronger model (SQL generation,
     # campaign suggestions, eval grading) is decided by eval accuracy, latency and cost,

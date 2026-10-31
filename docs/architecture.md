@@ -73,16 +73,40 @@ processing (or once the message is safely in the dead-letter topic). Failures ar
 [future] scheduled job ──same topic──▶   { ..., source: "auto" }
       │
       ▼
-  llm-service Kafka consumer
-      │  1. download / read the file
-      │  2. parse (Markdown / docx / digital PDF → headings, paragraphs, list items, tables)
-      │  3. chunking (by section, up to 600 tokens, contextual header; RecursiveCharacterTextSplitter only for oversized units)
-      │  4. embedding (one vector per chunk)
-      │  5. write to Postgres: INSERT documents (only now does the real doc_id exist) + doc_chunks
-      │  6. set the status to done
+  llm-service Kafka consumer (app/consumers/handlers.py)
+      │  1. short transaction: lock the uploads row; already done → duplicate, skip; else → processing
+      │  2. no transaction:
+      │     read the file → parse (Markdown / docx / digital PDF → headings, paragraphs, list items, tables)
+      │     → fields (title / department from the upload, never from the file) → catalog labels
+      │     → chunking (by section, up to 600 tokens, contextual header) → embedding (batched)
+      │  3. short transaction: lock the row again, INSERT or replace documents (only now does the
+      │     doc_id exist), delete + insert doc_chunks, campaign flags, status done
       ▼
   searchable by vector retrieval
 ```
+
+**The uploads row is the source of truth, the message is only a notification.** The backend writes the row
+(`received`, with the uploader from `X-User-Id`) before publishing, so the consumer always finds it. Its
+status moves `received → processing → done`; a message that ends in the dead-letter topic marks it `failed`
+with the reason. A certain Kafka failure in the backend marks it `failed` right away; an uncertain one leaves
+it `received`, since the message may still arrive.
+
+**Transaction boundaries.** Embedding is a network call that can take seconds and be retried, so it runs with
+no transaction open; everything that becomes visible (document, chunks, flags, status) is written afterwards in
+one short transaction. A failure before or inside that transaction leaves no half-written document. To build
+the chunk headers before the document row exists, the labels of `document_catalog` come from the
+`catalog_entry()` SQL function, which the view uses as well.
+
+**Idempotency.** Kafka delivers at least once, so a message can arrive twice. The uploads status is the
+deduplication record: an upload that is already `done` is skipped, and the check is repeated under the row
+lock right before writing, where it can't race with another copy of the message. A replacement updates the
+row produced by `replaces_upload_id` in place (same `doc_id`) and rebuilds its chunks; if that version was
+replaced in the meantime, the upload fails instead of overwriting the newer one (optimistic concurrency).
+
+**Known gap: the dual write.** The backend writes the uploads row and then publishes to Kafka, two systems
+without a shared transaction. If the backend dies between the two, the row stays `received` with no message
+behind it. The standard fix is the transactional outbox (write the event into an outbox table in the same
+database transaction, and let a relay publish it); it is designed, not built.
 
 **② Structured tables** (product sales and customer behavior tables uploaded by ops, e.g. Excel/CSV
 exports) -- not chunked, not embedded; parsed straight into structured rows and queried with Text-to-SQL:

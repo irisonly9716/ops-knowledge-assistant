@@ -1,7 +1,7 @@
 # Data schema
 
 > The actual DDL lives in the Flyway migrations under [db/migration/](../db/migration/) (V1 pgvector, V2 base
-> schema, V3 uploads / roles / chunk department, V4 the `document_catalog` view), applied in
+> schema, V3 uploads / roles / chunk department, V4 the `document_catalog` view, V5 its `catalog_entry()` function), applied in
 > version order (this document explains them; the SQL files are authoritative for column types).
 > The data is mock data generated with Python + Faker (see `llm-service/scripts/generate_mock_data.py`).
 
@@ -209,8 +209,10 @@ renamed campaign or host never leaves a stale copy behind):
 | `campaign_name`, `start_date`, `host_name` | empty for SOPs |
 
 The display name is for people (citations, chunk headers, later storage paths); retrieval filters on the
-structured columns, never on a name. The labels are defined only in this view, and the contextual chunk
-header is built from them.
+structured columns, never on a name. The labels are defined in one place, the SQL function
+`catalog_entry(doc_type, title, department, campaign_id)` (V5), which the view calls for every row. Ingestion
+calls the same function before the document row exists, to build the contextual chunk headers and embed the
+chunks before opening the write transaction.
 
 ### doc_chunks (chunks + vectors)
 | Column | Type | Notes |
@@ -235,7 +237,17 @@ small department uses an exact scan, it filters by department first).
 ### uploads (upload records + processing status)
 One row per upload. The backend writes `received` (or `pending_approval` when approval is needed)
 before publishing to Kafka; the consumer updates the status while processing. Shared by both pipelines
-(documents and data tables).
+(documents and data tables). Who moves the status:
+
+| Transition | By | When |
+|---|---|---|
+| → `received` | backend | the upload is accepted; written before the message is published |
+| `received` → `failed` | backend | publishing to Kafka failed for certain (an uncertain outcome leaves `received`) |
+| `received` / `failed` → `processing` | consumer | it starts working on the message (`failed` again after a replay from the dead-letter topic) |
+| `processing` → `done` | consumer | in the same transaction that writes `documents` + `doc_chunks` |
+| `processing` → `failed` | consumer | the message was dead-lettered; `error` holds the reason |
+
+`done` is also the consumer's deduplication record: a message for an upload that is already `done` is skipped.
 
 | Column | Type | Notes |
 |---|---|---|

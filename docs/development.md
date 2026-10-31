@@ -34,9 +34,11 @@ cd backend-service
 cd llm-service
 uv run python -m app.consumers.upload_consumer
 
-# 6. Upload a document (third terminal, from the repo root); the consumer log should show the file being read.
+# 6. Upload a document (third terminal, from the repo root). X-User-Id names the uploader (any user_id from the
+#    users table; 2 is a staff member in the generated data). The consumer log shows the document being
+#    parsed, chunked, embedded (needs OPENAI_API_KEY in .env) and stored.
 #    In PowerShell, type curl.exe instead of curl (plain `curl` is an alias for a different command there).
-curl -X POST http://localhost:8081/documents/upload -F "file=@sop_docs/account-restriction-handling.md" -F "contentKind=document" -F "docType=sop" -F "department=ALL"
+curl -X POST http://localhost:8081/documents/upload -H "X-User-Id: 2" -F "file=@sop_docs/account-restriction-handling.md" -F "contentKind=document" -F "docType=sop" -F "department=ALL" -F "title=Account Restriction Handling"
 ```
 
 `docker compose down -v` deletes all volumes (Postgres data and Kafka topics). The next `up` rebuilds the schema from the migrations; run steps 2 and 3 again afterwards.
@@ -57,7 +59,8 @@ The schema lives in versioned SQL files under `db/migration/` (`V1__...sql`, `V2
 cd backend-service
 ./mvnw test                           # Windows: .\mvnw.cmd test
 
-# Python: Kafka not required
+# Python: Kafka not required. tests/test_ingestion.py needs the docker compose Postgres (it creates and
+# drops a throwaway database) and is skipped when Postgres isn't running
 cd ../llm-service
 uv run pytest
 ```
@@ -92,6 +95,11 @@ If the data is disposable, `docker compose down -v` and a fresh `up` work as wel
 
 **Flyway: `Validate failed: Migrations have failed validation` / checksum mismatch**
 An already-applied migration file was edited. Restore the original file (for example with `git checkout -- db/migration/`) and put the change in a new migration.
+
+**The consumer picks up nothing after a long break, or replays old messages**
+Kafka forgets a consumer group's committed offsets after 7 days without activity. With
+`auto.offset.reset=earliest` the consumer then starts from the oldest message still in the topic. Messages
+for uploads that are already `done` are skipped; messages without an uploads row go to the dead-letter topic.
 
 **`No module named 'scripts'`**
 Run the Python scripts from inside `llm-service/`, not from the repository root.
