@@ -98,11 +98,24 @@ Fields:
 
 Success returns `202 Accepted` + `{"uploadId": "..."}`. The file is stored in `UPLOAD_DIR` (set in `.env`,
 default `../uploads`, i.e. `uploads/` at the repository root, gitignored; llm-service reads the same
-variable), **an `uploads` row is written with status `received`**, and only then is a JSON message
-published to `document-upload-events` (the topic name comes from `DOC_UPLOAD_TOPIC` in `.env`). The order
-matters: the consumer looks the upload up by its id and moves it on to `processing → done / failed`, so the
-row must exist before the message does. If the row can't be written, the file is removed and nothing is
-published (`500`).
+variable), and **one transaction writes the `uploads` row (status `received`) and an `outbox` row holding the
+JSON event** (`UploadService`). The request returns once that commits; it never talks to Kafka. If the
+transaction fails, neither row exists, the file is removed and the response is `500`.
+
+### Outbox relay
+
+`OutboxRelay` publishes the outbox to `document-upload-events` (the topic name comes from `DOC_UPLOAD_TOPIC` in
+`.env`). Every second (`OutboxScheduler`) it locks the oldest unpublished rows (`FOR UPDATE SKIP LOCKED`),
+publishes them in order, waits for Kafka's acknowledgement and marks each published. A failed or unacknowledged
+send is recorded on the row (`attempts`, `last_error`) and retried later; while Kafka stays down the scheduler
+backs off (2 s, 4 s, 8 s ... up to 30 s). Published rows are deleted after 7 days. Settings: `outbox.*` in
+`application.yml`.
+
+Why: recording the upload and publishing its event are two systems with no shared transaction. Done one after
+the other, a crash in between leaves an upload recorded but never published (the "dual write"). Written into the
+same database transaction, the upload and its event can't be separated, and publishing can be retried for as
+long as it takes. A message can be published twice (the relay dies after Kafka acknowledged but before marking
+the row); the consumer is idempotent, so the copy is skipped.
 
 **The message carries `storageKey` (a logical key = the file name), not a file path**: a path relative to
 this folder, with Windows backslashes, can't be resolved by another service. The single source of truth for
@@ -127,15 +140,13 @@ drift tests catch it when they aren't).
 **Failure semantics** (all verified):
 - invalid parameters → `400` + the specific reason
 - unknown or missing `X-User-Id` → `401`, before any parameter is looked at
-- Kafka unavailable / topic missing → `503` within about 5 seconds (the producer has `max.block.ms` and
-  related timeouts), **the already-saved file is removed** so no orphan is left, and the uploads row is
-  marked `failed` with the reason
-- waiting for the send result times out / is interrupted → `503`, but **the file is kept** and the row stays
-  `received`: with an uncertain outcome the message may actually have gone out, and deleting the file would
-  leave "message without file", worse than an orphan
-- known gap: if the backend dies between writing the row and publishing, the row stays `received` with no
-  message behind it (a dual write across two systems; the transactional outbox pattern is the designed fix,
-  see docs/architecture.md)
+- the database can't record the upload → `500`, nothing is recorded or published, the file is removed
+- **Kafka unavailable → the upload is still accepted (`202`)**; its event waits in the outbox and is published
+  once Kafka is back. Measured end to end: Kafka stopped, upload accepted in 0.3 s, three publish attempts
+  recorded with backoff, the backend restarted meanwhile, Kafka started again -- the relay published the event
+  and the consumer ingested the document with no manual step
+- a send that fails, times out or is interrupted is a retry, never a lost message; a duplicate it may cause is
+  skipped by the consumer
 
 `department` / `campaignId` are **not** enums: they are business data (a new department or campaign can
 appear any day), not a fixed set of values baked into the schema. They are checked against the real
@@ -153,37 +164,46 @@ consumer running it moves on to `done`), or read the message with `llm-service/s
 ## Tests
 
 ```bash
-.\mvnw.cmd test                                                # default: 46 unit/slice tests, no Docker needed, a few seconds
-.\mvnw.cmd test -DexcludedGroups=none -Dgroups=integration     # integration test: needs Postgres running
+.\mvnw.cmd test                                                # default: 55 unit/slice tests, no Docker needed, a few seconds
+.\mvnw.cmd test -DexcludedGroups=none -Dgroups=integration     # integration tests: need the docker compose Postgres
 .\mvnw.cmd test -Dtest=UploadControllerTest                    # one class only
 ```
 
 | Test class | Kind | Covers |
 |---|---|---|
 | `UploadEnumsTest` (13) | plain unit | the enums' `fromValue` (typos / case / null), `needsCampaign`, **the JSON wire format must be lowercase** (`@JsonValue`) |
-| `UploadControllerTest` (32) | `@WebMvcTest` slice | success paths (including the JSON actually sent and the uploads row written), missing / unknown `X-User-Id` → 401, 13 kinds of invalid parameters each returning 400 + the reason + **no side effects**, 4 Kafka failure regression tests and what each does to the uploads row, a failed row write publishes nothing, malicious file names can't escape the upload folder, 7 inputs to `sanitizeFilename` |
+| `UploadControllerTest` (28) | `@WebMvcTest` slice | success paths (the uploads row and the event handed to `UploadService`), missing / unknown `X-User-Id` → 401, 13 kinds of invalid parameters each returning 400 + the reason + **no side effects**, a failed recording removes the file, malicious file names can't escape the upload folder, 7 inputs to `sanitizeFilename` |
+| `UploadServiceTest` (1) | plain unit | the outbox row: topic, key, the event in the lowercase wire format |
+| `OutboxRelayTest` (7) | plain unit | publishing in order and marking; every Kafka failure (send throws Kafka's own `TimeoutException`, failed future, no acknowledgement in time, interruption) is recorded, stops the batch and is retried later |
+| `OutboxSchedulerTest` (5) | plain unit | draining a backlog, exponential backoff capped at the maximum, reset after success, retention cleanup |
 | `UploadEventContractTest` (1) | contract | every example in `contracts/upload-event.examples.json`, deserialized and re-serialized by Java, must equal the original |
+| `OutboxIntegrationTest` (4) | integration, `@Tag("integration")` | real Postgres: **the upload and its event commit together, and a failed outbox write leaves no upload behind**; the relay marks rows; a row locked by another relay is skipped, not waited for |
 | `BackendServiceApplicationTests` (1) | integration, `@Tag("integration")` | the full container + a real Postgres; with `ddl-auto: validate` it also detects **drift between the entities and the migrations in `db/migration/`** |
 
 Notes:
-- `@WebMvcTest` loads only the web layer; Kafka and the two repositories are replaced with fakes via
-  `@MockitoBean`, which is what lets the tests **make Kafka fail on demand** (a real Kafka can't be made to
-  throw a particular exception at a particular moment)
-- The upload folder and the send timeout are settings (`document.upload-dir` / `document.send-timeout-ms`),
-  so tests point at a temporary folder and cut 15 seconds to 300 ms. Hard-coded paths and timeouts would
-  have made the code untestable
+- `@WebMvcTest` loads only the web layer, with the repositories and `UploadService` replaced by fakes via
+  `@MockitoBean`. The relay tests use a Mockito `KafkaTemplate`, which is what lets them **make Kafka fail on
+  demand** (a real Kafka can't be made to throw a particular exception at a particular moment)
+- The integration tests run against the development database. They only touch rows they create and delete them
+  afterwards, and `OutboxIntegrationTest` refuses to run while real messages wait in the outbox (its relay would
+  mark them published without really sending them). The scheduler is switched off in tests
+  (`outbox.relay.enabled=false`); they call the relay directly
+- The upload folder and the relay's send timeout are settings, so tests point at a temporary folder and cut
+  15 seconds to 300 ms. Hard-coded paths and timeouts would have made the code untestable
 - Spring Boot 4 moved the test classes: `@WebMvcTest` is in
   `org.springframework.boot.webmvc.test.autoconfigure`, `@MockBean` is replaced by `@MockitoBean`, and JUnit
   is 6.x -- don't copy Boot 3 era tutorials
-- **Mutation-tested**: 5 bugs were put back on purpose (catching the wrong exception type / not removing the
-  orphan file / not restoring the interrupt flag / deleting the file on timeout too / deleting `@JsonValue`),
-  and each one turned its test red. A test you have never seen fail proves nothing
+- **Mutation-tested**: bugs were put back on purpose and each one turned its test red -- among them catching
+  the wrong exception type, not restoring the interrupt flag, deleting `@JsonValue`, and for the outbox:
+  removing `@Transactional` from `UploadService.record`, `FOR UPDATE` without `SKIP LOCKED`, a batch that
+  continues after a failure, a message not marked published, no backoff. A test you have never seen fail
+  proves nothing
 
 ## Endpoint overview
 
 | Endpoint | Status | Notes |
 |---|---|---|
 | `GET /health`, `GET /actuator/health` | implemented | health checks |
-| `POST /documents/upload` | implemented | upload file → store → publish to Kafka `document-upload-events` |
+| `POST /documents/upload` | implemented | upload file → store → record the upload and its event (outbox) → the relay publishes to Kafka `document-upload-events` |
 | `POST /query` | planned | forwards to llm-service /query (with `X-User-Id`) |
 | read-only structured data endpoints | planned | campaigns / campaign_metrics / hosts queries (for a frontend dashboard, optional) |

@@ -70,6 +70,9 @@ processing (or once the message is safely in the dead-letter topic). Failures ar
 ```
 [manual upload by an employee]  POST /documents/upload (backend)
       │  stores the file in uploads/ or S3, generates upload_id
+      │  one transaction: uploads row (received) + outbox row holding the event → 202
+      ▼
+  outbox relay (backend, every second): publish unpublished rows, mark them published
       ▼
   Kafka: document-upload-events   { upload_id, storage_key, content_kind: "document",
                                      doc_type, department, campaign_id?, category?, source: "manual" }
@@ -90,10 +93,9 @@ processing (or once the message is safely in the dead-letter topic). Failures ar
 ```
 
 **The uploads row is the source of truth, the message is only a notification.** The backend writes the row
-(`received`, with the uploader from `X-User-Id`) before publishing, so the consumer always finds it. Its
-status moves `received → processing → done`; a message that ends in the dead-letter topic marks it `failed`
-with the reason. A certain Kafka failure in the backend marks it `failed` right away; an uncertain one leaves
-it `received`, since the message may still arrive.
+(`received`, with the uploader from `X-User-Id`) in the same transaction as the outbox row carrying the event,
+and the event is published only after that commit, so the consumer always finds the row. Its status moves
+`received → processing → done`; a message that ends in the dead-letter topic marks it `failed` with the reason.
 
 **Transaction boundaries.** Embedding is a network call that can take seconds and be retried, so it runs with
 no transaction open; everything that becomes visible (document, chunks, flags, status) is written afterwards in
@@ -107,10 +109,26 @@ lock right before writing, where it can't race with another copy of the message.
 row produced by `replaces_upload_id` in place (same `doc_id`) and rebuilds its chunks; if that version was
 replaced in the meantime, the upload fails instead of overwriting the newer one (optimistic concurrency).
 
-**Known gap: the dual write.** The backend writes the uploads row and then publishes to Kafka, two systems
-without a shared transaction. If the backend dies between the two, the row stays `received` with no message
-behind it. The standard fix is the transactional outbox (write the event into an outbox table in the same
-database transaction, and let a relay publish it); it is designed, not built.
+**Transactional outbox: no dual write.** Recording an upload and publishing its event touch two systems with
+no shared transaction; done one after the other, a crash in between leaves an upload that is recorded but
+never published. So the upload request does not publish at all. It writes the uploads row and an `outbox` row
+holding the serialized event in one database transaction, and returns `202` once that commits. A relay in the
+backend (`OutboxRelay`, every second) locks the oldest unpublished rows with `FOR UPDATE SKIP LOCKED`, publishes
+them in order, waits for Kafka's acknowledgement and marks them published. A failed or unacknowledged send is
+recorded on the row (`attempts`, `last_error`) and retried later, backing off up to 30 seconds while Kafka is
+down; the batch stops at the first failure so messages keep their order.
+- A Kafka outage no longer fails uploads; it only delays processing. Measured: with Kafka stopped an upload is
+  still accepted, the relay retries with backoff, survives a backend restart, and publishes as soon as Kafka is
+  back.
+- Delivery from the outbox is at least once: a relay that crashes after Kafka acknowledged but before marking
+  the row publishes the message again. The consumer is idempotent on the uploads status, so the second copy is
+  skipped. This is why the outbox needs an idempotent consumer.
+- `SKIP LOCKED` lets several backend instances relay side by side: a row one of them holds is skipped by the
+  others instead of being waited for or published twice at the same moment.
+- Published rows are kept for 7 days for troubleshooting, then deleted.
+
+Not chosen: change data capture (Debezium reads the database log; it needs a Kafka Connect deployment, more
+infrastructure than this project warrants), and publishing first and recording afterwards (the same gap, mirrored).
 
 **② Structured tables** (product sales and customer behavior tables uploaded by ops, e.g. Excel/CSV
 exports) -- not chunked, not embedded; parsed straight into structured rows and queried with Text-to-SQL:

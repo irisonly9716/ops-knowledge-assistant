@@ -15,8 +15,8 @@ docker compose up -d
 docker compose ps                     # wait until postgres / redis / kafka are healthy
 docker compose run --rm flyway info   # every migration should be "Success"
 
-# 2. Python environment and Kafka topics. Must run before any upload:
-#    topic auto-creation is disabled, so uploads return 503 until the topics exist.
+# 2. Python environment and Kafka topics. Must run before uploads can be processed: topic auto-creation is
+#    disabled, so until the topics exist uploads are accepted but their events wait in the outbox.
 cd llm-service
 uv venv
 uv pip install -r requirements.txt
@@ -100,6 +100,12 @@ An already-applied migration file was edited. Restore the original file (for exa
 Kafka forgets a consumer group's committed offsets after 7 days without activity. With
 `auto.offset.reset=earliest` the consumer then starts from the oldest message still in the topic. Messages
 for uploads that are already `done` are skipped; messages without an uploads row go to the dead-letter topic.
+
+**An upload stays `received` and the consumer never sees it**
+Its event is probably still in the outbox. `SELECT id, message_key, attempts, last_error FROM outbox WHERE published_at IS NULL;`
+shows what is waiting and why the last publish failed (typically Kafka not running, or the topic not created:
+run `init_topics`). The backend's relay retries on its own, backing off up to 30 seconds; nothing needs to be
+re-uploaded.
 
 **`No module named 'scripts'`**
 Run the Python scripts from inside `llm-service/`, not from the repository root.
