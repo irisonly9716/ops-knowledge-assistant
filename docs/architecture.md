@@ -13,9 +13,13 @@ Both services use **Kafka** and **Redis**:
   - `document-upload-events`: an employee uploads a file / SOP in the frontend → the backend stores the file and publishes an event → llm-service consumes and processes it
   - Future "automatic upload of the latest data": a scheduled producer packages the latest campaign / host data into a file every day and publishes it to the same topic, reusing the same pipeline -- hence the `source: manual | auto` field in the message
 - **Redis**
-  - query cache: identical / similar questions are answered directly, without retrieval + LLM again
+  - query cache: the same question, after it has been rewritten into a standalone question, from the same
+    department and role against the same knowledge-base version is answered directly, without retrieval + LLM
+    again. No similarity-based cache: "last month's GMV" and "the month before's GMV" are similar questions
+    with different answers
   - conversation memory: `session:{id}` holds the multi-turn history
-  - document processing status: `doc:{id}:status` = uploading / processing / done / failed (can also live in the database)
+  (Processing status lives in the `uploads` table in Postgres, not in Redis: it must survive restarts and
+  is written in the same transaction as the document.)
 
 ## Ingestion -- two pipelines, one topic
 
@@ -136,28 +140,39 @@ core value of this project.
 ## Query flow
 
 ```
-user question + X-User-Id
+user question + identity (X-User-Id today; a verified token later, see issue #5)
       │
       ▼
-backend /query ──forwards──▶ llm-service /query
+backend /query
+      │ 1. resolve the current user → department, role (from the users table, never from the request)
       │
-      │ 1. resolve the current user → department, role
-      │ 2. check the cache (a hit returns immediately)
-      │ 3. route: documents / data / both?
+      ├──forwards with the internal service token──▶ llm-service /query (accepts calls from the backend only)
+      │
+      │ 2. rewrite the question into a standalone one, using the conversation memory
+      │    ("and the time before?" only means something together with the previous turns)
+      │ 3. check the cache: key = department + role + knowledge-base version + rewritten question
+      │    (a hit returns immediately)
+      │ 4. route: documents / data / both?
       │
       ├── documents → vector search (filter: department IN (user's department, 'ALL'))
       │
       ├── data → Text-to-SQL
-      │             - schema in the prompt
-      │             - generate SQL (SELECT only)
-      │             - inject WHERE department = user's department (when role=staff)
-      │             - execute → result
+      │             - data dictionary + metric views in the prompt
+      │             - generate SQL; sqlglot checks the syntax tree: one SELECT, allow-listed views and functions
+      │             - execute as a read-only role that can only read the views, in a read-only transaction
+      │               with row-level security for the user's department, a statement timeout and a row limit
+      │             - result
       │
-      │ 4. retrieved chunks + SQL result + question + conversation history → LLM → answer
-      │ 5. write the cache + the conversation memory
+      │ 5. retrieved chunks + SQL result + question + conversation history → LLM → answer
+      │ 6. write the cache + the conversation memory + the audit record
       ▼
    back to the user
 ```
+
+The cache and the permission boundary meet in the key: without the department and role, one department's answer
+could be served to another. A new or replaced document bumps the knowledge-base version of its department (an `ALL`
+document: every department's), and so does a data-table upload, which changes SQL answers; questions about
+relative periods ("last month") expire the same day.
 
 ## Ports (local development)
 
