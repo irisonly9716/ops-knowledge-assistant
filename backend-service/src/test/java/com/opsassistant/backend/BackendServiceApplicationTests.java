@@ -17,7 +17,7 @@ import org.springframework.boot.test.context.SpringBootTest;
  *   .\mvnw.cmd test -DexcludedGroups=none -Dgroups=integration
  */
 @Tag("integration")
-@SpringBootTest
+@SpringBootTest(properties = "outbox.relay.enabled=false")   // no scheduled relay sending real outbox rows during a test
 class BackendServiceApplicationTests {
 
 	@Test

@@ -47,17 +47,26 @@ spring:
 document:
   # The same .env variable llm-service's app/config.py reads: one source, not a second copy of the string.
   upload-topic: ${DOC_UPLOAD_TOPIC:document-upload-events}
-  # The two settings below are configurable so tests can point the upload folder at a temporary
-  # directory and shorten the send timeout to 300 ms, instead of writing into the real folder or
-  # actually waiting 15 seconds for the "outcome unknown" branch.
   # Root folder of uploaded files: the backend writes, llm-service reads; both read the .env variable UPLOAD_DIR.
+  # Configurable so tests can point it at a temporary directory instead of the real folder.
   # The default ../uploads is relative to EACH SERVICE'S OWN FOLDER: backend-service/ and llm-service/
   # are siblings, so run from their own folders, ../uploads in both points at uploads/ at the
   # repository root, with no absolute path hard-coded.
   # (In Docker, both containers mount one shared volume and this variable is set to the mount
   #  point; later, with S3, the storageKey in the message stays and only the storage backend changes.)
   upload-dir: ${UPLOAD_DIR:../uploads}
-  send-timeout-ms: 15000  # upper bound for waiting on Kafka's send result; must exceed delivery.timeout.ms (10 s), see the producer settings above
+
+# Transactional outbox: an upload's event is written to the outbox table together with the upload, and
+# OutboxRelay publishes it to Kafka afterwards (see db/migration/V6__outbox.sql)
+outbox:
+  relay:
+    enabled: true          # tests switch the scheduler off and call the relay directly
+  poll-interval-ms: 1000   # how often to look for unpublished messages (also the first backoff step)
+  max-backoff-ms: 30000    # while Kafka is down, wait at most this long between attempts
+  batch-size: 50           # messages per run (one transaction); a backlog is drained run after run
+  send-timeout-ms: 15000   # upper bound for waiting on Kafka's acknowledgement; must exceed delivery.timeout.ms (10 s), see the producer settings above
+  retention-days: 7        # published messages are kept this long for troubleshooting, then deleted
+  cleanup-interval-ms: 3600000
 
 server:
   # 8080 is Spring Boot's default port, but kafka-ui already uses it; 8081 is the port

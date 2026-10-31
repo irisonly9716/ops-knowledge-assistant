@@ -12,7 +12,8 @@ import lombok.Setter;
 /**
  * One row of the uploads table: an upload and how far its processing got.
  *
- * The backend writes the row (status received) BEFORE publishing to Kafka, so by the time the consumer
+ * The backend writes the row (status received) in the same transaction as the outbox row carrying its
+ * event (UploadService), and the event is only published after that commit, so by the time the consumer
  * gets the message the row is guaranteed to exist and the consumer can move it on to processing ->
  * done / failed. The status is visible from the moment the upload is accepted.
  *
@@ -28,7 +29,6 @@ import lombok.Setter;
 public class Upload {
 
     public static final String RECEIVED = "received";
-    public static final String FAILED = "failed";
 
     @Id
     private UUID uploadId;
