@@ -71,8 +71,8 @@ On top of that, conversations have **multi-turn memory**, and **department-level
 client ─HTTP─▶ backend (Java)                         Kafka                       consumer (Python)
  X-User-Id     1. identify the uploader (401 if unknown)                          5. poll a message, validate the contract
                2. save to UPLOAD_DIR/<uploadId>-<name>                            6. lock the uploads row: done → skip
-               3. uploads row: status received                                    7. parse / chunk / embed (no transaction open)
-               4. publish {uploadId, storageKey, ...} ──▶ document-upload-events ─▶ 8. one transaction: documents + chunks + done
+               3. one transaction: uploads row + outbox row → 202                  7. parse / chunk / embed (no transaction open)
+               4. outbox relay publishes ─────────────▶ document-upload-events ─▶ 8. one transaction: documents + chunks + done
                                                   document-upload-events.dlq ◀── 9. success → commit; failure → retry → DLQ → failed
 ```
 
@@ -117,7 +117,7 @@ backend /query ──forwards──▶ llm-service /query
 - **The database row is the truth, the message only a notification.** The backend records each upload (status `received`) before publishing it. The consumer moves it to `processing`, does the slow work (parsing, embedding) with no transaction open, then writes the document, its chunks and `done` in one short transaction, re-checking the status under a row lock so a duplicate message never writes twice. A failure leaves no half-written document; a dead-lettered message marks its upload `failed` with the reason.
 - **Permanent vs. transient failures.** Malformed messages and out-of-bounds paths are permanent and go straight to the dead-letter topic. Anything else is retried with exponential backoff before being dead-lettered.
 - **A dead-letter topic that never loses data.** It stores the original bytes plus headers with the error, the attempt count and the source offset, so a message can be inspected and replayed. The consumer commits only after the dead-letter write is confirmed; if that write fails, it stops rather than drop the message. A bad message therefore neither blocks the ones behind it nor disappears.
-- **"A timeout is not a failure" on the producer side.** When Kafka definitively rejects a send, the upload returns 503 and the stored file is deleted. When the outcome is unknown (a timeout), the file is kept, because the message may already be on its way and deleting the file would leave a message pointing at nothing.
+- **Transactional outbox instead of a dual write.** Recording an upload and publishing its event touch two systems with no shared transaction, so a crash in between could leave an upload that is never processed. The upload request writes the uploads row and an outbox row with the event in one database transaction and returns; a relay publishes the outbox to Kafka (`FOR UPDATE SKIP LOCKED`, in order, backing off while Kafka is down). A Kafka outage delays processing instead of failing uploads, and an uncertain send is simply retried: the consumer's idempotency absorbs the duplicate. Verified end to end with Kafka stopped and the backend restarted in between.
 
 **A cross-service contract that cannot drift silently**
 - **Claim-check messages.** Events carry a logical `storageKey`, not a file path. Each service resolves the key against its own storage root, so the contract does not depend on the sender's working directory, operating system or machine, and the storage backend can change without changing the contract.

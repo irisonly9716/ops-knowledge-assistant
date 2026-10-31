@@ -1,7 +1,8 @@
 # Data schema
 
 > The actual DDL lives in the Flyway migrations under [db/migration/](../db/migration/) (V1 pgvector, V2 base
-> schema, V3 uploads / roles / chunk department, V4 the `document_catalog` view, V5 its `catalog_entry()` function), applied in
+> schema, V3 uploads / roles / chunk department, V4 the `document_catalog` view, V5 its `catalog_entry()` function,
+> V6 the `outbox` table), applied in
 > version order (this document explains them; the SQL files are authoritative for column types).
 > The data is mock data generated with Python + Faker (see `llm-service/scripts/generate_mock_data.py`).
 
@@ -235,14 +236,13 @@ Indexes: HNSW on `embedding` (`vector_cosine_ops`), a plain index on `department
 small department uses an exact scan, it filters by department first).
 
 ### uploads (upload records + processing status)
-One row per upload. The backend writes `received` (or `pending_approval` when approval is needed)
-before publishing to Kafka; the consumer updates the status while processing. Shared by both pipelines
-(documents and data tables). Who moves the status:
+One row per upload. The backend writes `received` (or `pending_approval` when approval is needed) in the same
+transaction as the `outbox` row carrying the event; the consumer updates the status while processing. Shared by
+both pipelines (documents and data tables). Who moves the status:
 
 | Transition | By | When |
 |---|---|---|
-| → `received` | backend | the upload is accepted; written before the message is published |
-| `received` → `failed` | backend | publishing to Kafka failed for certain (an uncertain outcome leaves `received`) |
+| → `received` | backend | the upload is accepted; committed together with its outbox row, before anything is published |
 | `received` / `failed` → `processing` | consumer | it starts working on the message (`failed` again after a replay from the dead-letter topic) |
 | `processing` → `done` | consumer | in the same transaction that writes `documents` + `doc_chunks` |
 | `processing` → `failed` | consumer | the message was dead-lettered; `error` holds the reason |
@@ -277,6 +277,25 @@ request is void (optimistic concurrency).
 
 > Replaces the earlier `doc_ingest_status`, whose primary key was `doc_id`: there is no `doc_id` before
 > the document is written, and a data-table upload never produces a document, so it could record neither case.
+
+### outbox (events waiting to be published)
+The transactional outbox (V6). An upload's event is written here in the same transaction as the uploads row;
+the backend's relay publishes it to Kafka afterwards and marks it. See "Transactional outbox" in
+[architecture.md](architecture.md).
+
+| Column | Type | Notes |
+|---|---|---|
+| id | bigserial PK | also the publishing order |
+| topic | text | the Kafka topic |
+| message_key | text | the Kafka key (the upload id) |
+| payload | text | the message exactly as it is published (JSON) |
+| created_at | timestamptz | |
+| published_at | timestamptz, nullable | NULL until Kafka has acknowledged the message |
+| attempts | int | failed publish attempts so far |
+| last_error | text | why the last attempt failed |
+
+A partial index on `id WHERE published_at IS NULL` keeps the relay's lookup as small as the backlog.
+Published rows are deleted after 7 days. Something waiting: `SELECT * FROM outbox WHERE published_at IS NULL`.
 
 ## Mock data (generated)
 

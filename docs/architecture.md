@@ -13,9 +13,13 @@ Both services use **Kafka** and **Redis**:
   - `document-upload-events`: an employee uploads a file / SOP in the frontend → the backend stores the file and publishes an event → llm-service consumes and processes it
   - Future "automatic upload of the latest data": a scheduled producer packages the latest campaign / host data into a file every day and publishes it to the same topic, reusing the same pipeline -- hence the `source: manual | auto` field in the message
 - **Redis**
-  - query cache: identical / similar questions are answered directly, without retrieval + LLM again
+  - query cache: the same question, after it has been rewritten into a standalone question, from the same
+    department and role against the same knowledge-base version is answered directly, without retrieval + LLM
+    again. No similarity-based cache: "last month's GMV" and "the month before's GMV" are similar questions
+    with different answers
   - conversation memory: `session:{id}` holds the multi-turn history
-  - document processing status: `doc:{id}:status` = uploading / processing / done / failed (can also live in the database)
+  (Processing status lives in the `uploads` table in Postgres, not in Redis: it must survive restarts and
+  is written in the same transaction as the document.)
 
 ## Ingestion -- two pipelines, one topic
 
@@ -66,6 +70,9 @@ processing (or once the message is safely in the dead-letter topic). Failures ar
 ```
 [manual upload by an employee]  POST /documents/upload (backend)
       │  stores the file in uploads/ or S3, generates upload_id
+      │  one transaction: uploads row (received) + outbox row holding the event → 202
+      ▼
+  outbox relay (backend, every second): publish unpublished rows, mark them published
       ▼
   Kafka: document-upload-events   { upload_id, storage_key, content_kind: "document",
                                      doc_type, department, campaign_id?, category?, source: "manual" }
@@ -86,10 +93,9 @@ processing (or once the message is safely in the dead-letter topic). Failures ar
 ```
 
 **The uploads row is the source of truth, the message is only a notification.** The backend writes the row
-(`received`, with the uploader from `X-User-Id`) before publishing, so the consumer always finds it. Its
-status moves `received → processing → done`; a message that ends in the dead-letter topic marks it `failed`
-with the reason. A certain Kafka failure in the backend marks it `failed` right away; an uncertain one leaves
-it `received`, since the message may still arrive.
+(`received`, with the uploader from `X-User-Id`) in the same transaction as the outbox row carrying the event,
+and the event is published only after that commit, so the consumer always finds the row. Its status moves
+`received → processing → done`; a message that ends in the dead-letter topic marks it `failed` with the reason.
 
 **Transaction boundaries.** Embedding is a network call that can take seconds and be retried, so it runs with
 no transaction open; everything that becomes visible (document, chunks, flags, status) is written afterwards in
@@ -103,10 +109,26 @@ lock right before writing, where it can't race with another copy of the message.
 row produced by `replaces_upload_id` in place (same `doc_id`) and rebuilds its chunks; if that version was
 replaced in the meantime, the upload fails instead of overwriting the newer one (optimistic concurrency).
 
-**Known gap: the dual write.** The backend writes the uploads row and then publishes to Kafka, two systems
-without a shared transaction. If the backend dies between the two, the row stays `received` with no message
-behind it. The standard fix is the transactional outbox (write the event into an outbox table in the same
-database transaction, and let a relay publish it); it is designed, not built.
+**Transactional outbox: no dual write.** Recording an upload and publishing its event touch two systems with
+no shared transaction; done one after the other, a crash in between leaves an upload that is recorded but
+never published. So the upload request does not publish at all. It writes the uploads row and an `outbox` row
+holding the serialized event in one database transaction, and returns `202` once that commits. A relay in the
+backend (`OutboxRelay`, every second) locks the oldest unpublished rows with `FOR UPDATE SKIP LOCKED`, publishes
+them in order, waits for Kafka's acknowledgement and marks them published. A failed or unacknowledged send is
+recorded on the row (`attempts`, `last_error`) and retried later, backing off up to 30 seconds while Kafka is
+down; the batch stops at the first failure so messages keep their order.
+- A Kafka outage no longer fails uploads; it only delays processing. Measured: with Kafka stopped an upload is
+  still accepted, the relay retries with backoff, survives a backend restart, and publishes as soon as Kafka is
+  back.
+- Delivery from the outbox is at least once: a relay that crashes after Kafka acknowledged but before marking
+  the row publishes the message again. The consumer is idempotent on the uploads status, so the second copy is
+  skipped. This is why the outbox needs an idempotent consumer.
+- `SKIP LOCKED` lets several backend instances relay side by side: a row one of them holds is skipped by the
+  others instead of being waited for or published twice at the same moment.
+- Published rows are kept for 7 days for troubleshooting, then deleted.
+
+Not chosen: change data capture (Debezium reads the database log; it needs a Kafka Connect deployment, more
+infrastructure than this project warrants), and publishing first and recording afterwards (the same gap, mirrored).
 
 **② Structured tables** (product sales and customer behavior tables uploaded by ops, e.g. Excel/CSV
 exports) -- not chunked, not embedded; parsed straight into structured rows and queried with Text-to-SQL:
@@ -136,28 +158,39 @@ core value of this project.
 ## Query flow
 
 ```
-user question + X-User-Id
+user question + identity (X-User-Id today; a verified token later, see issue #5)
       │
       ▼
-backend /query ──forwards──▶ llm-service /query
+backend /query
+      │ 1. resolve the current user → department, role (from the users table, never from the request)
       │
-      │ 1. resolve the current user → department, role
-      │ 2. check the cache (a hit returns immediately)
-      │ 3. route: documents / data / both?
+      ├──forwards with the internal service token──▶ llm-service /query (accepts calls from the backend only)
+      │
+      │ 2. rewrite the question into a standalone one, using the conversation memory
+      │    ("and the time before?" only means something together with the previous turns)
+      │ 3. check the cache: key = department + role + knowledge-base version + rewritten question
+      │    (a hit returns immediately)
+      │ 4. route: documents / data / both?
       │
       ├── documents → vector search (filter: department IN (user's department, 'ALL'))
       │
       ├── data → Text-to-SQL
-      │             - schema in the prompt
-      │             - generate SQL (SELECT only)
-      │             - inject WHERE department = user's department (when role=staff)
-      │             - execute → result
+      │             - data dictionary + metric views in the prompt
+      │             - generate SQL; sqlglot checks the syntax tree: one SELECT, allow-listed views and functions
+      │             - execute as a read-only role that can only read the views, in a read-only transaction
+      │               with row-level security for the user's department, a statement timeout and a row limit
+      │             - result
       │
-      │ 4. retrieved chunks + SQL result + question + conversation history → LLM → answer
-      │ 5. write the cache + the conversation memory
+      │ 5. retrieved chunks + SQL result + question + conversation history → LLM → answer
+      │ 6. write the cache + the conversation memory + the audit record
       ▼
    back to the user
 ```
+
+The cache and the permission boundary meet in the key: without the department and role, one department's answer
+could be served to another. A new or replaced document bumps the knowledge-base version of its department (an `ALL`
+document: every department's), and so does a data-table upload, which changes SQL answers; questions about
+relative periods ("last month") expire the same day.
 
 ## Ports (local development)
 
