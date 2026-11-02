@@ -9,9 +9,9 @@
 
 <!-- A fixed marker shows at a glance whether the agent actually loaded this file. -->
 - Start every reply with 😊.
-- Reply to Iris in Chinese. Everything in the repository is in English: code, comments, docs, commit messages, issues, sample data.
+- Reply to Arianna in Chinese. Everything in the repository is in English: code, comments, docs, commit messages, issues, sample data.
 - Read the GitHub issue you are working on and restate what "done" means before writing code.
-- Discuss design changes before implementing them. Ask about decisions that are Iris's to make; for plumbing, run it yourself and report the result with your analysis.
+- Discuss design changes before implementing them. Ask about decisions that are Arianna's to make; for plumbing, run it yourself and report the result with your analysis.
 - When you report a change, say why it was made this way and which alternative wasn't taken.
 
 ## 1. Project context
@@ -146,7 +146,7 @@ A new document for one's own department takes effect at once. Replacing anything
 - Commits: `type: summary` (`feat`, `fix`, `docs`, `test`, `chore`), imperative, with a body explaining why. A commit made by an agent ends with that agent's `Co-Authored-By` line; a PR body ends with its generated-with line.
 - Reference issues with `Closes #N` in the commit or PR that finishes them.
 - Merge with a merge commit, never squash. Never enable auto-merge unless asked.
-- **Never push, open or merge a PR, deploy or spend cloud money without Iris's approval for that action.** She usually pushes through GitHub Desktop.
+- **Never push, open or merge a PR, deploy or spend cloud money without Arianna's approval for that action.** Arianna usually pushes through GitHub Desktop.
 - Found something out of scope? Say so, and open an issue only when asked. Work not built yet goes into the plan; work for after the product is done goes into an issue.
 - Schema changes are new migration files. Never edit an applied migration.
 
@@ -173,4 +173,4 @@ A new document for one's own department takes effect at once. Replacing anything
 
 ## Changelog
 
-- v1 · 2026-11-02 · Iris · First draft: reply marker, dependency versions, scale requirements.
+- v1 · 2026-11-02 · Arianna · First draft: reply marker, dependency versions, scale requirements.
