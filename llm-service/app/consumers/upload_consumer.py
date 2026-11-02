@@ -31,7 +31,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from confluent_kafka import Consumer, KafkaException, Producer
+from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 from pydantic import ValidationError
 
 from app.config import settings
@@ -39,12 +39,32 @@ from app.consumers.errors import PermanentError
 from app.consumers.events import UploadEvent
 from app.consumers.handlers import UploadHandler
 from app.rag.embeddings import openai_embedder_from_settings
+from app.time_budget import TimeBudget
 
 log = logging.getLogger("upload_consumer")
 
-Handler = Callable[[UploadEvent], None]
+Handler = Callable[[UploadEvent, TimeBudget], None]
 # Called with the event and the reason once a message has been dead-lettered (to record the failure)
 FailureCallback = Callable[[UploadEvent, str], None]
+
+
+# What can still run after a message's budget is used up: the dead-letter write (flush waits up to 10 s),
+# the commit and a few bounded database statements
+TIME_AFTER_BUDGET_SECONDS = 60
+
+# The commit failed because this consumer is no longer a member of the group: it took longer than
+# max.poll.interval.ms, or the group rebalanced. The partition now belongs to someone else or comes back on the
+# next poll, and the message will be redelivered; idempotency takes care of the second copy
+LOST_MEMBERSHIP = {KafkaError.UNKNOWN_MEMBER_ID, KafkaError.ILLEGAL_GENERATION, KafkaError.REBALANCE_IN_PROGRESS}
+
+
+def check_time_budget(message_budget_seconds: float, max_poll_interval_ms: int) -> None:
+    """Refuse to start with settings under which one message could outlast max.poll.interval.ms."""
+    worst_case = message_budget_seconds + TIME_AFTER_BUDGET_SECONDS
+    if worst_case >= max_poll_interval_ms / 1000:
+        raise ValueError(
+            f"one message can take up to {worst_case:.0f} s (budget {message_budget_seconds:.0f} s + "
+            f"{TIME_AFTER_BUDGET_SECONDS} s), which does not fit max.poll.interval.ms ({max_poll_interval_ms} ms)")
 
 
 def parse_event(raw: bytes | None) -> UploadEvent:
@@ -65,7 +85,7 @@ def parse_event(raw: bytes | None) -> UploadEvent:
 
 
 class UploadConsumer:
-    """The consume loop. consumer / dlq_producer / handler / on_failure / sleep are all passed in
+    """The consume loop. consumer / dlq_producer / handler / on_failure / sleep / clock are all passed in
     (dependency injection), so tests can swap in fakes and cover every branch without a real Kafka
     and without actually waiting out the backoff."""
 
@@ -79,8 +99,10 @@ class UploadConsumer:
         dlq_topic: str,
         max_attempts: int = 3,
         backoff_seconds: float = 0.5,
+        message_budget_seconds: float = 200.0,
         on_failure: FailureCallback | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._consumer = consumer
         self._dlq = dlq_producer
@@ -89,8 +111,10 @@ class UploadConsumer:
         self._dlq_topic = dlq_topic
         self._max_attempts = max_attempts
         self._backoff = backoff_seconds
+        self._message_budget = message_budget_seconds
         self._on_failure = on_failure
         self._sleep = sleep
+        self._clock = clock
 
     # ------------------------------------------------------------------ main loop
 
@@ -134,10 +158,15 @@ class UploadConsumer:
             self._dead_letter(msg, str(e), attempts=0)
             return
 
+        # One budget for all attempts of this message: however the retries of the layers below combine,
+        # the message stays below max.poll.interval.ms (see check_time_budget)
+        budget = TimeBudget(self._message_budget, clock=self._clock)
         last_error = "unknown error"
+        attempts = 0
         for attempt in range(1, self._max_attempts + 1):
+            attempts = attempt
             try:
-                self._handler(event)
+                self._handler(event, budget)
             except PermanentError as e:
                 log.error("upload_id=%s failed permanently, dead-lettering: %s", event.upload_id, e)
                 self._dead_letter(msg, str(e), attempts=attempt, event=event)
@@ -146,6 +175,9 @@ class UploadConsumer:
                 last_error = f"{type(e).__name__}: {e}"
                 if attempt < self._max_attempts:
                     wait = self._backoff * 2 ** (attempt - 1)
+                    if wait >= budget.remaining():
+                        log.warning("upload_id=%s: the time budget is used up, no more attempts", event.upload_id)
+                        break
                     log.warning("upload_id=%s attempt %d/%d failed, retrying in %.1f s: %s",
                                 event.upload_id, attempt, self._max_attempts, wait, last_error)
                     self._sleep(wait)
@@ -153,9 +185,9 @@ class UploadConsumer:
             self._commit(msg)  # process successfully FIRST, commit AFTER: at least once
             return
 
-        log.error("upload_id=%s still failing after %d attempts, dead-lettering: %s",
-                  event.upload_id, self._max_attempts, last_error)
-        self._dead_letter(msg, last_error, attempts=self._max_attempts, event=event)
+        log.error("upload_id=%s still failing after %d attempt(s), dead-lettering: %s",
+                  event.upload_id, attempts, last_error)
+        self._dead_letter(msg, last_error, attempts=attempts, event=event)
 
     def _dead_letter(self, msg, reason: str, attempts: int, event: UploadEvent | None = None) -> None:
         """Forward the original message (the raw bytes, not re-serialized) with the failure reason
@@ -207,7 +239,13 @@ class UploadConsumer:
     def _commit(self, msg) -> None:
         # Commit this one message synchronously: asynchronous=False waits for the broker to
         # confirm. What gets committed is msg.offset()+1 ("where to read next"), not msg.offset()
-        self._consumer.commit(message=msg, asynchronous=False)
+        try:
+            self._consumer.commit(message=msg, asynchronous=False)
+        except KafkaException as e:
+            if e.args[0].code() not in LOST_MEMBERSHIP:
+                raise
+            log.warning("offset %s not committed, this consumer lost its group membership (%s); "
+                        "the message will be redelivered", msg.offset(), e.args[0].name())
 
 
 # ---------------------------------------------------------------------- entry point
@@ -215,6 +253,7 @@ class UploadConsumer:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+    check_time_budget(settings.doc_consumer_message_budget_seconds, settings.doc_consumer_max_poll_interval_ms)
 
     consumer = Consumer({
         "bootstrap.servers": settings.kafka_bootstrap_servers,
@@ -226,6 +265,7 @@ def main() -> None:
         # Auto-commit off: auto-commit marks everything polled as processed every few seconds,
         # regardless of real progress, so messages can be marked done before they are handled.
         "enable.auto.commit": False,
+        "max.poll.interval.ms": settings.doc_consumer_max_poll_interval_ms,
     })
     producer = Producer({"bootstrap.servers": settings.kafka_bootstrap_servers})
     # Fails right here if OPENAI_API_KEY is missing: better at startup than on the first message
@@ -237,6 +277,7 @@ def main() -> None:
         dlq_topic=settings.doc_upload_dlq_topic,
         max_attempts=settings.doc_consumer_max_attempts,
         backoff_seconds=settings.doc_consumer_backoff_seconds,
+        message_budget_seconds=settings.doc_consumer_message_budget_seconds,
     )
 
     stop = threading.Event()

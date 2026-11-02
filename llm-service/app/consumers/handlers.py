@@ -36,6 +36,7 @@ from app.rag.chunking import chunk_document, sop_steps
 from app.rag.document_fields import document_fields
 from app.rag.embeddings import Embedder, embed_in_batches
 from app.rag.parsing import DocumentParseError, parse_file
+from app.time_budget import TimeBudget
 
 log = logging.getLogger("upload_consumer")
 
@@ -47,7 +48,7 @@ class UploadHandler:
         self._connect = connect
         self._upload_dir = upload_dir
 
-    def __call__(self, event: UploadEvent) -> None:
+    def __call__(self, event: UploadEvent, budget: TimeBudget | None = None) -> None:
         upload_id = _checked_uuid(event.upload_id)
         started = time.perf_counter()
         with self._connect() as conn:
@@ -89,7 +90,7 @@ class UploadHandler:
                      len(chunks), sum(c.token_count for c in chunks))
 
             embed_started = time.perf_counter()
-            embedded = embed_in_batches(self._embedder, [c.content for c in chunks])
+            embedded = embed_in_batches(self._embedder, [c.content for c in chunks], budget=budget)
             log.info("upload_id=%s embedded %d chunks with %s: %d tokens billed, %.2f s", upload_id, len(chunks),
                      self._embedder.model, embedded.total_tokens, time.perf_counter() - embed_started)
 

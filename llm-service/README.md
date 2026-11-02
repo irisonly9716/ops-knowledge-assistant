@@ -131,15 +131,28 @@ upload_id=d16352d3-... embedded 3 chunks with text-embedding-3-small: 428 tokens
 upload_id=d16352d3-... done: doc_id=3 (new, 'Account Restriction Handling') with 3 chunks in 1.87 s
 ```
 Measured: 0.7-1.9 s per sample document, almost all of it the embedding call (the first message also loads
-the tokenizer). Kafka's `max.poll.interval.ms` (5 minutes by default) is the longest a consumer may go between
-two polls before the group considers it dead and hands its partition to another member, so a handler must
-stay far below it; one document is about 150 times below.
+the tokenizer).
+
+**Time limit.** Kafka's `max.poll.interval.ms` (5 minutes) is the longest a consumer may go between two polls
+before it is removed from the group. One message is handled between two polls, so it has to stay below that
+even when everything goes wrong, and the normal case says nothing about the worst one: with a hanging or
+rate-limited embedding API, retries in several layers used to add up to about 590 s (every request timing out)
+or 30 minutes (429 with `Retry-After: 120`). So one message gets **one time budget** (200 s,
+`doc_consumer_message_budget_seconds`), shared by all its attempts:
+- the embedder does its own retries (the OpenAI SDK's are off) and caps every request timeout and every wait,
+  including `Retry-After`, by the time left; if a wait doesn't fit, it gives up at once
+- the consumer starts another attempt only if the backoff fits; when the budget is gone, the message is dead-lettered
+- database waits are bounded too (`connect_timeout`, `statement_timeout`, `lock_timeout`)
+- at startup the consumer refuses settings where the budget plus 60 s (dead-letter write, commit) doesn't fit
+  `max.poll.interval.ms`
+- if the limit is passed anyway, the late commit fails with `UNKNOWN_MEMBER_ID`. That is logged and the loop goes
+  on: the message is delivered again and idempotency handles the second copy
 
 Behavior (design reasons in [docs/architecture.md](../docs/architecture.md)):
 - **at least once**: auto-commit off; the offset is committed only after processing (or once the message is safely dead-lettered)
 - broken message (not JSON / breaks the contract / path outside the upload folder), unparseable file, no uploads row,
   a conflicting or stale document → no retry, straight to the dead-letter topic `document-upload-events.dlq`
-- any other exception → exponential backoff (3 attempts in total by default = first try + 2 retries, waiting 0.5 s, 1 s), then the dead-letter topic; dead letters carry the failure reason, attempt count and source offset
+- any other exception → exponential backoff (at most 3 attempts = first try + 2 retries, waiting 0.5 s, 1 s, while the message's time budget lasts), then the dead-letter topic; dead letters carry the failure reason, attempt count and source offset
 - dead-letter write fails → no commit, and the process crashes (better to stop than to lose a message)
 - once a message is dead-lettered, its upload is marked `failed` with the reason
 - after being killed hard, a restarted consumer waits for the old member's **session timeout** (about 45 seconds) before taking over the partitions; a graceful Ctrl+C hands over immediately

@@ -81,7 +81,7 @@ class FakeEmbedder:
         self.error = error
         self.during_embed = during_embed   # runs while "the API call" is in flight
 
-    def embed(self, texts: list[str]) -> EmbeddingBatch:
+    def embed(self, texts: list[str], budget=None) -> EmbeddingBatch:
         self.calls += 1
         if self.during_embed:
             self.during_embed()

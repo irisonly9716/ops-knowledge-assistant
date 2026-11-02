@@ -62,7 +62,9 @@ processing (or once the message is safely in the dead-letter topic). Failures ar
 - **the dead-letter topic `document-upload-events.dlq`** keeps the bad message as is, with the failure
   reason / attempt count / source offset in its headers. The offset is committed only after the dead-letter
   write is **confirmed**; if it can't be written, the process crashes -- better to stop than to lose a
-  message. So a bad message neither blocks the messages behind it with endless retries (head-of-line
+  message. Time counts too: one message gets one budget (200 s) across all its attempts and every retry layer
+  below them, safely under `max.poll.interval.ms`; retries alone used to add up to 590 s or even 30 minutes
+  against a hanging or rate-limiting API. So a bad message neither blocks the messages behind it with endless retries (head-of-line
   blocking) nor disappears silently.
 
 **① Documents** (the narrative content of SOPs / campaign plans / reviews) -- free text, goes through RAG:
