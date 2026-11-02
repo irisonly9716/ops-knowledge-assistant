@@ -21,4 +21,15 @@ public enum Source {
     public String value() {
         return value;
     }
+
+    public static Source fromValue(String raw) {
+        if (raw != null) {
+            for (Source source : values()) {
+                if (source.value.equals(raw)) {
+                    return source;
+                }
+            }
+        }
+        throw new IllegalArgumentException("source must be manual or auto, got: " + raw);
+    }
 }
