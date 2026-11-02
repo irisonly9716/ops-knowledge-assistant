@@ -83,24 +83,70 @@ Jackson 2 (`com.fasterxml.jackson.databind.ObjectMapper`), and copying them does
 Implements the "two ingestion pipelines share one topic" design in
 [docs/architecture.md](../docs/architecture.md). `multipart/form-data` with an `X-User-Id` header naming the
 uploader (a `user_id` from `users`; missing, not a number or unknown → `401`, checked before anything else).
-Fields:
+The rules are in [docs/permission-model.md](../docs/permission-model.md): staff and managers upload, executive and
+admin never do (`403`). Fields:
 
 | Field | Required | Notes |
 |---|---|---|
-| `file` | yes | the file to upload |
+| `file` | yes | the file to upload, at most 20 MB. Documents: `.md` `.markdown` `.docx` `.pdf`. Data tables: `.csv`. Anything else is a `400` |
 | `contentKind` | yes | `document` (SOP / plan / review, goes through RAG) or `data_table` (product / customer behavior table, stored as rows) |
 | `docType` | when `contentKind=document` | `sop` / `campaign_plan` / `campaign_review` |
 | `tableType` | when `contentKind=data_table` | `campaign_products` / `campaign_customer_behavior` |
-| `department` | yes | department name, or `ALL` (`sop` only) |
-| `campaignId` | for everything except `sop` | `campaign_plan` / `campaign_review` / `data_table` all belong to a campaign |
+| `mode` | yes | `new` or `replace`. The uploader says which, and the system checks it against what exists instead of guessing |
+| `replacesDocId` | when replacing a document | the document to replace. A data table is identified by campaign + table type, so it doesn't need one |
+| `campaignId` | for everything except `sop` | `campaign_plan` / `campaign_review` / `data_table` all belong to a campaign, which must be in the uploader's department |
 | `title` | `sop` only | an SOP is identified by department + title; plan and review titles are generated from the campaign, so sending one is a `400` |
+| `scope` | `sop` only | `department` (the uploader's own) or `all` (every department) |
 | `category` | no | |
 
-Success returns `202 Accepted` + `{"uploadId": "..."}`. The file is stored in `UPLOAD_DIR` (set in `.env`,
-default `../uploads`, i.e. `uploads/` at the repository root, gitignored; llm-service reads the same
-variable), and **one transaction writes the `uploads` row (status `received`) and an `outbox` row holding the
-JSON event** (`UploadService`). The request returns once that commits; it never talks to Kafka. If the
-transaction fails, neither row exists, the file is removed and the response is `500`.
+There is no `department` field: it follows from the uploader, so a client can't upload into a department by
+naming it.
+
+A file over the limit gets a `413`. A client that sends the whole body before reading the response only sees that
+answer if Tomcat reads the rest of the refused request first, hence `server.tomcat.max-swallow-size`: measured, the
+default of 2 MB dropped the connection for such a client at 21 MB, while 100 MB gave a `413` at 21 and 90 MB. Far above
+that (measured at 150 MB) the connection is still dropped, so one client can't make the server read without limit.
+
+| Answer | When |
+|---|---|
+| `202`, `{"uploadId": "...", "status": "received"}` | a new document or table for the own department: takes effect without review |
+| `202`, `{"uploadId": "...", "status": "pending_approval"}` | replacing anything, or anything for `all`: waits for the uploader's superior; the old version stays in effect |
+| `400` | malformed: a missing or unknown field, a combination that makes no sense, the wrong file type, an unknown campaign |
+| `403` | not this uploader's to touch: executive / admin, a campaign or document of another department |
+| `409` | the request is fine but doesn't fit what exists: `new` and it exists, `replace` and it doesn't, a new title another SOP has |
+
+The file is stored in `UPLOAD_DIR` (set in `.env`, default `../uploads`, i.e. `uploads/` at the repository root,
+gitignored; llm-service reads the same variable), and **one transaction writes the `uploads` row and, unless it
+waits for approval, an `outbox` row holding the JSON event** (`UploadService`). The request returns once that
+commits; it never talks to Kafka. If the transaction fails, neither row exists, the file is removed and the
+response is `500`.
+
+### `GET /documents/{uploadId}/status`
+
+How far an upload got: `status`, `error` (the reason for `failed`, e.g. `row 3, units_sold: 'abc' is not a whole
+number`), what it is, who reviewed it. Visible to the uploader, whoever may review it, and admin; anyone else gets
+`403`, an unknown id `404`.
+
+### Approval: `GET /documents/approvals`, `POST /documents/approvals/{uploadId}/approve` and `/reject`
+
+`GET` lists what the current user has to decide: a manager sees the staff of their own department, the executive
+sees managers, anyone else gets `403`. Both decisions take an optional `comment`.
+
+- **approve**: the upload becomes `received` and its event goes into the outbox, in one transaction
+- **reject**: `rejected`; nothing was published, so the current version is untouched, and the file is deleted
+- A request can wait for days, and locking a document all that time is out of the question. So **approving checks
+  whether the version it wants to replace is still the current one** (optimistic concurrency). If someone else's
+  version went live meanwhile, approving would overwrite their work: the answer is `409`, the upload is `rejected`
+  with `superseded: ...` as its error, and its file is deleted. The transaction still commits, so the decision is on
+  record
+- `403`: not the uploader's superior. `409`: already decided. `404`: unknown upload
+
+### `GET /campaigns?month=2026-10`
+
+Campaigns running at some point in a month (one that spans two months is in both). A plan or review is bound to a
+campaign by its id, and uploaders know "the sale in November", not an id. `hasPlanDoc` / `hasReviewDoc` show whether
+one exists, which decides between `mode=new` and `mode=replace`. Staff and managers see their own department;
+executive and admin belong to none and see all. A malformed month is a `400`.
 
 ### Outbox relay
 
@@ -148,23 +194,22 @@ drift tests catch it when they aren't).
 - a send that fails, times out or is interrupted is a retry, never a lost message; a duplicate it may cause is
   skipped by the consumer
 
-`department` / `campaignId` are **not** enums: they are business data (a new department or campaign can
-appear any day), not a fixed set of values baked into the schema. They are checked against the real
-tables instead (`DepartmentRepository.existsByName` / `CampaignRepository.existsById`); unknown values get
-400. `ALL` is the sop-only sentinel, not a row in `departments`, and is let through.
+`campaignId` is **not** an enum: it is business data (a new campaign can appear any day), not a fixed set of
+values baked into the schema. It is checked against the real table instead (`CampaignRepository.findById`);
+an unknown one gets 400.
 
 Check it:
 ```bash
 curl -X POST http://localhost:8081/documents/upload -H "X-User-Id: 2" \
-  -F "file=@some.md" -F "contentKind=document" -F "docType=sop" -F "department=ALL" -F "title=Some SOP"
+  -F "file=@some.md" -F "contentKind=document" -F "docType=sop" -F "mode=new" -F "scope=department" -F "title=Some SOP"
 ```
-Then check the row with `SELECT status, error FROM uploads ORDER BY created_at DESC LIMIT 1;` (with the
+Then ask for its status with `curl http://localhost:8081/documents/<uploadId>/status -H "X-User-Id: 2"` (with the
 consumer running it moves on to `done`), or read the message with `llm-service/scripts/kafka_consumer_test.py`.
 
 ## Tests
 
 ```bash
-.\mvnw.cmd test                                                # default: 55 unit/slice tests, no Docker needed, a few seconds
+.\mvnw.cmd test                                                # default: 156 unit/slice tests, no Docker needed, a few seconds
 .\mvnw.cmd test -DexcludedGroups=none -Dgroups=integration     # integration tests: need the docker compose Postgres
 .\mvnw.cmd test -Dtest=UploadControllerTest                    # one class only
 ```
@@ -172,17 +217,22 @@ consumer running it moves on to `done`), or read the message with `llm-service/s
 | Test class | Kind | Covers |
 |---|---|---|
 | `UploadEnumsTest` (13) | plain unit | the enums' `fromValue` (typos / case / null), `needsCampaign`, **the JSON wire format must be lowercase** (`@JsonValue`) |
-| `UploadControllerTest` (28) | `@WebMvcTest` slice | success paths (the uploads row and the event handed to `UploadService`), missing / unknown `X-User-Id` → 401, 13 kinds of invalid parameters each returning 400 + the reason + **no side effects**, a failed recording removes the file, malicious file names can't escape the upload folder, 7 inputs to `sanitizeFilename` |
-| `UploadServiceTest` (1) | plain unit | the outbox row: topic, key, the event in the lowercase wire format |
+| `UploadPolicyTest` (15) | plain unit | the permission matrix of `docs/permission-model.md`, row by row: who uploads, what needs approval, who reviews whom, who sees a status |
+| `UploadControllerTest` (75) | `@WebMvcTest` slice + the real `UploadService` | takes effect at once / waits for approval, every `403` and `409`, 25 malformed requests each returning 400 + the reason + **no side effects**, missing / unknown `X-User-Id` → 401, a failed recording removes the file, malicious file names, the status endpoint's visibility |
+| `ApprovalControllerTest` (28) | `@WebMvcTest` slice + the real `UploadService` | the queues, approve writes the event, reject removes the file, **stale requests of every kind are void**, only the uploader's superior decides, a decision is made once |
+| `CampaignControllerTest` (10) | `@WebMvcTest` slice | own department or all, which days a month means, malformed months |
+| `UploadServiceTest` (2) | plain unit | the outbox row: topic, key, the event in the lowercase wire format; a waiting upload has no event |
 | `OutboxRelayTest` (7) | plain unit | publishing in order and marking; every Kafka failure (send throws Kafka's own `TimeoutException`, failed future, no acknowledgement in time, interruption) is recorded, stops the batch and is retried later |
 | `OutboxSchedulerTest` (5) | plain unit | draining a backlog, exponential backoff capped at the maximum, reset after success, retention cleanup |
 | `UploadEventContractTest` (1) | contract | every example in `contracts/upload-event.examples.json`, deserialized and re-serialized by Java, must equal the original |
 | `OutboxIntegrationTest` (4) | integration, `@Tag("integration")` | real Postgres: **the upload and its event commit together, and a failed outbox write leaves no upload behind**; the relay marks rows; a row locked by another relay is skipped, not waited for |
+| `UploadFlowIntegrationTest` (12) | integration, `@Tag("integration")` | whole requests against real Postgres: what the slices fake. The SOP natural key (case, spaces, Unicode forms, per department), the approval queues, what each decision commits, a void approval surviving as a commit with a `409` answer, data table versions, the campaign search |
 | `BackendServiceApplicationTests` (1) | integration, `@Tag("integration")` | the full container + a real Postgres; with `ddl-auto: validate` it also detects **drift between the entities and the migrations in `db/migration/`** |
 
 Notes:
-- `@WebMvcTest` loads only the web layer, with the repositories and `UploadService` replaced by fakes via
-  `@MockitoBean`. The relay tests use a Mockito `KafkaTemplate`, which is what lets them **make Kafka fail on
+- `@WebMvcTest` loads only the web layer. The upload tests add the real `UploadService` on top and fake only the
+  repositories via `@MockitoBean`, because the rules live in the service: a status code is tested through the code
+  that decides it. The relay tests use a Mockito `KafkaTemplate`, which is what lets them **make Kafka fail on
   demand** (a real Kafka can't be made to throw a particular exception at a particular moment)
 - The integration tests run against the development database. They only touch rows they create and delete them
   afterwards, and `OutboxIntegrationTest` refuses to run while real messages wait in the outbox (its relay would
@@ -196,14 +246,17 @@ Notes:
 - **Mutation-tested**: bugs were put back on purpose and each one turned its test red -- among them catching
   the wrong exception type, not restoring the interrupt flag, deleting `@JsonValue`, and for the outbox:
   removing `@Transactional` from `UploadService.record`, `FOR UPDATE` without `SKIP LOCKED`, a batch that
-  continues after a failure, a message not marked published, no backoff. A test you have never seen fail
-  proves nothing
+  continues after a failure, a message not marked published, no backoff; for the upload rules, every line of the
+  policy, every check in the service, the queries' filters. A test you have never seen fail proves nothing
 
 ## Endpoint overview
 
 | Endpoint | Status | Notes |
 |---|---|---|
 | `GET /health`, `GET /actuator/health` | implemented | health checks |
-| `POST /documents/upload` | implemented | upload file → store → record the upload and its event (outbox) → the relay publishes to Kafka `document-upload-events` |
+| `POST /documents/upload` | implemented | upload file → check the rules → store → record the upload and, unless it waits for approval, its event (outbox) → the relay publishes to Kafka `document-upload-events` |
+| `GET /documents/{id}/status` | implemented | how far an upload got, and why it failed |
+| `GET /documents/approvals`, `POST /documents/approvals/{id}/approve`, `.../reject` | implemented | the approval queue and the decision |
+| `GET /campaigns?month=` | implemented | finding a campaign to upload a plan, review or table for |
 | `POST /query` | planned | forwards to llm-service /query (with `X-User-Id`) |
 | read-only structured data endpoints | planned | campaigns / campaign_metrics / hosts queries (for a frontend dashboard, optional) |

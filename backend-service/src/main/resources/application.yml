@@ -26,6 +26,13 @@ spring:
         format_sql: true
     show-sql: true
 
+  servlet:
+    multipart:
+      # Spring's default is 1 MB per file, too small for a PDF with images. Measured at this limit: a 20 MB
+      # CSV (about 300,000 rows) takes about 5 s in the consumer, far below its time budget for one message.
+      max-file-size: 20MB
+      max-request-size: 21MB   # the file plus the form fields
+
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
@@ -72,6 +79,12 @@ server:
   # 8080 is Spring Boot's default port, but kafka-ui already uses it; 8081 is the port
   # planned in architecture.md.
   port: ${BACKEND_PORT:8081}
+  tomcat:
+    # How much of a refused request Tomcat still reads before answering. With the default of 2 MB, a client that
+    # sends the whole body before reading the response never sees the 413 for an oversized file: measured, it gets
+    # a dropped connection. Above this amount the connection is still dropped, so one client can't make the server
+    # read without limit.
+    max-swallow-size: 100MB
 
 management:
   endpoints:

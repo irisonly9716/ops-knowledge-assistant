@@ -35,15 +35,18 @@ class Settings(BaseSettings):
     doc_consumer_max_attempts: int = 3
     # Wait before a retry: after the n-th failure wait backoff * 2^(n-1) seconds (exponential backoff)
     doc_consumer_backoff_seconds: float = 0.5
+    # Longest a consumer may go between two polls; past it Kafka hands its partition to another member,
+    # and the late commit fails. One message is handled between two polls, so its time must stay below this
+    doc_consumer_max_poll_interval_ms: int = 300_000
+    # All the time one message may take, retries included. Checked against the limit above at startup
+    doc_consumer_message_budget_seconds: float = 200.0
 
     # ---- LLM / embeddings ----
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
-    # The SDK retries connection errors, 408/409/429 and 5xx by itself, with exponential backoff and
-    # honoring Retry-After; 5 retries ride out a short rate-limit burst. The consumer's own retries
-    # (doc_consumer_max_attempts) come on top of these
-    openai_max_retries: int = 5
     embedding_model: str = "text-embedding-3-small"
+    # One embedding request; retries are inside the consumer's budget for the message
+    embedding_request_timeout_seconds: float = 20.0
     # The cheapest tier by default. Switching a task to a stronger model (SQL generation,
     # campaign suggestions, eval grading) is decided by eval accuracy, latency and cost,
     # not by version number

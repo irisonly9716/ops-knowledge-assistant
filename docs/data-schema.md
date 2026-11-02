@@ -2,7 +2,7 @@
 
 > The actual DDL lives in the Flyway migrations under [db/migration/](../db/migration/) (V1 pgvector, V2 base
 > schema, V3 uploads / roles / chunk department, V4 the `document_catalog` view, V5 its `catalog_entry()` function,
-> V6 the `outbox` table), applied in
+> V6 the `outbox` table, V7 `documents.version` and `uploads.category`), applied in
 > version order (this document explains them; the SQL files are authoritative for column types).
 > The data is mock data generated with Python + Faker (see `llm-service/scripts/generate_mock_data.py`).
 
@@ -133,10 +133,15 @@ transaction system behind it.
 | purchase_amount | numeric | |
 | ip_address | text | |
 
-`campaign_products` / `campaign_customer_behavior` are **structured table uploads** (Excel/CSV
-exports from ops), a different ingestion pipeline from `documents` (free text) below: the former are
-parsed straight into rows and queried with Text-to-SQL; the latter are chunked and embedded and
-retrieved with RAG. See [architecture.md](architecture.md).
+`campaign_products` / `campaign_customer_behavior` are **structured table uploads** (CSV exports from ops),
+a different ingestion pipeline from `documents` (free text) below: the former are validated and loaded straight
+into rows and queried with Text-to-SQL; the latter are chunked and embedded and retrieved with RAG. See
+[architecture.md](architecture.md).
+
+An upload replaces all of a campaign's rows in one transaction. A table has no `documents` row to point at its
+current version: that is the last `done` upload of the campaign and table type. In a CSV the columns are the ones
+above in any order, plus an optional `campaign_id` that must match the upload; `products_purchased` is
+semicolon-separated (`Serum;Lipstick`). Samples are in `data_tables/`.
 
 ## Document tables (SOP / campaign plan / post-campaign review)
 
@@ -155,6 +160,7 @@ of the ingestion logic.
 |---|---|---|
 | doc_id | bigserial PK | stays the same when a new version replaces the document (the row is updated in place and its chunks rebuilt), so citations and eval labels stay valid |
 | upload_id | uuid unique FK → uploads | the upload that produced the current version |
+| version | int | starts at 1, goes up by one with every replacement. For people and citations ("version 3"); replacements are checked against `upload_id`, not this |
 | doc_type | text | `sop` / `campaign_plan` / `campaign_review` |
 | title | text | e.g. "Account Restriction Handling" |
 | department | text | department name or `ALL` (`sop` only) -- not a foreign key, see below |
@@ -244,7 +250,8 @@ both pipelines (documents and data tables). Who moves the status:
 |---|---|---|
 | → `received` | backend | the upload is accepted; committed together with its outbox row, before anything is published |
 | `received` / `failed` → `processing` | consumer | it starts working on the message (`failed` again after a replay from the dead-letter topic) |
-| `processing` → `done` | consumer | in the same transaction that writes `documents` + `doc_chunks` |
+| `pending_approval` → `received` / `rejected` | backend | the reviewer's decision; approving writes the outbox row in the same transaction |
+| `processing` → `done` | consumer | in the same transaction that writes `documents` + `doc_chunks`, or the table rows |
 | `processing` → `failed` | consumer | the message was dead-lettered; `error` holds the reason |
 
 `done` is also the consumer's deduplication record: a message for an upload that is already `done` is skipped.
@@ -258,6 +265,7 @@ both pipelines (documents and data tables). Who moves the status:
 | department | text | department name, or `ALL` (`sop` only) |
 | campaign_id | bigint FK → campaigns, nullable | required for campaign documents and data tables |
 | title | text | required for `sop` (part of its natural key); campaign document titles are generated |
+| category | text, nullable | the category given at upload. A waiting upload has no event yet, so the row has to keep it |
 | original_filename / storage_key | text | original file name / storage location (`storage_key` is unique) |
 | replaces_upload_id | uuid FK → uploads, nullable | the upload that produced the current version this one replaces; NULL means new |
 | status | text | `pending_approval` / `received` / `processing` / `done` / `failed` / `rejected` |

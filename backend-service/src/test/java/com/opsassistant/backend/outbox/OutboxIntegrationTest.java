@@ -8,11 +8,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.opsassistant.backend.upload.ContentKind;
-import com.opsassistant.backend.upload.DocType;
-import com.opsassistant.backend.upload.Source;
 import com.opsassistant.backend.upload.Upload;
-import com.opsassistant.backend.upload.UploadEvent;
 import com.opsassistant.backend.upload.UploadRepository;
 import com.opsassistant.backend.upload.UploadService;
 import java.sql.Connection;
@@ -41,8 +37,8 @@ import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
  * row locking of the relay. Kafka is a Mockito fake; the scheduler is switched off and the relay is
  * called directly.
  *
- * It runs against the development database, so it only touches rows it creates (keys starting with
- * "outbox-it-") and deletes them afterwards. It refuses to run while real messages are waiting in the
+ * It runs against the development database, so it only touches rows it creates (storage keys and test
+ * message keys starting with "outbox-it-") and deletes them afterwards. It refuses to run while real messages are waiting in the
  * outbox, because the relay under test would mark them published without really sending them.
  * Run with: .\mvnw.cmd test -DexcludedGroups=none -Dgroups=integration
  */
@@ -79,7 +75,8 @@ class OutboxIntegrationTest {
 
     @AfterEach
     void cleanUp() {
-        jdbc.update("DELETE FROM outbox WHERE message_key LIKE ?", prefix + "%");
+        jdbc.update("DELETE FROM outbox WHERE message_key LIKE ? OR message_key IN "
+                + "(SELECT upload_id::text FROM uploads WHERE storage_key LIKE ?)", prefix + "%", prefix + "%");
         jdbc.update("DELETE FROM uploads WHERE storage_key LIKE ?", prefix + "%");
     }
 
@@ -87,11 +84,11 @@ class OutboxIntegrationTest {
     void the_upload_and_its_event_are_committed_together() {
         UUID uploadId = UUID.randomUUID();
 
-        uploadService.record(upload(uploadId), event(uploadId));
+        uploadService.record(upload(uploadId));
 
         assertThat(uploadRepository.findById(uploadId)).isPresent();
         assertThat(jdbc.queryForObject("SELECT count(*) FROM outbox WHERE message_key = ? AND published_at IS NULL",
-                Integer.class, prefix + uploadId)).isEqualTo(1);
+                Integer.class, uploadId.toString())).isEqualTo(1);
     }
 
     /**
@@ -104,7 +101,7 @@ class OutboxIntegrationTest {
         UUID uploadId = UUID.randomUUID();
         doThrow(new RuntimeException("outbox write failed")).when(outboxRepository).save(any());
 
-        assertThatThrownBy(() -> uploadService.record(upload(uploadId), event(uploadId)))
+        assertThatThrownBy(() -> uploadService.record(upload(uploadId)))
                 .hasMessageContaining("outbox write failed");
 
         assertThat(uploadRepository.findById(uploadId)).isEmpty();
@@ -161,12 +158,6 @@ class OutboxIntegrationTest {
         upload.setCreatedAt(Instant.now());
         upload.changeStatus(Upload.RECEIVED, null);
         return upload;
-    }
-
-    private UploadEvent event(UUID uploadId) {
-        // The message key is the upload id; prefixing it here is only so cleanUp() can find the test's rows
-        return new UploadEvent(prefix + uploadId, prefix + uploadId + "-test.md", ContentKind.DOCUMENT, DocType.SOP,
-                null, "ALL", null, null, Source.MANUAL);
     }
 
     private long outboxRow(String name) {

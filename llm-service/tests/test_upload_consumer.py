@@ -12,11 +12,11 @@ import threading
 from pathlib import Path
 
 import pytest
-from confluent_kafka import KafkaException
+from confluent_kafka import KafkaError, KafkaException
 
 from app.config import Settings
 from app.consumers.errors import PermanentError
-from app.consumers.upload_consumer import UploadConsumer, parse_event
+from app.consumers.upload_consumer import UploadConsumer, check_time_budget, parse_event
 
 CONTRACT = json.loads(
     (Path(__file__).resolve().parents[2] / "contracts" / "upload-event.examples.json").read_text(encoding="utf-8"))
@@ -52,6 +52,7 @@ class FakeMessage:
 class FakeConsumer:
     def __init__(self, messages, calls, on_empty=None):
         self._messages, self.calls, self._on_empty = list(messages), calls, on_empty
+        self.commit_error = None
 
     def subscribe(self, topics): self.calls.append(("subscribe", tuple(topics)))
 
@@ -64,6 +65,8 @@ class FakeConsumer:
 
     def commit(self, message=None, asynchronous=True):
         assert asynchronous is False, "commits must be synchronous, or after a crash nobody knows whether the commit took effect"
+        if self.commit_error:
+            raise self.commit_error
         self.calls.append(("commit", message.offset()))
 
     def close(self): self.calls.append(("close",))
@@ -113,7 +116,7 @@ def make(calls, messages, handler, producer_mode="deliver", **kw):
 def recording_handler(calls, fail_times=0, error=RuntimeError("temporary failure")):
     state = {"n": 0}
 
-    def handler(event):
+    def handler(event, budget=None):
         state["n"] += 1
         calls.append(("handler", event.upload_id))
         if state["n"] <= fail_times:
@@ -276,6 +279,83 @@ def test_if_recording_the_failure_fails_the_offset_is_still_committed(calls):
     worker.poll_once(0)
 
     assert calls[-2:] == [("dlq", "document-upload-events.dlq"), ("commit", 5)]
+
+
+# ------------------------------------------------------------------ the time budget of one message
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_the_handler_gets_one_budget_shared_by_all_attempts(calls):
+    budgets = []
+
+    def handler(event, budget):
+        budgets.append(budget)
+        raise ConnectionError("downstream timeout")
+    worker, _, _ = make(calls, [FakeMessage(VALID, offset=1)], handler, max_attempts=3)
+
+    worker.poll_once(0)
+
+    assert len(budgets) == 3 and budgets[0] is budgets[1] is budgets[2]
+
+
+def test_no_more_attempts_once_the_budget_is_used_up(calls):
+    # The first attempt hangs for almost the whole budget: there is no time for the backoff and a second attempt
+    clock = FakeClock()
+
+    def slow_handler(event, budget):
+        clock.now += 199.9
+        raise ConnectionError("downstream timeout")
+    worker, producer, sleeps = make(calls, [FakeMessage(VALID, offset=2)], slow_handler, max_attempts=3,
+                                    message_budget_seconds=200.0, clock=clock)
+
+    worker.poll_once(0)
+
+    assert sleeps == []                               # no waiting, no retry
+    assert producer.sent[0]["headers"]["x-attempts"] == "1"
+    assert calls[-2:] == [("dlq", "document-upload-events.dlq"), ("commit", 2)]
+
+
+@pytest.mark.parametrize("seconds, limit_ms, ok", [
+    (200.0, 300_000, True),
+    (240.0, 300_000, False),                          # 240 + 60 s after the budget reaches the limit exactly
+    (590.0, 300_000, False),                          # what the retries used to add up to
+    (590.0, 900_000, True),
+])
+def test_startup_refuses_a_budget_that_does_not_fit_max_poll_interval(seconds, limit_ms, ok):
+    if ok:
+        check_time_budget(seconds, limit_ms)
+    else:
+        with pytest.raises(ValueError, match="max.poll.interval.ms"):
+            check_time_budget(seconds, limit_ms)
+
+
+# ------------------------------------------------------------------ losing the group membership
+
+
+@pytest.mark.parametrize("code", [KafkaError.UNKNOWN_MEMBER_ID, KafkaError.ILLEGAL_GENERATION,
+                                  KafkaError.REBALANCE_IN_PROGRESS])
+def test_a_commit_after_losing_the_group_membership_does_not_stop_the_consumer(calls, code):
+    # Reproduced with a real broker: a message held past max.poll.interval.ms fails its commit with
+    # UNKNOWN_MEMBER_ID, and is delivered again by the next poll, where idempotency skips it
+    worker, _, _ = make(calls, [FakeMessage(VALID, offset=3)], recording_handler(calls))
+    worker._consumer.commit_error = KafkaException(KafkaError(code))
+
+    assert worker.poll_once(0) is True                # no exception: the loop goes on
+
+
+def test_any_other_commit_failure_still_stops_the_consumer(calls):
+    worker, _, _ = make(calls, [FakeMessage(VALID, offset=3)], recording_handler(calls))
+    worker._consumer.commit_error = KafkaException(KafkaError(KafkaError.TOPIC_AUTHORIZATION_FAILED))
+
+    with pytest.raises(KafkaException):
+        worker.poll_once(0)
 
 
 # ------------------------------------------------------------------ dead-letter write fails: never commit
