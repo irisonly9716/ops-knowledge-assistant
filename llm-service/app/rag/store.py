@@ -1,4 +1,4 @@
-"""SQL for document ingestion: the uploads row, the catalog labels, documents and doc_chunks.
+"""SQL for ingestion: the uploads row, the catalog labels, documents and doc_chunks.
 
 The functions take an open connection and never commit themselves: where a transaction starts and
 ends is the caller's decision (see app/consumers/handlers.py).
@@ -27,9 +27,11 @@ class UploadRow:
     status: str
     content_kind: str
     doc_type: str | None
+    table_type: str | None
     department: str
     campaign_id: int | None
     title: str | None
+    category: str | None
     storage_key: str
     replaces_upload_id: str | None
 
@@ -52,8 +54,8 @@ def lock_upload(conn: psycopg.Connection, upload_id: str) -> UploadRow | None:
     """The uploads row, locked until the surrounding transaction ends (FOR UPDATE): a second consumer
     handling a duplicate of the same message waits here instead of working on the same upload at once."""
     row = conn.execute(
-        """SELECT upload_id::text, status, content_kind, doc_type, department, campaign_id, title,
-                  storage_key, replaces_upload_id::text
+        """SELECT upload_id::text, status, content_kind, doc_type, table_type, department, campaign_id, title,
+                  category, storage_key, replaces_upload_id::text
            FROM uploads WHERE upload_id = %s FOR UPDATE""",
         (upload_id,),
     ).fetchone()
@@ -99,7 +101,7 @@ def save_document(conn: psycopg.Connection, upload: UploadRow, fields: DocumentF
     if replaced:
         row = conn.execute(
             """UPDATE documents SET doc_type = %s, title = %s, department = %s, campaign_id = %s, category = %s,
-                      steps = %s, responsible_team = %s, source_path = %s, upload_id = %s
+                      steps = %s, responsible_team = %s, source_path = %s, upload_id = %s, version = version + 1
                WHERE upload_id = %s RETURNING doc_id""",
             (*values, upload.replaces_upload_id),
         ).fetchone()

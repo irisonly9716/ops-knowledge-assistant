@@ -1,0 +1,6 @@
+product_name,units_sold,sell_through_rate,return_rate,sales_amount,click_through_rate,cost_price,profit,profit_margin
+Lipstick,412,0.8240,0.0170,9888.00,0.0412,9.50,5974.00,0.6042
+Foundation,268,0.6700,0.0340,10184.00,0.0295,16.00,5896.00,0.5789
+Serum,351,0.7800,0.0210,15795.00,0.0388,18.50,9301.50,0.5889
+Sheet Mask,906,0.9060,0.0080,5889.00,0.0521,2.20,3895.80,0.6615
+Sunscreen,187,0.5340,0.0120,4114.00,0.0247,8.75,2477.75,0.6023

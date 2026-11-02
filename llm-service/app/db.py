@@ -3,6 +3,10 @@ import psycopg
 
 from app.config import settings
 
+CONNECT_TIMEOUT_SECONDS = 10
+STATEMENT_TIMEOUT_SECONDS = 30
+LOCK_TIMEOUT_SECONDS = 10
+
 
 def connect(dbname: str | None = None) -> psycopg.Connection:
     """A new connection in autocommit mode: every statement commits on its own unless it runs inside
@@ -19,6 +23,6 @@ def connect(dbname: str | None = None) -> psycopg.Connection:
         user=settings.postgres_user,
         password=settings.postgres_password,
         autocommit=True,
-        connect_timeout=10,
-        options="-c statement_timeout=30000 -c lock_timeout=10000",
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
+        options=f"-c statement_timeout={STATEMENT_TIMEOUT_SECONDS * 1000} -c lock_timeout={LOCK_TIMEOUT_SECONDS * 1000}",
     )

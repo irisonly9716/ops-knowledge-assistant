@@ -1,0 +1,7 @@
+customer_ref,region,dwell_time_minutes,products_purchased,purchase_amount,ip_address
+BEA-C001,Northeast,18.50,Lipstick;Serum,69.00,203.0.113.11
+BEA-C002,West Coast,6.25,Sheet Mask,13.00,203.0.113.42
+BEA-C003,Midwest,31.00,Foundation;Serum;Sunscreen,105.00,198.51.100.7
+BEA-C004,Southeast,2.75,,0.00,198.51.100.23
+BEA-C005,Southwest,12.10,Lipstick,24.00,192.0.2.15
+BEA-C006,Mountain West,9.40,Sunscreen;Sheet Mask,28.50,

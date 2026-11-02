@@ -115,10 +115,11 @@ def main():
             # CASCADE: departments are referenced by users/hosts/campaigns, so empty those too.
             #   It follows every foreign key: uploads (references users), documents and
             #   doc_chunks (reference campaigns / uploads) are emptied as well, so documents
-            #   that were already ingested have to be uploaded again
+            #   that were already ingested have to be uploaded again. outbox has no foreign key but
+            #   holds events of those uploads, so it is named explicitly
             cur.execute("""
                 TRUNCATE departments, users, hosts, campaigns, campaign_metrics,
-                         campaign_products, campaign_customer_behavior
+                         campaign_products, campaign_customer_behavior, outbox
                 RESTART IDENTITY CASCADE
             """)
 
@@ -235,6 +236,9 @@ def main():
                     # cost_price / profit / profit_margin would come with the uploaded table
                     # (computed by finance), like units_sold; we derive them here only so the
                     # fake numbers agree with each other (profit = sales - product cost).
+                    # A campaign that is still running has no sales export yet, so its rows are computed
+                    # (to keep the random sequence, and every other campaign's numbers, the same) but not
+                    # inserted: uploading a CSV for it is a real "new" upload.
                     dept_products = PRODUCTS_BY_DEPT[dept_name]
                     campaign_products = random.sample(dept_products, k=random.randint(3, 6))
                     product_pool = total_gmv * random.uniform(0.6, 0.9)
@@ -257,33 +261,36 @@ def main():
                             round(random.uniform(0.02, 0.3), 4),
                             cost_price, profit, profit_margin,
                         ))
-                    cur.executemany(
-                        """INSERT INTO campaign_products
-                           (campaign_id, product_name, units_sold, sell_through_rate,
-                            return_rate, sales_amount, click_through_rate,
-                            cost_price, profit, profit_margin)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                        product_rows,
-                    )
+                    if status == "finished":
+                        cur.executemany(
+                            """INSERT INTO campaign_products
+                               (campaign_id, product_name, units_sold, sell_through_rate,
+                                return_rate, sales_amount, click_through_rate,
+                                cost_price, profit, profit_margin)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                            product_rows,
+                        )
 
                     # ---- campaign_customer_behavior: this campaign's customers (also an uploaded table) ----
                     sampled_customers = random.sample(customer_pool, k=random.randint(15, 40))
-                    cur.executemany(
-                        """INSERT INTO campaign_customer_behavior
-                           (campaign_id, customer_ref, region, dwell_time_minutes,
-                            products_purchased, purchase_amount, ip_address)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                        [
-                            (
-                                campaign_id, customer_ref, random.choice(REGIONS),
-                                round(random.uniform(0.5, 45), 2),
-                                Jsonb(random.sample(campaign_products, k=random.randint(1, 3))),
-                                round(random.uniform(20, 2000), 2),
-                                fake.ipv4(),
-                            )
-                            for customer_ref in sampled_customers
-                        ],
-                    )
+                    behavior_rows = [
+                        (
+                            campaign_id, customer_ref, random.choice(REGIONS),
+                            round(random.uniform(0.5, 45), 2),
+                            Jsonb(random.sample(campaign_products, k=random.randint(1, 3))),
+                            round(random.uniform(20, 2000), 2),
+                            fake.ipv4(),
+                        )
+                        for customer_ref in sampled_customers
+                    ]
+                    if status == "finished":
+                        cur.executemany(
+                            """INSERT INTO campaign_customer_behavior
+                               (campaign_id, customer_ref, region, dwell_time_minutes,
+                                products_purchased, purchase_amount, ip_address)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                            behavior_rows,
+                        )
 
         conn.commit()  # one transaction for the whole script: an error rolls everything back
 
