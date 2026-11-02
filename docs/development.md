@@ -22,8 +22,8 @@ uv venv
 uv pip install -r requirements.txt
 uv run python -m scripts.init_topics
 
-# 3. Sample data. Must run before any upload: the API checks that the
-#    department / campaignId exist in the database and returns 400 otherwise.
+# 3. Sample data. Must run before any upload: the API looks up the uploader (401 if unknown)
+#    and checks that the campaignId exists (400 otherwise).
 uv run python -m scripts.generate_mock_data
 
 # 4. Backend (new terminal, from the repo root)
@@ -38,7 +38,11 @@ uv run python -m app.consumers.upload_consumer
 #    users table; 2 is a staff member in the generated data). The consumer log shows the document being
 #    parsed, chunked, embedded (needs OPENAI_API_KEY in .env) and stored.
 #    In PowerShell, type curl.exe instead of curl (plain `curl` is an alias for a different command there).
-curl -X POST http://localhost:8081/documents/upload -H "X-User-Id: 2" -F "file=@sop_docs/account-restriction-handling.md" -F "contentKind=document" -F "docType=sop" -F "department=ALL" -F "title=Account Restriction Handling"
+#    scope=department takes effect at once; scope=all would wait for approval by the manager (user 1).
+curl -X POST http://localhost:8081/documents/upload -H "X-User-Id: 2" -F "file=@sop_docs/account-restriction-handling.md" -F "contentKind=document" -F "docType=sop" -F "mode=new" -F "scope=department" -F "title=Account Restriction Handling"
+
+# 7. Upload a data table: a CSV for campaign 11, which is still running and so has no rows yet
+curl -X POST http://localhost:8081/documents/upload -H "X-User-Id: 2" -F "file=@data_tables/beauty-weekly-live-special-products.csv" -F "contentKind=data_table" -F "tableType=campaign_products" -F "mode=new" -F "campaignId=11"
 ```
 
 `docker compose down -v` deletes all volumes (Postgres data and Kafka topics). The next `up` rebuilds the schema from the migrations; run steps 2 and 3 again afterwards.

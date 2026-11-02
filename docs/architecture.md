@@ -132,25 +132,47 @@ down; the batch stops at the first failure so messages keep their order.
 Not chosen: change data capture (Debezium reads the database log; it needs a Kafka Connect deployment, more
 infrastructure than this project warrants), and publishing first and recording afterwards (the same gap, mirrored).
 
-**② Structured tables** (product sales and customer behavior tables uploaded by ops, e.g. Excel/CSV
-exports) -- not chunked, not embedded; parsed straight into structured rows and queried with Text-to-SQL:
+**② Structured tables** (product sales and customer behavior tables uploaded by ops as CSV exports) -- not
+chunked, not embedded; validated and loaded straight into structured rows, queried with Text-to-SQL:
 
 ```
-[employee uploads Excel/CSV]  POST /documents/upload (backend, same endpoint)
-      │  generates upload_id
+[employee uploads a CSV]  POST /documents/upload (backend, same endpoint)
+      │  stores the file, generates upload_id
+      │  one transaction: uploads row + outbox row holding the event → 202
       ▼
-  Kafka: document-upload-events   { upload_id, storage_key, content_kind: "data_table",
+  outbox relay → Kafka: document-upload-events   { upload_id, storage_key, content_kind: "data_table",
                                      table_type: "campaign_products" | "campaign_customer_behavior",
                                      campaign_id, source: "manual" }
       ▼
-  llm-service Kafka consumer
-      │  1. download / read the file
-      │  2. parse the table (pandas / openpyxl)
-      │  3. INSERT straight into campaign_products / campaign_customer_behavior by table_type
-      │  4. set the status to done
+  llm-service Kafka consumer (app/consumers/data_tables.py)
+      │  1. short transaction: lock the uploads row; already done → duplicate, skip; else → processing
+      │  2. no transaction: read the file, validate every cell against its column
+      │     (any problem → dead-letter + failed, with "row 3, units_sold: 'abc' is not a whole number")
+      │  3. one transaction: lock the campaign, check the version this upload replaces,
+      │     DELETE the campaign's rows + COPY the new ones + set done
       ▼
   queryable by Text-to-SQL
 ```
+
+Why it differs from the documents:
+- **No chunks, no embeddings.** The questions are "how many", "which product", "what's the average": SQL answers
+  them exactly, while similarity search over rows of numbers would answer them approximately at best.
+- **A whole table is one version.** An upload replaces all of a campaign's rows in one transaction, so a reader sees
+  the old set or the new one, never a mix. There is no row-level merge: the export is the source of truth.
+- **Per-cell checks with `csv`, for now.** The point is a precise error for a person to fix. The limits in the checks
+  mirror the column types, so nothing that passes can be refused by the database with an error that looks temporary.
+  Measured at the 20 MB upload limit, `csv` and pandas take about the same time (1.7 s), so there was no reason yet to
+  add a dependency. The known costs: the whole file is held in memory (about 440 MB at the limit), and ops staff work
+  in Excel, so converting to CSV costs them time on every upload. Excel uploads, parsed with pandas, are
+  [issue #9](https://github.com/irisonly9716/ops-knowledge-assistant/issues/9).
+- **`COPY`, not `INSERT`s.** The whole load is one statement, so `statement_timeout` limits all of it. Measured: a
+  batch of `INSERT`s ran 4.3 s under a 0.2 s limit, because the limit applies to each one. It is also about three
+  times faster: at the 20 MB upload limit (about 300,000 rows), about 2 s to validate and 3 s to load.
+- **Worst case.** The write is bounded by two lock waits (10 s each) plus `DELETE` and `COPY` (30 s each): 80 s, and
+  it only starts if that fits what is left of the message's 200 s budget. So the write always ends inside the
+  budget. The latest an attempt can stop is one started just before the budget ends: connect and lock (20 s) and
+  validation (about 2 s) before that check refuses to write, about 222 s, plus the dead-letter write, under the 300 s
+  `max.poll.interval.ms`. If the limit were passed anyway, the transaction rolls back or the duplicate is skipped.
 
 Neither pipeline is an analytics engine of ours -- **they only store data ops already has or content ops
 wrote**. The real analysis (why a campaign did well or badly) is the LLM's job, attributing results by

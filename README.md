@@ -150,6 +150,7 @@ ops-knowledge-assistant/
 ├── db/migration/      # versioned schema migrations (Flyway, PostgreSQL + pgvector)
 ├── sop_docs/          # sample SOP documents
 ├── campaign_docs/     # sample campaign plans and post-mortems
+├── data_tables/       # sample CSV uploads (product sales, customer behavior)
 ├── docs/              # architecture, data schema, permission model
 └── docker-compose.yml # Postgres+pgvector, Flyway, Redis, Kafka, Kafka UI
 ```
