@@ -13,8 +13,8 @@ Both services use **Kafka** and **Redis**:
   - `document-upload-events`: an employee uploads a file / SOP in the frontend → the backend stores the file and publishes an event → llm-service consumes and processes it
   - Future "automatic upload of the latest data": a scheduled producer packages the latest campaign / host data into a file every day and publishes it to the same topic, reusing the same pipeline -- hence the `source: manual | auto` field in the message
 - **Redis**
-  - query cache: the same question, after it has been rewritten into a standalone question, from the same
-    department and role against the same knowledge-base version is answered directly, without retrieval + LLM
+  - query cache: the same question, after it has been rewritten into a standalone question with concrete
+    references, from the same department and role against the same knowledge-base version is answered directly, without retrieval + LLM
     again. No similarity-based cache: "last month's GMV" and "the month before's GMV" are similar questions
     with different answers
   - conversation memory: `session:{id}` holds the multi-turn history
@@ -191,7 +191,11 @@ backend /query
       ├──forwards with the internal service token──▶ llm-service /query (accepts calls from the backend only)
       │
       │ 2. rewrite the question into a standalone one, using the conversation memory
-      │    ("and the time before?" only means something together with the previous turns)
+      │    ("and the time before?" only means something together with the previous turns), and make
+      │    relative references concrete ("the last campaign" → "campaign 11", "last month" → "2026-10").
+      │    The model only spots a relative reference; a query through the read-only role and row-level
+      │    security finds which campaign it means, so only campaigns this user can see are candidates.
+      │    If that doesn't settle it, ask the user back and skip the cache
       │ 3. check the cache: key = department + role + knowledge-base version + rewritten question
       │    (a hit returns immediately)
       │ 4. route: documents / data / both?
@@ -205,7 +209,8 @@ backend /query
       │               with row-level security for the user's department, a statement timeout and a row limit
       │             - result
       │
-      │ 5. retrieved chunks + SQL result + question + conversation history → LLM → answer
+      │ 5. retrieved chunks + SQL result + question + conversation history → LLM → answer, which opens
+      │    by naming the campaign it is based on, so a wrong reading is easy to spot
       │ 6. write the cache + the conversation memory + the audit record
       ▼
    back to the user
@@ -213,8 +218,11 @@ backend /query
 
 The cache and the permission boundary meet in the key: without the department and role, one department's answer
 could be served to another. A new or replaced document bumps the knowledge-base version of its department (an `ALL`
-document: every department's), and so does a data-table upload, which changes SQL answers; questions about
-relative periods ("last month") expire the same day.
+document: every department's), and so does a data-table upload, which changes SQL answers. The version lives in
+Postgres and goes up in the same transaction as the write: in Redis it would be another dual write, and a crash
+between the two would keep serving old answers. Relative references are made concrete before the key is built, so
+when a new campaign finishes the key changes; a question that still has one after rewriting skips the cache. The
+TTL is only a safety net.
 
 ## Ports (local development)
 
