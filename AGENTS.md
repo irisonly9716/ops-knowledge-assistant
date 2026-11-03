@@ -127,6 +127,7 @@ Key patterns:
 - **Mutation checks:** put each bug back on purpose and watch its test fail. First prove the baseline passes, and count only a named failing test; a compile error or a tool that didn't run proves nothing.
 - **End to end:** anything crossing a process needs a real run with the backend, Kafka, consumer and Postgres; slice tests can't see Tomcat or the network.
 - **Measure before deciding** (size, time, memory), compare alternatives fairly, and report worst cases.
+- **Don't rerun to answer a question.** Results from before a merge stay valid until that code changes, and rerunning costs tokens: cite the earlier result and when it ran. If the code changed since, or no earlier run covers the question, answer from the code, say it wasn't run, and ask before running anything.
 - Never weaken, skip or delete a test to make it pass. If a test looks wrong, say so.
 
 ## 2. References
@@ -150,6 +151,7 @@ A new document for one's own department takes effect at once. Replacing anything
 
 - One branch per change, from up-to-date `master` or stacked on the branch it needs; descriptive names such as `upload-permissions`.
 - Commits: `type: summary` (`feat`, `fix`, `docs`, `test`, `chore`), imperative, with a body explaining why. A commit made by an agent ends with that agent's `Co-Authored-By` line; a PR body ends with its generated-with line.
+- **Author:** every commit is authored as Arianna Ge, including commits made by an agent (`user.name` in this repo's git config).
 - Reference issues with `Closes #N` in the commit or PR that finishes them.
 - Merge with a merge commit, never squash. Never enable auto-merge unless asked.
 - **Never push, open or merge a PR, deploy or spend cloud money without Arianna's approval for that action.** Arianna usually pushes through GitHub Desktop.
@@ -183,3 +185,4 @@ A new document for one's own department takes effect at once. Replacing anything
 - v2 · 2026-11-03 · Arianna · Reranking rule and English-only language premise.
 - v3 · 2026-11-03 · Arianna · The query path: how to start it, its rules and psycopg-pool.
 - v4 · 2026-11-03 · Arianna · Say where 300 QPS comes from; state the relay's row locks as an exception to the rule on locks across network calls.
+- v5 · 2026-11-03 · Arianna · Commits are authored as Arianna Ge; don't rerun tests to answer a question.
