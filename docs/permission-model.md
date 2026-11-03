@@ -120,6 +120,8 @@ A campaign may involve several departments. Two options; the simple one first:
 - [ ] Uploads and replacements by `executive` and `admin` are rejected; `admin` can't approve; nobody approves their own upload
 - [ ] Document retrieval: a `staff` user can't retrieve another department's SOP but can retrieve company-wide (`ALL`) SOPs
 - [ ] The SQL the LLM generates is filtered by `department_id` even when the question doesn't mention a department
+- [ ] "The last campaign" only resolves among campaigns the user can see: a newer campaign in another department changes nothing, and a follow-up question never lists one
+- [ ] Asking about another department's campaign id gets the same answer as an id that doesn't exist
 
 ## 6. No permissions at the host level for now
 
