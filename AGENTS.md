@@ -20,7 +20,9 @@ An assistant for live-commerce operations staff. One entry point answers SOP and
 
 **Principle:** the project analyzes content and results with AI; it does not recompute analytics. Clean numbers go in SQL columns, narrative (SOPs, plans, reviews) goes through RAG, and data other teams already computed is uploaded, not calculated here.
 
-**Status:** upload, approval and ingestion are implemented. `/query`, retrieval, Text-to-SQL, routing, cache and memory are not built yet (`app/sql_agent`, `app/router`, `app/memory` are empty packages).
+**Status:** upload, approval and ingestion are implemented. `/query`, retrieval, reranking, Text-to-SQL, routing, cache and memory are not built yet (`app/sql_agent`, `app/router`, `app/memory` are empty packages).
+
+**Language:** documents and questions are in English. There is no cross-language retrieval.
 
 ### Scale
 
@@ -35,6 +37,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 
 - **Rate limit:** designed for the 300 QPS peak; above it, `429` with `Retry-After`.
 - **Model concurrency:** sized for the peak (900 across all instances) and configurable. Development sets a low value in `.env` because those tests are paid for privately; that value is never a production default or evidence for sizing.
+- **Reranking:** only sees chunks that passed the department filter and counts toward the 3 s; on a timeout or an error, fall back to vector order. It is on by default unless the eval shows no gain or it breaks the 3 s budget: then it stays in the code, is switched off in config, and the numbers go in the report.
 - **Not load tested yet (#11).** Until it is, write "designed for 300 QPS", not "handles 300 QPS".
 - **Upload path:** 1 partition, 1 consumer, 1 broker and local files, because the volume wasn't known when it was designed; #10 is the way out. Partitions follow upload volume: queries don't pass through Kafka.
 
@@ -54,7 +57,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Chunking | langchain-text-splitters · tiktoken | 1.1.3 · 0.14.0 |
 | Tests and mock data | pytest · httpx · faker · JUnit and Mockito via Boot | 9.1.1 · 0.28.1 · 33.1.0 |
 
-- Planned, not installed: LangGraph, sqlglot, and pandas with openpyxl (#9).
+- Planned, not installed: LangGraph, sqlglot, a reranker (Cohere Rerank or `bge-reranker-v2-m3`, chosen by eval), and pandas with openpyxl (#9).
 - Never upgrade a major version inside a feature change.
 - Your training data may be older than these versions. Spring Boot 4 uses Jackson 3 (`tools.jackson.*`; annotations stay in `com.fasterxml.jackson.annotation`), `@MockitoBean`, and `@WebMvcTest` in `org.springframework.boot.webmvc.test.autoconfigure`. Check the docs for the installed version.
 
@@ -174,3 +177,4 @@ A new document for one's own department takes effect at once. Replacing anything
 ## Changelog
 
 - v1 · 2026-11-02 · Arianna · First draft: reply marker, dependency versions, scale requirements.
+- v2 · 2026-11-03 · Arianna · Reranking rule and English-only language premise.
