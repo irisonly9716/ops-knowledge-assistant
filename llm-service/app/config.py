@@ -52,6 +52,23 @@ class Settings(BaseSettings):
     # not by version number
     chat_model: str = "gpt-6-luna"
 
+    # ---- query path ----
+    # Shared with the backend. /query trusts the role and department in the request, so it only accepts calls
+    # carrying this token. No default: without it the service refuses to start
+    internal_service_token: str = ""
+    # All the time one query may take. Well above the 3 s target because a single answer was measured at 8 s; the
+    # backend's read timeout has to stay above it
+    query_budget_seconds: float = 12.0
+    query_embedding_timeout_seconds: float = 3.0
+    query_model_timeout_seconds: float = 10.0
+    answer_max_output_tokens: int = 800
+    query_top_k: int = 5
+    # Temporary, from a small measurement on the sample documents; the eval sets the real value
+    query_min_similarity: float = 0.35
+    # A connection is held only for the search, so few are needed. Postgres allows 100 in total
+    query_pool_size: int = 20
+
+    llm_service_host: str = "127.0.0.1"
     llm_service_port: int = 8000
 
     @property

@@ -12,6 +12,12 @@ The project has no login module and uses the lightest possible approach:
 - requests carry an `X-User-Id` header; the backend looks up `department_id` and `role` and forwards them to llm-service
 - upgrading to a simple JWT later would demonstrate real authentication, but that is not the focus now
 
+**llm-service only trusts the backend.** It receives the role and department in the request and believes them, so
+anyone who could reach it could claim to be an executive and read everything, which is worse than forging
+`X-User-Id`. So `/query` requires the shared `INTERNAL_SERVICE_TOKEN` (no token, wrong token or an unset one: `401`), it
+refuses to start without one, and it listens on 127.0.0.1 by default. **When deploying, never expose port 8000**: keep it on a private
+network or behind a firewall where only the backend can reach it.
+
 ### Roles
 
 | role | Who | Department |
@@ -94,11 +100,14 @@ manager's request can only go to the `executive`, who sees every department.
   departments, asking for "department 7's top 10": the default settings return **0 rows** (no error);
   with `SET hnsw.iterative_scan = relaxed_order` (pgvector ≥ 0.8; this project runs 0.8.6) it returns 10,
   and an exact scan (no index) also returns 10. For permission filtering this is not just lower recall:
-  **documents the user is allowed to see don't show up**. Options (pick one when writing the retrieval function):
-  1. `doc_chunks` here has hundreds to a few thousand rows, so **skip the HNSW index and scan exactly**:
-     always correct and fast enough at this size. An index is an optimization for large data, not a necessity
-  2. keep the index and `SET hnsw.iterative_scan = relaxed_order` before searching
-  3. when the data is large enough to need the index, partition the table or use partial indexes per department
+  **documents the user is allowed to see don't show up**. Used: **`SET LOCAL hnsw.iterative_scan = relaxed_order`**
+  (`app/rag/retrieval.py`), with the results sorted again because this mode can return them slightly out of order. The
+  planner still chooses an exact scan by itself when the filter keeps few rows. `test_retrieval.py` forces the index and
+  shows both sides: 0 rows for a small department without the setting, all of them with it. Not chosen:
+  - always scanning exactly, without the index: correct and fast enough at today's size, but it wouldn't hold at scale
+  - partitions or partial indexes per department: for much larger data, and they need changes whenever a department is added
+- A refusal reads the same whether a document exists in another department or not: anything else would tell people
+  what other departments have
 - `campaign_plan` / `campaign_review` documents follow the same filter (their `department` equals their
   campaign's, never `ALL`); they can also be narrowed down to "only this campaign's review" by
   `campaign_id` / `doc_type` through a join with `documents`

@@ -20,7 +20,7 @@ An assistant for live-commerce operations staff. One entry point answers SOP and
 
 **Principle:** the project analyzes content and results with AI; it does not recompute analytics. Clean numbers go in SQL columns, narrative (SOPs, plans, reviews) goes through RAG, and data other teams already computed is uploaded, not calculated here.
 
-**Status:** upload, approval and ingestion are implemented. `/query`, retrieval, reranking, Text-to-SQL, routing, cache and memory are not built yet (`app/sql_agent`, `app/router`, `app/memory` are empty packages).
+**Status:** upload, approval, ingestion and document answers through `/query` are implemented. Reranking, Text-to-SQL, routing, cache and memory are not built yet (`app/sql_agent`, `app/router`, `app/memory` are empty packages).
 
 **Language:** documents and questions are in English. There is no cross-language retrieval.
 
@@ -49,7 +49,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | --- | --- | --- |
 | Backend | Java · Maven wrapper · Spring Boot (webmvc, data-jpa, kafka, actuator) · Lombok and the PostgreSQL driver via Boot | 25 · 3.9.16 · 4.1.1 |
 | LLM service | Python via `uv` · FastAPI · uvicorn · pydantic-settings · python-dotenv | 3.12 · 0.115.6 · 0.34.0 · 2.7.1 · 1.0.1 |
-| Database | `pgvector/pgvector` · Flyway · psycopg (binary) | pg16 · 13.10.3-alpine · 3.2.3 |
+| Database | `pgvector/pgvector` · Flyway · psycopg (binary) · psycopg-pool | pg16 · 13.10.3-alpine · 3.2.3 · 3.3.3 |
 | Messaging | `apache/kafka` (KRaft) · kafka-ui · confluent-kafka | 3.9.0 · v0.7.2 · 2.6.1 |
 | Cache and memory | Redis (running, not wired in yet) | 7-alpine |
 | Models | openai SDK · `text-embedding-3-small` (1536 dimensions) · default chat model `gpt-6-luna` | 3.29.0 |
@@ -70,7 +70,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Python setup | `cd llm-service` · `uv venv` · `uv pip install -r requirements.txt` |
 | Create topics · mock data | `uv run python -m scripts.init_topics` · `uv run python -m scripts.generate_mock_data` |
 | Run backend (:8081) | `cd backend-service` · `.\mvnw.cmd spring-boot:run` |
-| Run consumer · LLM API (:8000) | `uv run python -m app.consumers.upload_consumer` · `uv run uvicorn app.main:app --reload --port 8000` |
+| Run consumer · LLM API (:8000) | `uv run python -m app.consumers.upload_consumer` · `uv run python -m app.server --reload` (not plain `uvicorn`: async psycopg needs the event loop it chooses) |
 | Python tests | `uv run pytest` (database tests use a throwaway database, skipped if Postgres is down) |
 | Java tests: unit and slice · everything | `.\mvnw.cmd test` · `.\mvnw.cmd test "-DexcludedGroups=none"` (needs the compose Postgres) |
 
@@ -86,11 +86,12 @@ backend-service/       Spring Boot: REST API, permissions, approval, outbox rela
   outbox/              OutboxRelay, OutboxScheduler
   user/                CurrentUserArgumentResolver: the only reader of X-User-Id
   campaign/ department/ document/ config/ web/
-llm-service/app/       Python: ingestion now, query path later
+llm-service/app/       Python: ingestion and the query path
   consumers/           consume loop, handlers (documents), data_tables (CSV), storage, events
-  rag/                 parsing/, chunking, document_fields, embeddings, store
-  time_budget.py       one time budget per message
-contracts/             upload-event.examples.json, validated by both test suites
+  rag/                 parsing/, chunking, document_fields, embeddings, store, retrieval, query_models, answering
+  server.py            starts the API; query_api.py: POST /query, for the backend only
+  time_budget.py       one time budget per message or query
+contracts/             upload-event and query examples, validated by both test suites
 db/migration/          Flyway migrations, V1 onwards
 sop_docs/ campaign_docs/ data_tables/    sample uploads
 docs/                  architecture, data-schema, permission-model, development
@@ -100,7 +101,8 @@ Key patterns:
 - **Upload:** one transaction writes the `uploads` row and its `outbox` row; the relay publishes afterwards (`FOR UPDATE SKIP LOCKED`). No request waits for Kafka. An upload waiting for approval has no event.
 - **Consumer:** at least once, so idempotent on `uploads.status`. Three steps: short transaction to claim; no transaction for slow work; short transaction to write, checking the status again under the lock.
 - **Errors:** a `PermanentError` goes straight to the dead-letter topic (retrying gives the same answer); anything else is retried within the time budget. A failed upload records why, naming the row and column for a bad CSV.
-- **Time budget:** every layer shares one budget per message, with SDK retries off. Compute the worst case from every timeout and retry, not just the typical case.
+- **Query path:** async in llm-service, so no blocking call in it; ordinary blocking code in the backend. llm-service trusts the role it is sent, so `/query` requires `X-Internal-Token` and port 8000 must never be exposed. No database connection is held while waiting for a model. An answer needs real citations; anything else is a refusal or an error.
+- **Time budget:** every layer shares one budget per message or query, with SDK retries off. Compute the worst case from every timeout and retry, not just the typical case.
 - **Replacements:** optimistic concurrency. An upload names the version it replaces (`replaces_upload_id`) and is void if that is no longer current. `doc_id` stays stable, `version` goes up.
 - **Data tables:** validate every cell, then replace all of a campaign's rows in one transaction with `COPY`, so `statement_timeout` bounds the load.
 - **HTTP errors:** always `{"error": "..."}`. 401 unknown user, 400 malformed, 403 not yours to touch, 404 unknown id, 409 fine but conflicts with what exists, 413 file too large.
@@ -178,3 +180,4 @@ A new document for one's own department takes effect at once. Replacing anything
 
 - v1 · 2026-11-02 · Arianna · First draft: reply marker, dependency versions, scale requirements.
 - v2 · 2026-11-03 · Arianna · Reranking rule and English-only language premise.
+- v3 · 2026-11-03 · Arianna · The query path: how to start it, its rules and psycopg-pool.

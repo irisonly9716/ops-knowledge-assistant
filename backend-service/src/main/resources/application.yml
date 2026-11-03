@@ -16,6 +16,9 @@ spring:
     password: ${POSTGRES_PASSWORD}
 
   jpa:
+    # Spring Boot's default (true) holds a database connection until the response is written. Measured with /query
+    # waiting 2 s on llm-service: 40 queries took 8.3 s, in batches the size of the pool of 10. With false: 2.3 s.
+    open-in-view: false
     hibernate:
       # The Flyway migrations in db/migration/ are the only source of the schema, hence validate:
       # at startup Hibernate checks that the entities match the tables and fails if they don't,
@@ -62,6 +65,15 @@ document:
   # (In Docker, both containers mount one shared volume and this variable is set to the mount
   #  point; later, with S3, the storageKey in the message stays and only the storage backend changes.)
   upload-dir: ${UPLOAD_DIR:../uploads}
+
+# The query path. The token is shared with llm-service, which trusts the role and department it is sent only from
+# a caller holding it. Empty if unset, so uploads keep working without it and /query answers 503 with the reason.
+llm-service:
+  base-url: ${LLM_SERVICE_URL:http://localhost:8000}
+  internal-token: ${INTERNAL_SERVICE_TOKEN:}
+  connect-timeout-ms: 1000
+  # Above llm-service's budget for one query (12 s), so its own 504 with the reason arrives first
+  read-timeout-ms: 14000
 
 # Transactional outbox: an upload's event is written to the outbox table together with the upload, and
 # OutboxRelay publishes it to Kafka afterwards (see db/migration/V6__outbox.sql)

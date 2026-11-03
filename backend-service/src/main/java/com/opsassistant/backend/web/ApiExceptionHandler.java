@@ -3,6 +3,7 @@ package com.opsassistant.backend.web;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
@@ -22,6 +23,12 @@ public class ApiExceptionHandler {
     public ResponseEntity<Map<String, String>> handle(ResponseStatusException e) {
         return ResponseEntity.status(e.getStatusCode())
                 .body(Map.of("error", String.valueOf(e.getReason())));
+    }
+
+    /** The default answer here has another shape, and it can quote the input back. */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<Map<String, String>> unreadable(HttpMessageNotReadableException e) {
+        return ResponseEntity.badRequest().body(Map.of("error", "the request body is not valid JSON"));
     }
 
     /** Over the limit in application.yml. Thrown while the request is parsed, before any controller runs. */

@@ -100,19 +100,25 @@ class OpenAIEmbedder:
                     dimensions=self.dimensions,
                     timeout=min(self._request_timeout, remaining),
                 )
-            except APIConnectionError as e:   # includes APITimeoutError
-                error, retry_after = e, None
-            except APIStatusError as e:
-                if e.status_code not in RETRYABLE_STATUS and e.status_code < 500:
-                    raise   # 400, 401, 403, 404...: the same request will fail the same way
-                error, retry_after = e, _retry_after_seconds(e.response.headers)
+            except (APIConnectionError, APIStatusError) as error:   # includes APITimeoutError
+                failures += 1
+                wait = retry_wait(error, failures)
+                if wait >= budget.remaining():
+                    raise   # waiting would use up the budget anyway: give up now, with the real reason
+                log.warning("embedding request failed (%s), retry %d in %.1f s", type(error).__name__, failures, wait)
+                self._sleep(wait)
 
-            failures += 1
-            wait = retry_after if retry_after is not None else _backoff_seconds(failures)
-            if wait >= budget.remaining():
-                raise error   # waiting would use up the budget anyway: give up now, with the real reason
-            log.warning("embedding request failed (%s), retry %d in %.1f s", type(error).__name__, failures, wait)
-            self._sleep(wait)
+
+def retry_wait(error: APIConnectionError | APIStatusError, failures: int) -> float:
+    """How long to wait before trying again after this failure, the server's Retry-After first. Raises the error
+    if trying again can't help: after a 400, 401, 403, 404... the same request will fail the same way."""
+    if isinstance(error, APIStatusError):
+        if error.status_code not in RETRYABLE_STATUS and error.status_code < 500:
+            raise error
+        retry_after = _retry_after_seconds(error.response.headers)
+        if retry_after is not None:
+            return retry_after
+    return _backoff_seconds(failures)
 
 
 def _backoff_seconds(failures: int) -> float:

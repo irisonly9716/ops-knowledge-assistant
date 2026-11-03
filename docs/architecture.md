@@ -224,6 +224,20 @@ between the two would keep serving old answers. Relative references are made con
 when a new campaign finishes the key changes; a question that still has one after rewriting skips the cache. The
 TTL is only a safety net.
 
+**What exists today:** the backend's `/query`, the internal token, the search with its department filter, and steps 1
+and 5 for documents, with citations and refusals. Rewriting, cache, routing and Text-to-SQL are still to come. Details
+and measurements: "The query path" in [llm-service/README.md](../llm-service/README.md).
+
+Design decisions so far:
+- **Async in llm-service, blocking in the backend.** Sync FastAPI endpoints get 40 worker threads against 900 queries in
+  flight. Spring keeps ordinary blocking code, because virtual threads remove its limit with one setting.
+- **A connection pool** (`psycopg-pool`, 171 KB). Measured with 300 queries at once: 6,774 per second with no failures,
+  against 44 per second with 108 of 300 failing without one, because Postgres allows 100 connections.
+- **No database connection while waiting for a model**, on either side. In the backend that took switching off
+  `spring.jpa.open-in-view`, whose default limited the whole service to 10 queries in flight.
+- **Time is limited twice in llm-service**: a hard stop that cancels, and a budget the layers consult so a retry that
+  can't fit gives up with the real reason.
+
 ## Ports (local development)
 
 | Service | Port |
@@ -233,7 +247,7 @@ TTL is only a safety net.
 | Kafka | 9092 |
 | Kafka UI | 8080 |
 | backend-service | 8081 |
-| llm-service | 8000 |
+| llm-service | 8000: for the backend only. It trusts the role in the request, so it must never be reachable from outside |
 
 ## Key design decisions
 

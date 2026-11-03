@@ -10,6 +10,7 @@ confluent-kafka==2.6.1
 # ---- mock data + direct Postgres access ----
 faker==33.1.0
 psycopg[binary]==3.2.3
+psycopg-pool==3.3.3   # the query path: 0.4 ms per checkout against 10.7 ms for a new connection; docs/architecture.md
 
 # ---- tests ----
 pytest==9.1.1
