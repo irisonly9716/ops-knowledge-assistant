@@ -22,8 +22,8 @@
 | department_id | bigint FK → departments, nullable | The employee's department. `executive` and `admin` belong to no ops department and must be NULL; `staff` and `manager` must have one (enforced by a CHECK constraint) |
 | role | text | `staff` / `manager` / `executive` / `admin`; what each can do: [permission-model.md](permission-model.md) |
 
-> There is no "host team" level. The assumed scale (1,000 people / 10 departments / 5 teams of 20)
-> implies a team level in the org chart; it was considered and left out. Teams and team-level
+> There is no "host team" level. The required scale (8 departments, 500 people, so about 60 per
+> department) suggests a team level in the org chart; it was considered and left out. Teams and team-level
 > permissions come after department-level permissions work.
 
 ### hosts (livestream hosts)
