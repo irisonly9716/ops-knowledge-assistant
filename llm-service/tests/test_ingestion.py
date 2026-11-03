@@ -6,14 +6,13 @@ database, applies every migration in db/migration/ in order, and drops it at the
 data is never touched. Embeddings come from a fake embedder: no network, no cost.
 """
 import logging
-import re
 import threading
 import uuid
 from decimal import Decimal
 from pathlib import Path
 
-import psycopg
 import pytest
+from postgres_helpers import postgres_available, throwaway_database
 
 from app import db
 from app.consumers import data_tables
@@ -30,34 +29,13 @@ REVIEW = REPO_ROOT / "campaign_docs" / "beauty-black-friday-live-review.md"
 SOP_TITLE = "Account Restriction Handling"
 
 
-def _migration_version(path: Path) -> tuple[int, ...]:
-    return tuple(int(part) for part in re.split(r"[._]", path.name[1:].split("__", 1)[0]))
-
-
-MIGRATIONS = sorted((REPO_ROOT / "db" / "migration").glob("V*__*.sql"), key=_migration_version)
-
-
-def _postgres_available() -> bool:
-    try:
-        with db.connect() as conn:
-            conn.execute("SELECT 1")
-        return True
-    except psycopg.OperationalError:
-        return False
-
-
-pytestmark = pytest.mark.skipif(not _postgres_available(), reason="needs the docker compose Postgres")
+pytestmark = pytest.mark.skipif(not postgres_available(), reason="needs the docker compose Postgres")
 
 
 @pytest.fixture(scope="module")
 def database():
-    name = f"oka_test_{uuid.uuid4().hex[:8]}"
-    with db.connect() as admin:
-        admin.execute(f'CREATE DATABASE "{name}"')
-    try:
+    with throwaway_database() as name:
         with db.connect(name) as conn:
-            for path in MIGRATIONS:
-                conn.execute(path.read_text(encoding="utf-8"))
             conn.execute("INSERT INTO departments (name) VALUES ('Beauty'), ('Fresh Grocery')")
             conn.execute("INSERT INTO users (name, department_id, role) VALUES ('Test Staff', 1, 'staff')")
             conn.execute("INSERT INTO hosts (name, department_id) VALUES ('Tommy Walter', 1)")
@@ -65,9 +43,6 @@ def database():
                             VALUES ('Beauty Black Friday Live', 1, 1, '2025-11-18', '2025-12-14', 'finished'),
                                    ('Beauty Weekly Live', 1, 1, '2026-10-01', '2026-10-31', 'running')""")
         yield name
-    finally:
-        with db.connect() as admin:
-            admin.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
 
 
 @pytest.fixture
@@ -240,7 +215,7 @@ def test_a_failure_in_the_middle_of_the_write_rolls_everything_back(conn, upload
 
     def broken(vector):
         raise RuntimeError("disk full")
-    monkeypatch.setattr(store, "_vector_literal", broken)
+    monkeypatch.setattr(store, "vector_literal", broken)
 
     with pytest.raises(RuntimeError, match="disk full"):
         make_handler()(event)

@@ -126,7 +126,7 @@ def save_document(conn: psycopg.Connection, upload: UploadRow, fields: DocumentF
         cur.executemany(
             """INSERT INTO doc_chunks (doc_id, department, chunk_index, content, embedding, embedding_model, metadata)
                VALUES (%s, %s, %s, %s, %s::vector, %s, %s)""",
-            [(doc_id, fields.department, chunk.index, chunk.content, _vector_literal(vector), embedding_model,
+            [(doc_id, fields.department, chunk.index, chunk.content, vector_literal(vector), embedding_model,
               Jsonb(chunk.metadata())) for chunk, vector in zip(chunks, vectors, strict=True)],
         )
 
@@ -140,7 +140,7 @@ def save_document(conn: psycopg.Connection, upload: UploadRow, fields: DocumentF
     return doc_id, replaced
 
 
-def _vector_literal(vector: Sequence[float]) -> str:
+def vector_literal(vector: Sequence[float]) -> str:
     """pgvector's text format, "[0.1,0.2,...]", cast with ::vector in the SQL. Avoids the pgvector Python
     package, which would pull in numpy for this one conversion."""
     return "[" + ",".join(repr(float(x)) for x in vector) + "]"

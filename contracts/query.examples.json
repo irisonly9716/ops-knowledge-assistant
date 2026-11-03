@@ -1,0 +1,40 @@
+{
+  "requests": [
+    {
+      "question": "How do I handle an account restriction?",
+      "userId": 2,
+      "role": "staff",
+      "department": "Beauty"
+    },
+    {
+      "question": "How do I handle an account restriction?",
+      "userId": 25,
+      "role": "executive",
+      "department": null
+    }
+  ],
+  "responses": {
+    "answered": {
+      "status": "answered",
+      "answer": "Do this [1].",
+      "citations": [
+        {
+          "number": 1,
+          "docId": 3,
+          "docType": "sop",
+          "title": "Account Restriction Handling",
+          "department": "ALL",
+          "headingPath": ["Account Restriction Handling", "Steps"],
+          "score": 0.5183
+        }
+      ],
+      "searchedDepartments": ["Beauty", "ALL"]
+    },
+    "refused": {
+      "status": "refused",
+      "answer": "I couldn't find this in the documents you have access to.",
+      "citations": [],
+      "searchedDepartments": ["Beauty", "ALL"]
+    }
+  }
+}
