@@ -101,6 +101,8 @@ docs/                  architecture, data-schema, permission-model, development
 Key patterns:
 - **Upload:** one transaction writes the `uploads` row and its `outbox` row; the relay publishes afterwards (`FOR UPDATE SKIP LOCKED`). No request waits for Kafka. An upload waiting for approval has no event.
 - **Consumer:** at least once, so idempotent on `uploads.status`. Three steps: short transaction to claim; no transaction for slow work; short transaction to write, checking the status again under the lock.
+- **Delivery count:** `uploads.delivery_count` goes up once per delivery, before any work, because retries in memory die with the process. After 3 deliveries that didn't finish, the next is dead-lettered. Only the consumer writes it, so the backend's entity doesn't map it.
+- **Reconciliation:** `UploadReconciler` decides by the owning group's lag, never by age alone: lag above 0 means the message is still in Kafka, so publish nothing and alert if the position stalls; lag 0 means it is gone, so publish again, at most 3 times. Unknown lag means do nothing.
 - **Errors:** a `PermanentError` goes straight to the dead-letter topic (retrying gives the same answer); anything else is retried within the time budget. A failed upload records why, naming the row and column for a bad CSV.
 - **Query path:** async in llm-service, so no blocking call in it; ordinary blocking code in the backend. llm-service trusts the role it is sent, so `/query` requires `X-Internal-Token` and port 8000 must never be exposed. No database connection is held while waiting for a model. An answer needs real citations; anything else is a refusal or an error.
 - **Time budget:** every layer shares one budget per message or query, with SDK retries off. Compute the worst case from every timeout and retry, not just the typical case.
@@ -186,3 +188,4 @@ A new document for one's own department takes effect at once. Replacing anything
 - v3 · 2026-11-03 · Arianna · The query path: how to start it, its rules and psycopg-pool.
 - v4 · 2026-11-03 · Arianna · Say where 300 QPS comes from; state the relay's row locks as an exception to the rule on locks across network calls.
 - v5 · 2026-11-03 · Arianna · Commits are authored as Arianna Ge; don't rerun tests to answer a question.
+- v6 · 2026-11-03 · Arianna · The delivery count and the reconciliation job.

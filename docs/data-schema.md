@@ -2,7 +2,8 @@
 
 > The actual DDL lives in the Flyway migrations under [db/migration/](../db/migration/) (V1 pgvector, V2 base
 > schema, V3 uploads / roles / chunk department, V4 the `document_catalog` view, V5 its `catalog_entry()` function,
-> V6 the `outbox` table, V7 `documents.version` and `uploads.category`), applied in
+> V6 the `outbox` table, V7 `documents.version` and `uploads.category`, V8 the delivery and republish counts on
+> `uploads`), applied in
 > version order (this document explains them; the SQL files are authoritative for column types).
 > The data is mock data generated with Python + Faker (see `llm-service/scripts/generate_mock_data.py`).
 
@@ -253,6 +254,7 @@ both pipelines (documents and data tables). Who moves the status:
 | `pending_approval` → `received` / `rejected` | backend | the reviewer's decision; approving writes the outbox row in the same transaction |
 | `processing` → `done` | consumer | in the same transaction that writes `documents` + `doc_chunks`, or the table rows |
 | `processing` → `failed` | consumer | the message was dead-lettered; `error` holds the reason |
+| `received` / `processing` → `failed` | backend | the reconciliation job gave up after publishing it again 3 times |
 
 `done` is also the consumer's deduplication record: a message for an upload that is already `done` is skipped.
 
@@ -272,6 +274,8 @@ both pipelines (documents and data tables). Who moves the status:
 | error | text | failure reason |
 | reviewed_by / reviewed_at / review_comment | | reviewer, review time, review comment. The reviewer can't be the uploader (enforced by a CHECK constraint) |
 | created_at / updated_at | timestamptz | |
+| delivery_count | int | deliveries that started without finishing, written before any work and reset on `done` or `failed`. In the database because it has to survive the process dying. Only the consumer writes it: the backend's entity deliberately doesn't map it |
+| republish_count / last_republished_at | int / timestamptz | how often the reconciliation job published the event again, and when. See "Reconciliation" in [architecture.md](architecture.md) |
 
 ```
 no approval needed:                      received -> processing -> done / failed

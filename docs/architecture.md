@@ -132,6 +132,34 @@ down; the batch stops at the first failure so messages keep their order.
 Not chosen: change data capture (Debezium reads the database log; it needs a Kafka Connect deployment, more
 infrastructure than this project warrants), and publishing first and recording afterwards (the same gap, mirrored).
 
+**Reconciliation: checking what really happened.** The outbox guarantees that an event gets published. It can't
+guarantee what comes after: a broker can lose its disk, or a message can reach the dead-letter topic while recording
+`failed` doesn't succeed. Either way the upload stays unfinished, with nothing left to move it. So a job in the backend
+(`UploadReconciler`, every minute) looks at unfinished uploads with no activity for 5 minutes and decides by the lag of
+the consumer group that owns their kind, not by their age:
+
+| What it finds | What it means | What it does |
+|---|---|---|
+| The event is still unpublished in the outbox | Waiting to be sent, not stuck | Nothing |
+| Lag above 0, the position moving | A backlog: a message is still in Kafka | Nothing |
+| Lag above 0, the position still for 10 minutes | The consumer is dead or stuck | An error in the log, publishes nothing |
+| Lag 0 | Nothing is waiting or in flight, so the message is gone | Publishes the event again through the outbox, at most 3 times, then marks it `failed` |
+| Kafka doesn't answer | Nobody can say that a message is gone | Nothing |
+
+Age alone can't decide this, because `received` includes queueing: during an embedding API outage on one partition,
+everything behind the first message looks stuck, and publishing all of it again would double the backlog at the worst
+moment. Lag 0 is a reliable signal because a message being processed isn't committed yet. Publishing twice is harmless,
+because the consumer is idempotent, and that is what makes this safe when two backend instances run it at once.
+The alert is an error in the log; turning it into a page depends on where this is deployed.
+
+**A file that kills the consumer.** The consumer's retry count lives in memory, so a file that kills the process (out of
+memory, a crash in a parsing library) comes back with a fresh count after every restart, never reaches the dead-letter
+topic, and on one partition blocks everything behind it. So `uploads.delivery_count` goes up in the database once per
+delivery, before any work. After 3 deliveries that didn't finish, the next one goes to the dead-letter topic and the
+upload is marked `failed`. It counts deliveries and not retries, because one delivery normally retries 3 times. It
+starts over when an upload ends in `done` or `failed`, so replaying from the dead-letter topic isn't refused. It isn't
+limited to 1, because a restart during normal work costs a delivery too.
+
 **② Structured tables** (product sales and customer behavior tables uploaded by ops as CSV exports) -- not
 chunked, not embedded; validated and loaded straight into structured rows, queried with Text-to-SQL:
 
