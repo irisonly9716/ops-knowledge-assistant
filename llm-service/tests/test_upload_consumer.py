@@ -15,6 +15,7 @@ import pytest
 from confluent_kafka import KafkaError, KafkaException
 
 from app.config import Settings
+from app.consumers import upload_consumer
 from app.consumers.errors import PermanentError
 from app.consumers.upload_consumer import UploadConsumer, check_time_budget, parse_event
 
@@ -431,3 +432,82 @@ def test_parse_event_tolerates_a_utf8_bom():
 
 def test_the_dlq_topic_name_is_derived_from_the_main_topic():
     assert Settings(doc_upload_topic="foo").doc_upload_dlq_topic == "foo.dlq"
+
+
+# ------------------------------------------------------------------ the delivery count
+
+
+def test_a_delivery_is_recorded_once_however_many_retries_it_takes(calls):
+    deliveries, tries = [], []
+
+    def handler(event, budget):
+        tries.append(event.upload_id)
+        if len(tries) < 3:
+            raise RuntimeError("temporary")
+    worker, _, _ = make(calls, [FakeMessage(VALID)], handler, on_delivery=deliveries.append)
+    assert worker.poll_once(0.1)
+    assert len(tries) == 3
+    assert len(deliveries) == 1
+
+
+def test_the_delivery_is_recorded_before_any_work_starts(calls):
+    order = []
+    worker, _, _ = make(calls, [FakeMessage(VALID)], lambda event, budget: order.append("work"),
+                  on_delivery=lambda event: order.append("recorded"))
+    worker.poll_once(0.1)
+    assert order == ["recorded", "work"]
+
+
+def test_too_many_deliveries_goes_straight_to_the_dead_letter_topic_without_any_work(calls):
+    tries, failures = [], []
+
+    def over_the_limit(event):
+        raise PermanentError("delivered 4 times without finishing")
+    worker, _, _ = make(calls, [FakeMessage(VALID)], lambda event, budget: tries.append(event), on_delivery=over_the_limit,
+                  on_failure=lambda event, reason: failures.append(reason))
+    worker.poll_once(0.1)
+    assert tries == []
+    assert failures == ["delivered 4 times without finishing"]
+    assert [call[0] for call in calls if call[0] in ("dlq", "commit")] == ["dlq", "commit"]
+
+
+def test_if_recording_fails_it_is_retried_like_the_work_and_recorded_once(calls):
+    recorded, worked = [], []
+
+    def flaky(event):
+        recorded.append(event)
+        if len(recorded) == 1:
+            raise RuntimeError("database away")
+    worker, _, _ = make(calls, [FakeMessage(VALID)], lambda event, budget: worked.append(event), on_delivery=flaky)
+    worker.poll_once(0.1)
+    assert len(recorded) == 2
+    assert len(worked) == 1
+
+
+def test_a_message_that_can_not_be_parsed_records_no_delivery(calls):
+    deliveries = []
+    worker, _, _ = make(calls, [FakeMessage(b"not json")], lambda event, budget: None, on_delivery=deliveries.append)
+    worker.poll_once(0.1)
+    assert deliveries == []
+
+
+def test_the_real_entry_point_wires_in_the_delivery_count_and_the_failure_record(monkeypatch):
+    """Without this the count could be switched off by dropping one argument, and every other test would still pass."""
+    seen = {}
+
+    class RecordingConsumer:
+        def __init__(self, consumer, producer, handler, **kwargs):
+            seen.update(kwargs, handler=handler)
+
+        def run(self, stop):
+            pass
+    monkeypatch.setattr(upload_consumer, "UploadConsumer", RecordingConsumer)
+    monkeypatch.setattr(upload_consumer, "Consumer", lambda config: None)
+    monkeypatch.setattr(upload_consumer, "Producer", lambda config: None)
+    monkeypatch.setattr(upload_consumer, "openai_embedder_from_settings", lambda: None)
+    monkeypatch.setattr(upload_consumer.signal, "signal", lambda *args: None)
+
+    upload_consumer.main()
+
+    assert seen["on_delivery"] == seen["handler"].record_delivery
+    assert seen["on_failure"] == seen["handler"].mark_failed

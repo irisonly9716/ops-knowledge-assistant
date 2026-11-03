@@ -46,6 +46,8 @@ log = logging.getLogger("upload_consumer")
 Handler = Callable[[UploadEvent, TimeBudget], None]
 # Called with the event and the reason once a message has been dead-lettered (to record the failure)
 FailureCallback = Callable[[UploadEvent, str], None]
+# Called once per delivery before any work, not once per retry; a PermanentError dead-letters the message
+DeliveryCallback = Callable[[UploadEvent], None]
 
 
 # What can still run after a message's budget is used up: the dead-letter write (flush waits up to 10 s),
@@ -101,6 +103,7 @@ class UploadConsumer:
         backoff_seconds: float = 0.5,
         message_budget_seconds: float = 200.0,
         on_failure: FailureCallback | None = None,
+        on_delivery: DeliveryCallback | None = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -113,6 +116,7 @@ class UploadConsumer:
         self._backoff = backoff_seconds
         self._message_budget = message_budget_seconds
         self._on_failure = on_failure
+        self._on_delivery = on_delivery
         self._sleep = sleep
         self._clock = clock
 
@@ -163,9 +167,13 @@ class UploadConsumer:
         budget = TimeBudget(self._message_budget, clock=self._clock)
         last_error = "unknown error"
         attempts = 0
+        delivery_recorded = self._on_delivery is None
         for attempt in range(1, self._max_attempts + 1):
             attempts = attempt
             try:
+                if not delivery_recorded:   # inside the retries: if the database is away, this fails like the work would
+                    self._on_delivery(event)
+                    delivery_recorded = True
                 self._handler(event, budget)
             except PermanentError as e:
                 log.error("upload_id=%s failed permanently, dead-lettering: %s", event.upload_id, e)
@@ -269,10 +277,10 @@ def main() -> None:
     })
     producer = Producer({"bootstrap.servers": settings.kafka_bootstrap_servers})
     # Fails right here if OPENAI_API_KEY is missing: better at startup than on the first message
-    handler = UploadHandler(openai_embedder_from_settings())
+    handler = UploadHandler(openai_embedder_from_settings(), max_deliveries=settings.doc_consumer_max_deliveries)
 
     worker = UploadConsumer(
-        consumer, producer, handler, on_failure=handler.mark_failed,
+        consumer, producer, handler, on_failure=handler.mark_failed, on_delivery=handler.record_delivery,
         topic=settings.doc_upload_topic,
         dlq_topic=settings.doc_upload_dlq_topic,
         max_attempts=settings.doc_consumer_max_attempts,

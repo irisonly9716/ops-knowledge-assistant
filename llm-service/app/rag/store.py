@@ -63,15 +63,35 @@ def lock_upload(conn: psycopg.Connection, upload_id: str) -> UploadRow | None:
 
 
 def set_status(conn: psycopg.Connection, upload_id: str, status: str, error: str | None = None) -> None:
-    conn.execute("UPDATE uploads SET status = %s, error = %s, updated_at = now() WHERE upload_id = %s",
-                 (status, error, upload_id))
+    # done is an orderly end, so the count of deliveries that didn't finish starts over
+    conn.execute(
+        """UPDATE uploads SET status = %(status)s, error = %(error)s, updated_at = now(),
+                  delivery_count = CASE WHEN %(status)s::text = 'done' THEN 0 ELSE delivery_count END
+           WHERE upload_id = %(upload_id)s""",
+        {"status": status, "error": error, "upload_id": upload_id},
+    )
+
+
+def record_delivery(conn: psycopg.Connection, upload_id: str) -> int | None:
+    """Counts one delivery of an upload that is on its way and returns the new count; None for any other upload
+    (a duplicate of a finished one, one still waiting for approval, no such row). In the database and before any
+    work starts, because the case that matters is the process dying: a count in memory would start over."""
+    row = conn.execute(
+        """UPDATE uploads SET delivery_count = delivery_count + 1
+           WHERE upload_id = %s AND status IN ('received', 'processing', 'failed')
+           RETURNING delivery_count""",
+        (upload_id,),
+    ).fetchone()
+    return row[0] if row else None
 
 
 def mark_failed(conn: psycopg.Connection, upload_id: str, error: str) -> None:
     # Only an upload that was on its way can fail. A done upload stays done (a late duplicate failing
     # must not undo it); pending_approval / rejected were never meant to be processed.
+    # Failing is an orderly end too: the count starts over, or replaying the message from the dead-letter topic
+    # would be refused as if the process had kept dying on it.
     conn.execute(
-        """UPDATE uploads SET status = 'failed', error = %s, updated_at = now()
+        """UPDATE uploads SET status = 'failed', error = %s, updated_at = now(), delivery_count = 0
            WHERE upload_id = %s AND status IN ('received', 'processing', 'failed')""",
         (error, upload_id),
     )

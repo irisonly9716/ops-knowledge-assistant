@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # How many times to try a failing message (including the first try) before it goes to
     # the dead-letter topic
     doc_consumer_max_attempts: int = 3
+    # How many deliveries of one upload may start without finishing before it goes to the dead-letter topic. Not
+    # the retries above: those are counted in memory and start over if the process dies
+    doc_consumer_max_deliveries: int = 3
     # Wait before a retry: after the n-th failure wait backoff * 2^(n-1) seconds (exponential backoff)
     doc_consumer_backoff_seconds: float = 0.5
     # Longest a consumer may go between two polls; past it Kafka hands its partition to another member,
