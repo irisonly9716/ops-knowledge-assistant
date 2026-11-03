@@ -135,7 +135,7 @@ A campaign may involve several departments. Two options; the simple one first:
 ## 6. No permissions at the host level for now
 
 `campaigns.host_id` / `documents.campaign_id -> campaigns.host_id` only **trace** which host a campaign,
-plan or review belongs to; they are not a permission dimension. The assumed scale (1,000 people / 10
-departments / 5 teams of 20) implies a host-team level in the org chart. Finer permissions such as
+plan or review belongs to; they are not a permission dimension. The required scale (8 departments, 500
+people, so about 60 per department) suggests a host-team level in the org chart. Finer permissions such as
 "team leads see only their team" were considered and left out: department-level permissions come first
 and are validated end to end; the team level can come later and is out of scope for now.

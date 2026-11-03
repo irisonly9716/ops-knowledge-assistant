@@ -35,6 +35,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Latency per query | 3 s | 3 s |
 | Queries in flight (QPS × latency) | 900 | 1,500 |
 
+- **Where 300 QPS comes from:** half of the 500 staff sending in the same second (250), plus 20% headroom. It is a burst, not a sustained rate: people wait for an answer before asking again.
 - **Rate limit:** designed for the 300 QPS peak; above it, `429` with `Retry-After`.
 - **Model concurrency:** sized for the peak (900 across all instances) and configurable. Development sets a low value in `.env` because those tests are paid for privately; that value is never a production default or evidence for sizing.
 - **Reranking:** only sees chunks that passed the department filter and counts toward the 3 s; on a timeout or an error, fall back to vector order. It is on by default unless the eval shows no gain or it breaks the 3 s budget: then it stays in the code, is switched off in config, and the numbers go in the report.
@@ -126,6 +127,7 @@ Key patterns:
 - **Mutation checks:** put each bug back on purpose and watch its test fail. First prove the baseline passes, and count only a named failing test; a compile error or a tool that didn't run proves nothing.
 - **End to end:** anything crossing a process needs a real run with the backend, Kafka, consumer and Postgres; slice tests can't see Tomcat or the network.
 - **Measure before deciding** (size, time, memory), compare alternatives fairly, and report worst cases.
+- **Don't rerun to answer a question.** Results from before a merge stay valid until that code changes, and rerunning costs tokens: cite the earlier result and when it ran. If the code changed since, or no earlier run covers the question, answer from the code, say it wasn't run, and ask before running anything.
 - Never weaken, skip or delete a test to make it pass. If a test looks wrong, say so.
 
 ## 2. References
@@ -149,6 +151,7 @@ A new document for one's own department takes effect at once. Replacing anything
 
 - One branch per change, from up-to-date `master` or stacked on the branch it needs; descriptive names such as `upload-permissions`.
 - Commits: `type: summary` (`feat`, `fix`, `docs`, `test`, `chore`), imperative, with a body explaining why. A commit made by an agent ends with that agent's `Co-Authored-By` line; a PR body ends with its generated-with line.
+- **Author:** every commit is authored as Arianna Ge, including commits made by an agent (`user.name` in this repo's git config).
 - Reference issues with `Closes #N` in the commit or PR that finishes them.
 - Merge with a merge commit, never squash. Never enable auto-merge unless asked.
 - **Never push, open or merge a PR, deploy or spend cloud money without Arianna's approval for that action.** Arianna usually pushes through GitHub Desktop.
@@ -165,7 +168,7 @@ A new document for one's own department takes effect at once. Replacing anything
 
 **Don't**
 - Don't read `X-User-Id` outside `CurrentUserArgumentResolver`, or trust a department, role or user id from a request.
-- Don't call Kafka from a request, or hold a database lock across a network call.
+- Don't call Kafka from a request, or hold a database lock across a network call. One deliberate exception: `OutboxRelay` holds its row locks while sending, so a second instance can't publish the same rows; each send is bounded by the producer timeouts and a batch stops at the first failure.
 - Don't add unbounded waits or hidden retries: every timeout and retry goes into the worst case.
 - Don't use floats for money or amounts in the database path: columns are `NUMERIC`, Python uses `Decimal`.
 - Don't stop or uninstall a native Postgres service on a developer's machine.
@@ -181,3 +184,5 @@ A new document for one's own department takes effect at once. Replacing anything
 - v1 · 2026-11-02 · Arianna · First draft: reply marker, dependency versions, scale requirements.
 - v2 · 2026-11-03 · Arianna · Reranking rule and English-only language premise.
 - v3 · 2026-11-03 · Arianna · The query path: how to start it, its rules and psycopg-pool.
+- v4 · 2026-11-03 · Arianna · Say where 300 QPS comes from; state the relay's row locks as an exception to the rule on locks across network calls.
+- v5 · 2026-11-03 · Arianna · Commits are authored as Arianna Ge; don't rerun tests to answer a question.
