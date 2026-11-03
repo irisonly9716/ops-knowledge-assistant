@@ -30,7 +30,9 @@ public class Upload {
 
     public static final String PENDING_APPROVAL = "pending_approval";
     public static final String RECEIVED = "received";
+    public static final String PROCESSING = "processing";
     public static final String DONE = "done";
+    public static final String FAILED = "failed";
     public static final String REJECTED = "rejected";
 
     @Id
@@ -55,6 +57,10 @@ public class Upload {
     private String reviewComment;
     private Instant createdAt;
     private Instant updatedAt;
+    private int republishCount;
+    private Instant lastRepublishedAt;
+    // uploads.delivery_count is deliberately not mapped. The consumer writes it, and saving this entity writes every
+    // mapped column, so a mapped copy could overwrite a count that went up in the meantime.
 
     /** Moves the upload to another status and records why (error may be null). */
     public void changeStatus(String newStatus, String newError) {
@@ -73,5 +79,20 @@ public class Upload {
 
     public boolean isPendingApproval() {
         return PENDING_APPROVAL.equals(status);
+    }
+
+    /** On its way through the consumer: it has an event and hasn't ended yet. */
+    public boolean isOnItsWay() {
+        return RECEIVED.equals(status) || PROCESSING.equals(status);
+    }
+
+    /** When this upload last showed any sign of moving. */
+    public Instant lastActivity() {
+        return lastRepublishedAt != null ? lastRepublishedAt : updatedAt;
+    }
+
+    public void recordRepublish(Instant at) {
+        republishCount++;
+        lastRepublishedAt = at;
     }
 }
