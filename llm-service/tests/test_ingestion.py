@@ -303,6 +303,90 @@ def test_an_upload_waiting_for_approval_is_not_processed_and_stays_waiting(conn,
 
 
 # ---------------------------------------------------------------------------
+# The delivery count: it has to survive the process
+# ---------------------------------------------------------------------------
+
+
+def _deliveries(conn, event) -> int:
+    return conn.execute("SELECT delivery_count FROM uploads WHERE upload_id = %s", (event.upload_id,)).fetchone()[0]
+
+
+def test_deliveries_are_counted_in_the_database_so_a_new_process_continues_the_count(conn, upload, make_handler):
+    event = upload(SOP)
+    for expected in (1, 2, 3):
+        make_handler().record_delivery(event)   # a new handler each time: nothing can be kept in memory
+        assert _deliveries(conn, event) == expected
+
+
+def test_the_fourth_delivery_without_finishing_is_refused(conn, upload, make_handler):
+    event = upload(SOP)
+    for _ in range(3):
+        make_handler().record_delivery(event)
+    with pytest.raises(PermanentError, match="delivered 4 times"):
+        make_handler().record_delivery(event)
+
+
+def test_a_finished_upload_starts_the_count_over(conn, upload, make_handler):
+    event = upload(SOP)
+    handler = make_handler()
+    handler.record_delivery(event)
+    handler(event)
+    assert _status(conn, event)[0] == "done"
+    assert _deliveries(conn, event) == 0
+
+
+def test_a_finished_table_starts_the_count_over_too(conn, table_upload, make_handler):
+    event = table_upload(PRODUCTS_HEADER + SERUM)
+    handler = make_handler()
+    handler.record_delivery(event)
+    handler(event)
+    assert _status(conn, event)[0] == "done"
+    assert _deliveries(conn, event) == 0
+
+
+def test_a_failed_upload_starts_the_count_over_so_a_replay_is_not_refused(conn, upload, make_handler):
+    event = upload(SOP)
+    handler = make_handler()
+    for _ in range(3):
+        handler.record_delivery(event)
+    handler.mark_failed(event, "reason")
+    assert _deliveries(conn, event) == 0
+    handler.record_delivery(event)                 # the replay
+    handler(event)
+    assert _status(conn, event)[0] == "done"
+
+
+def test_starting_to_process_does_not_start_the_count_over(conn, upload, make_handler):
+    event = upload(SOP)
+    handler = make_handler(FakeEmbedder(error=RuntimeError("away")))
+    handler.record_delivery(event)
+    with pytest.raises(RuntimeError):
+        handler(event)                             # it reached processing, and the process could die here
+    assert _status(conn, event)[0] == "processing"
+    assert _deliveries(conn, event) == 1
+
+
+@pytest.mark.parametrize("status", ["done", "pending_approval", "rejected"])
+def test_an_upload_that_is_not_on_its_way_is_not_counted(conn, upload, make_handler, status):
+    event = upload(SOP, status=status)
+    make_handler().record_delivery(event)
+    assert _deliveries(conn, event) == 0
+
+
+def test_a_message_without_an_uploads_row_is_not_an_error_here(make_handler):
+    make_handler().record_delivery(UploadEvent(upload_id=str(uuid.uuid4()), storage_key="x.md", content_kind="document",
+                                               doc_type="sop", table_type=None, department="ALL", campaign_id=None,
+                                               category=None, source="manual"))
+
+
+def test_a_broken_upload_id_is_a_permanent_error(make_handler):
+    with pytest.raises(PermanentError, match="not a UUID"):
+        make_handler().record_delivery(UploadEvent(upload_id="nonsense", storage_key="x.md", content_kind="document",
+                                                   doc_type="sop", table_type=None, department="ALL", campaign_id=None,
+                                                   category=None, source="manual"))
+
+
+# ---------------------------------------------------------------------------
 # Data tables
 # ---------------------------------------------------------------------------
 

@@ -10,6 +10,7 @@ import com.opsassistant.backend.outbox.OutboxMessage;
 import com.opsassistant.backend.outbox.OutboxRepository;
 import com.opsassistant.backend.user.User;
 import com.opsassistant.backend.user.UserRepository;
+import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -227,6 +228,35 @@ public class UploadService {
         }
         // A new ALL document: nobody may have created the same one while it waited
         return documentRepository.findSop(upload.getDepartment(), upload.getTitle()).isEmpty();
+    }
+
+    // ------------------------------------------------------------------ reconciliation
+
+    /** What republishIfStuck did. */
+    public enum Republish { REPUBLISHED, GAVE_UP, NOTHING_TO_DO }
+
+    /**
+     * Publishes an upload's event again, once the reconciliation job has concluded that its message is gone. Checks
+     * again under the row lock, because the upload may have moved on since the job looked, and a second backend
+     * instance may be doing the same. Publishing twice would be safe anyway, as the consumer is idempotent. Stops
+     * at the limit: an upload that keeps getting stuck needs a person, and failed with a reason gets one's attention.
+     */
+    @Transactional
+    public Republish republishIfStuck(UUID uploadId, Instant cutoff, int maxRepublishes) {
+        Upload upload = uploadRepository.lockById(uploadId).orElse(null);
+        if (upload == null || !upload.isOnItsWay() || !upload.lastActivity().isBefore(cutoff)) {
+            return Republish.NOTHING_TO_DO;
+        }
+        if (upload.getRepublishCount() >= maxRepublishes) {
+            upload.changeStatus(Upload.FAILED, "not finished after being published again " + maxRepublishes
+                    + " times; was " + upload.getStatus() + " with no message left in Kafka");
+            uploadRepository.save(upload);
+            return Republish.GAVE_UP;
+        }
+        upload.recordRepublish(Instant.now());
+        uploadRepository.save(upload);
+        enqueueEvent(upload);
+        return Republish.REPUBLISHED;
     }
 
     // ------------------------------------------------------------------ status

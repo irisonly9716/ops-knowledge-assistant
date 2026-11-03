@@ -225,6 +225,22 @@ drift tests catch it when they aren't).
 - a send that fails, times out or is interrupted is a retry, never a lost message; a duplicate it may cause is
   skipped by the consumer
 
+### Reconciliation job
+
+`UploadReconciler` (every minute, `reconciliation.*` in `application.yml`) looks at uploads in `received` or `processing`
+with no activity for 5 minutes and no event waiting in the outbox, and asks Kafka for the lag of the consumer group that
+owns their kind:
+
+- **lag above 0:** the message is still in Kafka, so it publishes nothing. If the group's position hasn't moved for 10
+  minutes it logs an error: the consumer is dead or stuck. That limit exceeds the longest one message can take (260 s)
+- **lag 0:** the message is gone, or it was dead-lettered and recording `failed` didn't succeed. It publishes the event
+  again through the outbox, at most 3 times, then marks the upload `failed` with the reason
+- **Kafka doesn't answer:** it does nothing, because without the lag nobody can say that a message is gone
+
+Why, and what wasn't chosen: "Reconciliation" in [docs/architecture.md](../docs/architecture.md). `DOC_CONSUMER_GROUP` has to
+match llm-service; both default to the same name. A second consumer only needs its own group in
+`reconciliation.data-table-consumer-group`. A Kafka client is created per check, so nothing connects while nothing is stuck.
+
 `campaignId` is **not** an enum: it is business data (a new campaign can appear any day), not a fixed set of
 values baked into the schema. It is checked against the real table instead (`CampaignRepository.findById`);
 an unknown one gets 400.
@@ -240,7 +256,7 @@ consumer running it moves on to `done`), or read the message with `llm-service/s
 ## Tests
 
 ```bash
-.\mvnw.cmd test                                                # default: 187 unit/slice tests, no Docker needed, a few seconds
+.\mvnw.cmd test                                                # default: 201 unit/slice tests, no Docker needed, a few seconds
 .\mvnw.cmd test -DexcludedGroups=none -Dgroups=integration     # integration tests: need the docker compose Postgres
 .\mvnw.cmd test -Dtest=UploadControllerTest                    # one class only
 ```
@@ -258,6 +274,8 @@ consumer running it moves on to `done`), or read the message with `llm-service/s
 | `OutboxRelayTest` (7) | plain unit | publishing in order and marking; every Kafka failure (send throws Kafka's own `TimeoutException`, failed future, no acknowledgement in time, interruption) is recorded, stops the batch and is retried later |
 | `OutboxSchedulerTest` (5) | plain unit | draining a backlog, exponential backoff capped at the maximum, reset after success, retention cleanup |
 | `UploadEventContractTest` (1) | contract | every example in `contracts/upload-event.examples.json`, deserialized and re-serialized by Java, must equal the original |
+| `UploadReconcilerTest` (14) | plain unit | the job's decisions with a fake lag and a hand-driven clock: a backlog publishes nothing, a position that stops moving raises an alert, lag 0 publishes again, unknown lag does nothing, each kind uses its own group |
+| `ReconciliationIntegrationTest` (16) | integration, `@Tag("integration")` | real Postgres: which rows count as stuck, what publishing again writes, the limit. Real broker: the lag means what the decisions assume. Skips that part if Kafka isn't running |
 | `OutboxIntegrationTest` (4) | integration, `@Tag("integration")` | real Postgres: **the upload and its event commit together, and a failed outbox write leaves no upload behind**; the relay marks rows; a row locked by another relay is skipped, not waited for |
 | `UploadFlowIntegrationTest` (12) | integration, `@Tag("integration")` | whole requests against real Postgres: what the slices fake. The SOP natural key (case, spaces, Unicode forms, per department), the approval queues, what each decision commits, a void approval surviving as a commit with a `409` answer, data table versions, the campaign search |
 | `QueryConnectionIntegrationTest` (1) | integration, `@Tag("integration")` | waiting for llm-service holds no database connection: 6 queries at once on a pool of 2 |
@@ -271,7 +289,8 @@ Notes:
 - The integration tests run against the development database. They only touch rows they create and delete them
   afterwards, and `OutboxIntegrationTest` refuses to run while real messages wait in the outbox (its relay would
   mark them published without really sending them). The scheduler is switched off in tests
-  (`outbox.relay.enabled=false`); they call the relay directly
+  (`outbox.relay.enabled=false`); they call the relay directly. The reconciliation job is off in all tests
+  (`src/test/resources/config/application.properties`), so it can't act on development data while they run
 - The upload folder and the relay's send timeout are settings, so tests point at a temporary folder and cut
   15 seconds to 300 ms. Hard-coded paths and timeouts would have made the code untestable
 - Spring Boot 4 moved the test classes: `@WebMvcTest` is in

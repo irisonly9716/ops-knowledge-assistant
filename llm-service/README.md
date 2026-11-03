@@ -173,6 +173,7 @@ Behavior (design reasons in [docs/architecture.md](../docs/architecture.md)):
 - any other exception → exponential backoff (at most 3 attempts = first try + 2 retries, waiting 0.5 s, 1 s, while the message's time budget lasts), then the dead-letter topic; dead letters carry the failure reason, attempt count and source offset
 - dead-letter write fails → no commit, and the process crashes (better to stop than to lose a message)
 - once a message is dead-lettered, its upload is marked `failed` with the reason
+- each delivery is counted in `uploads.delivery_count` before any work: the retries above live in memory and start over if the process dies, so a file that kills the process would otherwise come back forever. After 3 deliveries that didn't finish, the next one is dead-lettered (`doc_consumer_max_deliveries`). The count starts over on `done` or `failed`, so a replay from the dead-letter topic isn't refused
 - after being killed hard, a restarted consumer waits for the old member's **session timeout** (about 45 seconds) before taking over the partitions; a graceful Ctrl+C hands over immediately
 
 To check the consumer without the Java backend: `uv run python -m scripts.kafka_producer_test`

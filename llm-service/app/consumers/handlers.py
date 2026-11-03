@@ -49,10 +49,24 @@ TABLE_WRITE_WORST_CASE_SECONDS = 2 * db.LOCK_TIMEOUT_SECONDS + 2 * db.STATEMENT_
 
 class UploadHandler:
     def __init__(self, embedder: Embedder, *, connect: Callable[[], psycopg.Connection] = db.connect,
-                 upload_dir: str | Path | None = None) -> None:
+                 upload_dir: str | Path | None = None, max_deliveries: int = 3) -> None:
         self._embedder = embedder
         self._connect = connect
         self._upload_dir = upload_dir
+        self._max_deliveries = max_deliveries
+
+    def record_delivery(self, event: UploadEvent) -> None:
+        """Called once per delivery, before any work, not once per retry. A file that keeps killing the process
+        (out of memory, a crash in a parsing library) never reaches the consumer's retry limit, because that
+        count dies with the process. This one doesn't, so such a file ends in the dead-letter topic instead of
+        coming back forever and blocking everything behind it on the partition. The limit isn't 1, because a
+        restart during normal work costs a delivery too."""
+        upload_id = _checked_uuid(event.upload_id)
+        with self._connect() as conn:
+            deliveries = store.record_delivery(conn, upload_id)
+        if deliveries is not None and deliveries > self._max_deliveries:
+            raise PermanentError(f"delivered {deliveries} times without finishing, so the process may be dying on "
+                                 f"this file; giving up (limit {self._max_deliveries})")
 
     def __call__(self, event: UploadEvent, budget: TimeBudget | None = None) -> None:
         upload_id = _checked_uuid(event.upload_id)

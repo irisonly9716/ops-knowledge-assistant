@@ -1,6 +1,7 @@
 package com.opsassistant.backend.upload;
 
 import jakarta.persistence.LockModeType;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -15,6 +16,21 @@ public interface UploadRepository extends JpaRepository<Upload, UUID> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT u FROM Upload u WHERE u.uploadId = :uploadId")
     Optional<Upload> lockById(@Param("uploadId") UUID uploadId);
+
+    /**
+     * Uploads on their way that have shown no activity since the cutoff, oldest first. An upload whose event is
+     * still waiting in the outbox isn't stuck, only not sent yet; pending_approval has no event at all.
+     */
+    @Query(value = """
+            SELECT u.* FROM uploads u
+            WHERE u.status IN ('received', 'processing')
+              AND COALESCE(u.last_republished_at, u.updated_at) < :cutoff
+              AND NOT EXISTS (SELECT 1 FROM outbox o
+                              WHERE o.message_key = CAST(u.upload_id AS text) AND o.published_at IS NULL)
+            ORDER BY u.updated_at
+            LIMIT :limit
+            """, nativeQuery = true)
+    List<Upload> findStuck(@Param("cutoff") Instant cutoff, @Param("limit") int limit);
 
     /** Waiting uploads of the staff of one department: what that department's manager has to decide. */
     @Query("""

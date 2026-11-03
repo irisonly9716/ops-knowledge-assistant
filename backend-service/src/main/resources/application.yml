@@ -66,6 +66,21 @@ document:
   #  point; later, with S3, the storageKey in the message stays and only the storage backend changes.)
   upload-dir: ${UPLOAD_DIR:../uploads}
 
+# Finds uploads whose message is gone or whose consumer has stopped. See UploadReconciler for how it decides.
+reconciliation:
+  enabled: true            # tests switch it off and call it directly
+  interval-ms: 60000
+  # Must exceed how long an upload can legitimately sit between two status changes with lag 0, which is short: while
+  # a message is being processed it isn't committed, so its lag isn't 0
+  stuck-after-ms: 300000
+  # Must exceed the longest one message can take (200 s budget + 60 s, see llm-service), or a slow consumer looks dead
+  stalled-after-ms: 600000
+  max-republishes: 3
+  batch-size: 100
+  # The group that owns each kind of upload, the same value as DOC_CONSUMER_GROUP in llm-service
+  document-consumer-group: ${DOC_CONSUMER_GROUP:llm-service-document-ingest}
+  data-table-consumer-group: ${DOC_CONSUMER_GROUP:llm-service-document-ingest}
+
 # The query path. The token is shared with llm-service, which trusts the role and department it is sent only from
 # a caller holding it. Empty if unset, so uploads keep working without it and /query answers 503 with the reason.
 llm-service:
