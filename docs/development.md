@@ -30,6 +30,11 @@ uv run python -m scripts.generate_mock_data
 cd backend-service
 ./mvnw spring-boot:run                # Windows: .\mvnw.cmd spring-boot:run
 
+# 4b. The API for questions (another terminal). Needs OPENAI_API_KEY and INTERNAL_SERVICE_TOKEN in .env;
+#     the backend reads the same token, so restart it if you only just added it. See .env.example for how to make one.
+cd llm-service
+uv run python -m app.server --reload
+
 # 5. Consumer (another terminal, from the repo root): a standalone worker process, not part of FastAPI
 cd llm-service
 uv run python -m app.consumers.upload_consumer
@@ -43,6 +48,9 @@ curl -X POST http://localhost:8081/documents/upload -H "X-User-Id: 2" -F "file=@
 
 # 7. Upload a data table: a CSV for campaign 11, which is still running and so has no rows yet
 curl -X POST http://localhost:8081/documents/upload -H "X-User-Id: 2" -F "file=@data_tables/beauty-weekly-live-special-products.csv" -F "contentKind=data_table" -F "tableType=campaign_products" -F "mode=new" -F "campaignId=11"
+
+# 8. Ask a question. The answer cites what it used; a question the documents don't cover gets a refusal
+curl -X POST http://localhost:8081/query -H "X-User-Id: 2" -H "Content-Type: application/json" -d '{"question": "How do I handle an account restriction?"}'
 ```
 
 `docker compose down -v` deletes all volumes (Postgres data and Kafka topics). The next `up` rebuilds the schema from the migrations; run steps 2 and 3 again afterwards.
@@ -63,8 +71,8 @@ The schema lives in versioned SQL files under `db/migration/` (`V1__...sql`, `V2
 cd backend-service
 ./mvnw test                           # Windows: .\mvnw.cmd test
 
-# Python: Kafka not required. tests/test_ingestion.py needs the docker compose Postgres (it creates and
-# drops a throwaway database) and is skipped when Postgres isn't running
+# Python: Kafka not required. tests/test_ingestion.py and tests/test_retrieval.py need the docker compose Postgres
+# (they create and drop a throwaway database) and are skipped when Postgres isn't running
 cd ../llm-service
 uv run pytest
 ```

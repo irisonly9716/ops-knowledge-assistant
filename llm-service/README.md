@@ -1,6 +1,7 @@
 # llm-service
 
-Python / FastAPI. Embeddings, RAG, Text-to-SQL, query routing, conversation memory.
+Python / FastAPI. Document ingestion and retrieval-based answers now; Text-to-SQL, query routing and conversation
+memory later.
 
 ## Running it locally
 
@@ -11,8 +12,11 @@ cd llm-service
 uv python install 3.12
 uv venv
 uv pip install -r requirements.txt
-uv run uvicorn app.main:app --reload --port 8000
+uv run python -m app.server --reload
 ```
+
+It refuses to start without `OPENAI_API_KEY` and `INTERNAL_SERVICE_TOKEN` in `.env`, instead of failing on the first
+question. Use `python -m app.server`, not plain `uvicorn app.main:app`: see "The query path" below.
 
 http://localhost:8000/health returning `{"status":"ok",...}` means it works.
 http://localhost:8000/docs is the generated API documentation.
@@ -26,7 +30,7 @@ py -3.12 -m venv .venv          # needs Python 3.12 installed first
 .venv\Scripts\Activate.ps1      # WSL/macOS: source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+python -m app.server --reload
 ```
 </details>
 
@@ -34,9 +38,12 @@ uvicorn app.main:app --reload --port 8000
 
 ```
 app/
-├── main.py        FastAPI entry point (only /health for now)
+├── server.py      how to start the API: chooses the event loop, then starts uvicorn
+├── main.py        the FastAPI app: startup checks, error shape, /health
+├── query_api.py   POST /query: internal token, request and response format, time limit, failures to status codes
 ├── config.py      environment variables (the repository-root .env)
-├── db.py          Postgres connections (autocommit; transactions are explicit `with conn.transaction():` blocks)
+├── db.py          Postgres: sync connections for ingestion, the async read-only pool for queries
+├── time_budget.py one time budget per message or query, shared by all its layers
 ├── consumers/     Kafka consumer (the document pipeline), a separate worker process
 │   ├── upload_consumer.py   consume loop: manual commits + retries + dead-letter topic + graceful shutdown; entry point main()
 │   ├── events.py            the Python half of the message contract (pydantic, mirrors Java's UploadEvent)
@@ -48,8 +55,11 @@ app/
 │   ├── parsing/             Markdown / docx / PDF -> the same typed elements (headings, paragraphs, list items, tables)
 │   ├── chunking.py          elements -> chunks: by section, token limit, contextual header, SOP steps
 │   ├── document_fields.py   which values a documents row gets (the upload decides, the frontmatter fills gaps)
-│   ├── embeddings.py        Embedder interface + OpenAI implementation + batching
-│   └── store.py             SQL for ingestion: uploads row, catalog labels, documents + doc_chunks
+│   ├── embeddings.py        Embedder interface + OpenAI implementation + batching; which failures are worth retrying
+│   ├── store.py             SQL for ingestion: uploads row, catalog labels, documents + doc_chunks
+│   ├── retrieval.py         who may see what, and the search itself
+│   ├── query_models.py      the async model calls of a query, with retries inside the budget
+│   └── answering.py         a question to an answer: threshold, prompt, citation check, refusal
 ├── sql_agent/     Text-to-SQL + safety checks + row-level filtering
 ├── router/        query routing + combined answers
 └── memory/        Redis cache + conversation memory
@@ -58,6 +68,10 @@ tests/             pytest; test_events (contract / cross-language drift) test_st
                    test_embeddings (fake OpenAI client) test_parsing (all three formats parse the same)
                    test_chunking (steps stay whole, sections stay apart, oversized units split with overlap)
                    test_data_tables (every refusal says what to fix and where)
+                   test_retrieval (real Postgres: who sees what, the approximate index, the pool)
+                   test_answering (fake models: refusals, citations, nothing held while waiting)
+                   test_query_models (fake client: retries inside the budget)
+                   test_query_api (the real app with a fake service: who may call, failures, starting up)
                    test_ingestion (real Postgres: idempotency, rollback, replacements, conflicts, for documents and tables)
 tests/fixtures/documents/   docx / PDF fixtures, generated from Markdown by scripts/make_sample_documents.py
 ```
@@ -112,7 +126,7 @@ image should download it at build time (set `TIKTOKEN_CACHE_DIR` and call `tikto
 uv run python -m app.consumers.upload_consumer
 ```
 
-**It is a process separate from FastAPI** (`uvicorn app.main:app` is the other one). Prerequisites: Kafka
+**It is a process separate from FastAPI** (`python -m app.server` is the other one). Prerequisites: Kafka
 running and the topics created (`init_topics`, which includes the dead-letter topic
 `document-upload-events.dlq`), Postgres migrated, and `OPENAI_API_KEY` in `.env` (checked at startup). The
 startup log prints the resolved `upload_dir`: mismatched upload folders (the two services pointing at
@@ -164,6 +178,51 @@ Behavior (design reasons in [docs/architecture.md](../docs/architecture.md)):
 To check the consumer without the Java backend: `uv run python -m scripts.kafka_producer_test`
 (writes a file into the upload folder, records the upload, and publishes a contract-compliant event; it
 creates a real "Kafka smoke test" SOP each time, see the script's docstring for how to remove them).
+
+## The query path
+
+`POST /query` is only for the backend. It takes the question plus the user's id, role and department, and those are
+trusted, so every call must carry `X-Internal-Token` and the port must not be reachable from anywhere else. It listens
+on 127.0.0.1 unless `LLM_SERVICE_HOST` says otherwise. Examples of the format: `contracts/query.examples.json`.
+
+```
+role + department -> which departments may be searched (an unknown role is an error, never an unfiltered search)
+question          -> embedding
+embedding         -> search among those departments, top 5    <- the only step that holds a database connection
+best score < 0.35 -> refuse, without calling the model
+excerpts          -> model -> the fixed word NOT_IN_DOCUMENTS -> refuse
+                           -> an answer -> every [n] must be a real excerpt, and at least one is needed; otherwise 502
+```
+
+**Async from the start.** Sync FastAPI endpoints get 40 worker threads, far below the 900 queries in flight the system
+is designed for. The price: one blocking call in an async function stops every query in the process, so no sync SDK and
+no `time.sleep` on this path. Ingestion stays sync: a consumer handles one message at a time.
+
+**Starting it.** Async psycopg can't run on `ProactorEventLoop`, the default on Windows, and uvicorn only switches away
+from it when reloading. Measured: `uvicorn` with `--reload` connects to the database and without it doesn't, a
+difference that hides until the first run without reload. `python -m app.server` chooses the event loop first, with or
+without `--reload`, and plain `uvicorn` on Windows now fails at startup with a message saying so.
+
+**Time limit.** One query gets 12 s. `asyncio.timeout` is the hard stop and cancels whatever is running; measured with
+a model that hangs and a 3 s budget, the answer came after 3.03 s. `TimeBudget` lets the layers decide earlier, so a
+retry that can't fit gives up with the real reason. The SDK's retries are off. The backend's timeouts sit above this (1 s
+to connect, 14 s to read), so a client waits about 15 s at the very worst, and normally gets llm-service's own 504.
+
+**Refusing.** The threshold of 0.35 is temporary. Measured on the sample documents, answerable questions scored 0.40 to
+0.69, related questions the documents don't answer 0.21 to 0.41, and unrelated ones 0.03 to 0.16. So the threshold alone
+can't separate the first two groups, which is why the model can refuse too. The eval sets the real value. A refusal
+reads the same whether a document exists in another department or not.
+
+**Citations.** The check proves each link is real, not that each sentence is supported by what it links to. An invalid
+answer is an error rather than a retry for now; how often that happens is something to measure.
+
+**Measured latency** (a few requests on a development machine, not a load test): embedding 0.15 to 0.7 s, search 0.2 ms on
+the server, model 1.3 to 3.1 s with one at 8 s. So a full answer takes about 2 to 3.4 s and **doesn't always meet the 3 s
+target**. On Windows each search also costs about 44 ms in Docker Desktop's port forwarding: the 19 KB vector takes 44 ms
+through it and 0.2 ms inside the container, so that part is specific to this setup.
+
+**Not built yet:** the rate limit and the model concurrency limit, the router (a question about numbers belongs to
+Text-to-SQL, but today it can only be answered from documents), the cache and the audit table.
 
 ## Creating the Kafka topics
 

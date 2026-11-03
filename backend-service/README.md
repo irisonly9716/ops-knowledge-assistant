@@ -148,6 +148,37 @@ campaign by its id, and uploaders know "the sale in November", not an id. `hasPl
 one exists, which decides between `mode=new` and `mode=replace`. Staff and managers see their own department;
 executive and admin belong to none and see all. A malformed month is a `400`.
 
+### `POST /query`
+
+Body: `{"question": "..."}`, at most 2,000 characters; `X-User-Id` says who is asking. The role and department come from
+the `users` table, so anything else in the body is ignored. `QueryClient` forwards them to llm-service with the internal
+token (`INTERNAL_SERVICE_TOKEN` in `.env`; both services read it).
+
+```json
+{
+  "status": "answered",
+  "answer": "Do this [1].",
+  "citations": [{"number": 1, "docId": 3, "docType": "sop", "title": "Account Restriction Handling",
+                 "department": "ALL", "headingPath": ["Account Restriction Handling", "Steps"], "score": 0.5183}],
+  "searchedDepartments": ["Beauty", "ALL"]
+}
+```
+
+`status` is `refused` when the documents this user may see don't answer the question: `200` with no citations.
+`searchedDepartments` is `null` for executive and admin, who search everything.
+
+| Answer | When |
+|---|---|
+| `400` | empty or too long, or the body isn't JSON |
+| `401` | unknown user. Never because of the internal token: a token the two services disagree on is a `502` and an error in the log, since the client can do nothing about it |
+| `502` | the model failed, or its answer failed validation (for example it cited an excerpt that doesn't exist) |
+| `503` | llm-service is down or not configured, the search is unavailable, or the provider is rate limiting |
+| `504` | no answer in time: llm-service's own budget of 12 s, or the read timeout of 14 s here if it is stuck |
+
+`spring.jpa.open-in-view` is off. Its default holds a database connection until the response is written, which here
+means through the whole model call. Measured with llm-service taking 2 s: 40 queries at once took 8.3 s, in batches the
+size of the connection pool of 10. With it off, 2.3 s.
+
 ### Outbox relay
 
 `OutboxRelay` publishes the outbox to `document-upload-events` (the topic name comes from `DOC_UPLOAD_TOPIC` in
@@ -209,7 +240,7 @@ consumer running it moves on to `done`), or read the message with `llm-service/s
 ## Tests
 
 ```bash
-.\mvnw.cmd test                                                # default: 156 unit/slice tests, no Docker needed, a few seconds
+.\mvnw.cmd test                                                # default: 187 unit/slice tests, no Docker needed, a few seconds
 .\mvnw.cmd test -DexcludedGroups=none -Dgroups=integration     # integration tests: need the docker compose Postgres
 .\mvnw.cmd test -Dtest=UploadControllerTest                    # one class only
 ```
@@ -221,12 +252,15 @@ consumer running it moves on to `done`), or read the message with `llm-service/s
 | `UploadControllerTest` (75) | `@WebMvcTest` slice + the real `UploadService` | takes effect at once / waits for approval, every `403` and `409`, 25 malformed requests each returning 400 + the reason + **no side effects**, missing / unknown `X-User-Id` → 401, a failed recording removes the file, malicious file names, the status endpoint's visibility |
 | `ApprovalControllerTest` (28) | `@WebMvcTest` slice + the real `UploadService` | the queues, approve writes the event, reject removes the file, **stale requests of every kind are void**, only the uploader's superior decides, a decision is made once |
 | `CampaignControllerTest` (10) | `@WebMvcTest` slice | own department or all, which days a month means, malformed months |
+| `QueryControllerTest` (29) | `@WebMvcTest` slice + the real `QueryClient` over a real socket to a stub llm-service | the role and department come from the users table and can't be chosen, the token is sent, every failure maps to its status with no internal details, read timeout, service down |
+| `QueryContractTest` (2) | contract | every example in `contracts/query.examples.json` round-trips exactly in Java |
 | `UploadServiceTest` (2) | plain unit | the outbox row: topic, key, the event in the lowercase wire format; a waiting upload has no event |
 | `OutboxRelayTest` (7) | plain unit | publishing in order and marking; every Kafka failure (send throws Kafka's own `TimeoutException`, failed future, no acknowledgement in time, interruption) is recorded, stops the batch and is retried later |
 | `OutboxSchedulerTest` (5) | plain unit | draining a backlog, exponential backoff capped at the maximum, reset after success, retention cleanup |
 | `UploadEventContractTest` (1) | contract | every example in `contracts/upload-event.examples.json`, deserialized and re-serialized by Java, must equal the original |
 | `OutboxIntegrationTest` (4) | integration, `@Tag("integration")` | real Postgres: **the upload and its event commit together, and a failed outbox write leaves no upload behind**; the relay marks rows; a row locked by another relay is skipped, not waited for |
 | `UploadFlowIntegrationTest` (12) | integration, `@Tag("integration")` | whole requests against real Postgres: what the slices fake. The SOP natural key (case, spaces, Unicode forms, per department), the approval queues, what each decision commits, a void approval surviving as a commit with a `409` answer, data table versions, the campaign search |
+| `QueryConnectionIntegrationTest` (1) | integration, `@Tag("integration")` | waiting for llm-service holds no database connection: 6 queries at once on a pool of 2 |
 | `BackendServiceApplicationTests` (1) | integration, `@Tag("integration")` | the full container + a real Postgres; with `ddl-auto: validate` it also detects **drift between the entities and the migrations in `db/migration/`** |
 
 Notes:
@@ -258,5 +292,5 @@ Notes:
 | `GET /documents/{id}/status` | implemented | how far an upload got, and why it failed |
 | `GET /documents/approvals`, `POST /documents/approvals/{id}/approve`, `.../reject` | implemented | the approval queue and the decision |
 | `GET /campaigns?month=` | implemented | finding a campaign to upload a plan, review or table for |
-| `POST /query` | planned | forwards to llm-service /query (with `X-User-Id`) |
+| `POST /query` | implemented | looks up the user, forwards to llm-service with the internal token, returns the answer with its citations or a refusal |
 | read-only structured data endpoints | planned | campaigns / campaign_metrics / hosts queries (for a frontend dashboard, optional) |
