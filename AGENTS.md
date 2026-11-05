@@ -37,8 +37,8 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 
 - **Where 300 QPS comes from:** half of the 500 staff sending in the same second (250), plus 20% headroom. It is a burst, not a sustained rate: people wait for an answer before asking again.
 - **Rate limit:** designed for the 300 QPS peak; above it, `429` with `Retry-After`. `QUERY_RATE_LIMIT_QPS`, per backend instance.
-- **Model concurrency:** sized for the peak (900 across all instances) and configurable: `MODEL_MAX_CONCURRENT_CALLS`, per process. Development sets a low value in `.env` because those tests are paid for privately; that value is never a production default or evidence for sizing.
-- **Processes:** one llm-service process reaches about 100 QPS (measured on Linux with a stub model). 300 QPS met the 3 s target with 4 processes, not with 2; 3 wasn't run. `python -m app.server` starts one.
+- **Model concurrency:** sized for the peak (900 in flight across 4 processes) and configurable: `MODEL_MAX_CONCURRENT_CALLS`, default 300 per process, because workers on one port don't get equal shares. Development sets a low value in `.env` because those tests are paid for privately; that value is never a production default or evidence for sizing.
+- **Processes:** one llm-service process reaches about 100 QPS (measured on Linux with a stub model), so production runs `python -m app.server --workers 4` (`LLM_SERVICE_WORKERS`). That met the 3 s target at 300 QPS; 2 didn't, and 3 wasn't run. Development starts one.
 - **Reranking:** only sees chunks that passed the department filter and counts toward the 3 s; on a timeout or an error, fall back to vector order. It is on by default unless the eval shows no gain or it breaks the 3 s budget: then it stays in the code, is switched off in config, and the numbers go in the report.
 - **Not load tested yet (#11).** Until it is, write "designed for 300 QPS", not "handles 300 QPS".
 - **Upload path:** 1 partition, 1 consumer, 1 broker and local files, because the volume wasn't known when it was designed; #10 is the way out. Partitions follow upload volume: queries don't pass through Kafka.
@@ -191,4 +191,4 @@ A new document for one's own department takes effect at once. Replacing anything
 - v4 · 2026-11-03 · Arianna · Say where 300 QPS comes from; state the relay's row locks as an exception to the rule on locks across network calls.
 - v5 · 2026-11-03 · Arianna · Commits are authored as Arianna Ge; don't rerun tests to answer a question.
 - v6 · 2026-11-03 · Arianna · The delivery count and the reconciliation job.
-- v7 · 2026-11-04 · Arianna · The rate limit, the limit on model calls, virtual threads and what one process can do.
+- v7 · 2026-11-04 · Arianna · The rate limit, the limit on model calls, virtual threads and worker processes.

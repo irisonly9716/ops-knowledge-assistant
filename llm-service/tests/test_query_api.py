@@ -269,6 +269,53 @@ def test_the_entry_point_chooses_the_event_loop_before_uvicorn_starts(monkeypatc
     assert seen["reload"] is False
 
 
+def start_the_entry_point(monkeypatch, *arguments):
+    seen = {}
+    previous = asyncio.get_event_loop_policy()
+    monkeypatch.setattr(server.uvicorn, "run", lambda target, **kwargs: seen.update(kwargs))
+    monkeypatch.setattr(sys, "argv", ["app.server", *arguments])
+    try:
+        server.main()
+    finally:
+        asyncio.set_event_loop_policy(previous)
+    return seen
+
+
+def test_the_number_of_processes_comes_from_the_setting(monkeypatch):
+    monkeypatch.setattr(settings, "llm_service_workers", 4)
+    assert start_the_entry_point(monkeypatch)["workers"] == 4
+
+
+def test_the_command_line_can_choose_another_number_of_processes(monkeypatch):
+    monkeypatch.setattr(settings, "llm_service_workers", 4)
+    assert start_the_entry_point(monkeypatch, "--workers", "2")["workers"] == 2
+
+
+def test_logging_is_configured_through_uvicorn_so_that_every_worker_logs(monkeypatch):
+    log_config = start_the_entry_point(monkeypatch, "--workers", "2")["log_config"]
+    assert log_config["root"]["level"] == "INFO"
+    assert log_config["root"]["handlers"]
+    assert not log_config["disable_existing_loggers"]   # the loggers of app.* exist by the time it is applied
+
+
+def test_the_service_keeps_an_idle_connection_longer_than_the_backends_client_does(monkeypatch):
+    # Whoever closes first must be the side that sends the next request, or that request can land on a closed connection
+    assert start_the_entry_point(monkeypatch)["timeout_keep_alive"] > 30
+
+
+def test_development_starts_one_process_by_default():
+    assert type(settings).model_fields["llm_service_workers"].default == 1
+
+
+def test_the_default_limit_on_model_calls_is_one_process_share_of_the_peak_not_all_of_it():
+    # At 900 per process, 4 processes would allow 3,600 and the limit would protect nothing
+    assert 225 <= type(settings).model_fields["model_max_concurrent_calls"].default < 900
+
+
+def test_the_pools_of_8_processes_leave_room_for_the_backend_in_the_connections_postgres_allows():
+    assert 8 * type(settings).model_fields["query_pool_size"].default + 10 < 100
+
+
 def test_the_service_listens_on_localhost_unless_told_otherwise():
     assert type(settings).model_fields["llm_service_host"].default == "127.0.0.1"
 

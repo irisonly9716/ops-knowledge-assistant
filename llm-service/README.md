@@ -204,6 +204,16 @@ from it when reloading. Measured: `uvicorn` with `--reload` connects to the data
 difference that hides until the first run without reload. `python -m app.server` chooses the event loop first, with or
 without `--reload`, and plain `uvicorn` on Windows now fails at startup with a message saying so.
 
+It starts one process. **Production runs `python -m app.server --workers 4`** (or `LLM_SERVICE_WORKERS=4`), for the reason
+under "How much one process can do" below. The workers share the port. A worker that dies is replaced: with one killed
+at 100 QPS, 10 of 1,200 queries failed, the others didn't slow down, and uvicorn started a new one. `--reload` ignores
+`--workers`.
+
+Logging is configured through uvicorn, which applies it in every process; `logging.basicConfig` would reach only the
+parent, and with 2 workers not one query was logged. An idle connection stays open 35 s, longer than the 30 s the
+backend's HTTP client keeps one. With uvicorn's default of 5 s, a query sent just as the server closed its connection got
+a `503`: 1 of 1,200 with bursts 4.95 s apart, and none of 800 with bursts 2 s apart.
+
 **Time limit.** One query gets 12 s. `asyncio.timeout` is the hard stop and cancels whatever is running; measured with
 a model that hangs and a 3 s budget, the answer came after 3.03 s. `TimeBudget` lets the layers decide earlier, so a
 retry that can't fit gives up with the real reason. The SDK's retries are off. The backend's timeouts sit above this (1 s
@@ -223,37 +233,44 @@ target**. On Windows each search also costs about 44 ms in Docker Desktop's port
 through it and 0.2 ms inside the container, so that part is specific to this setup.
 
 **The limit on model calls.** `ModelCallLimit` is an `asyncio.Semaphore`, one per process, shared by embeddings and answers.
-`MODEL_MAX_CONCURRENT_CALLS` (default 900) sets its size; development can set a low value in `.env`, which says nothing
-about production. The rate limit in the backend controls how many queries come in; this protects against what that can't
-see: at 6 s per answer, 300 queries a second would become 1,800 calls at once. A query waits up to
-`MODEL_SLOT_WAIT_SECONDS` (default 1 s, about 300 slots freeing up at the peak) and never past its budget, then gets `503`
-with `Retry-After`, so nobody queues until their time runs out. Measured with a model that hangs, 2 slots and 10 queries:
+`MODEL_MAX_CONCURRENT_CALLS` (default 300) sets its size in each process, so 4 processes allow 1,200 against the 900 of the
+peak. An exact share is too tight, because workers on one port don't get equal work: at 300 QPS, 225 each refused 53 of
+1,500 queries and 300 each refused none. Development can set a low value in `.env`, which says nothing about production.
+The rate limit in the backend controls how many queries come in; this protects against what that can't see: at 6 s per
+answer, 300 queries a second would become 1,800 calls at once. A query waits up to `MODEL_SLOT_WAIT_SECONDS` (default 1 s)
+and never past its budget, then gets `503` with `Retry-After`, so nobody queues until their time runs out. Measured with a model that hangs, 2 slots and 10 queries:
 the model saw at most 2 calls, 8 queries got the `503` in about 1.1 s, and the other 2 got the `504` at 12 s. A slot is held
 only during the request itself, not while waiting to retry, or a rate-limited provider would use up every slot with queries
 that are only sleeping. The SDK's own limits follow this setting, because its default of 1,000 connections, 100 kept
 alive, would be a hidden limit below the 500 QPS target.
 
 **How much one process can do** (real code and real Postgres in a Linux container with 12 CPUs, a stub model taking 2.9 s,
-5 s of load, every query answered. Not the load test of #11, and the backend isn't in it):
+5 to 10 s of load, every query answered and none refused. Not the load test of #11, and the backend isn't in it):
 
 | Processes | QPS | p50 | p95 | Slowest | Most calls at once |
 |---|---|---|---|---|---|
-| 1 | 100 | 2.96 s | 3.14 s | 3.18 s | 296 |
+| 1 | 100 | 2.97 s | 3.11 s | 3.14 s | 300 |
 | 1 | 140 | 3.41 s | 4.74 s | 4.89 s | 356 |
 | 1 | 300 | 8.27 s | 12.96 s | 13.50 s | 355 |
-| 2 | 300 | 4.20 s | 6.42 s | 6.66 s | 644 |
-| 4 | 300 | 2.95 s | 3.11 s | 3.18 s | 900 |
-| 4 | 500 | 3.67 s | 5.65 s | 5.82 s | 1,207 |
-| 6 | 500 | 3.05 s | 3.37 s | 3.48 s | 1,488 |
+| 2 (round robin on two ports) | 300 | 4.20 s | 6.42 s | 6.66 s | 644 |
+| 4 workers | 300 | 3.02 s | 3.10 s | 3.30 s | 929 |
+| 6 workers | 500 | 3.16 s | 4.16 s | 4.45 s | 1,480 |
+| 8 workers | 500 | 3.12 s | 3.38 s | 3.58 s | 1,486 |
 
-So one process reaches about 100 QPS: past that, the limit is one CPU core, not the slots. **`python -m app.server` starts
-one process, so as it stands it doesn't reach 300 QPS.** With 4 uvicorn workers on one port at 300 QPS, 300 slots each gave
-no refusals (slowest 3.33 s), and 225 each refused 53 of 1,500, because the kernel doesn't share out connections evenly.
+So one process reaches about 100 QPS: past that, the limit is one CPU core, not the slots. 3 processes weren't run.
 
-**On Windows, don't push it past about 250 queries at once.** Async psycopg needs the selector event loop, and `select()`
-there watches at most 512 sockets, while each query uses about two. Measured at 300 QPS: `too many file descriptors in
-select()` stopped the event loop, and the process stayed alive but stopped answering, even `/health`. It takes a restart.
-Linux doesn't have this limit, so load tests belong there.
+**Database connections.** Each process has its own pool, and Postgres allows 100 connections, shared with the backend and
+the consumers, so `QUERY_POOL_SIZE` is 5. A connection is held only for the search: at 300 QPS at most 3 statements ran at
+once. 5 each was as fast as 20 each, and at 20 each, 8 workers reached 99 connections and Postgres refused 30 attempts. At
+5 each they reached 50, the backend's 10 included, with none refused. The search in these numbers is on Docker's internal
+network. Through Docker Desktop's port forwarding on Windows, at 44 ms each, 5 connections do about 110 searches a second.
+
+**On Windows, keep each process below about 250 queries at once.** Async psycopg needs the selector event loop, and
+`select()` there watches at most 512 sockets, while each query uses about two. Measured with one process at 300 QPS:
+`too many file descriptors in select()` stopped the event loop, and the process stayed alive but stopped answering, even
+`/health`. It takes a restart, and uvicorn doesn't notice. Through the real backend with 4 workers, 150 QPS gave a p50 of
+3.49 s, slowest 4.43 s; at 300 QPS one worker hit the limit and 214 of 900 queries got a `504`. Linux doesn't have this
+limit, so load tests belong there. The whole chain at 300 QPS hasn't been run yet: that is #11.
 
 **Not built yet:** the router (a question about numbers belongs to Text-to-SQL, but today it can only be answered from
 documents), the cache and the audit table.

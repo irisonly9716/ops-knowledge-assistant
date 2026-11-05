@@ -273,9 +273,11 @@ Design decisions so far:
 - **Virtual threads in the backend.** Measured at 300 QPS with a stub answering in 3 s: p50 8.23 s on Tomcat's 200 threads,
   3.21 s on virtual threads. They also remove what used to limit how many requests wait for a database connection, so that
   wait now has its own limit of 2 s.
-- **One llm-service process reaches about 100 QPS**, measured on Linux: past that, the limit is one CPU core. 300 QPS took 4
-  processes and 500 QPS took 6. `python -m app.server` starts one today. Numbers: "The query path" in
-  [llm-service/README.md](../llm-service/README.md).
+- **Several llm-service processes, on one port.** One process reaches about 100 QPS, measured on Linux: past that, the
+  limit is one CPU core. Production runs `python -m app.server --workers 4`, which met the 300 QPS peak; 500 QPS took 8.
+  Uvicorn's workers need no load balancer, at the price of an uneven share of the work, so each process gets 300 model
+  call slots rather than an exact 225, and 5 database connections because all their pools share the 100 Postgres allows.
+  Numbers: "The query path" in [llm-service/README.md](../llm-service/README.md).
 
 ## Ports (local development)
 
