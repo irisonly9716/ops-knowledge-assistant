@@ -3,6 +3,7 @@ package com.opsassistant.backend.query;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -25,12 +26,14 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.transaction.CannotCreateTransactionException;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -39,7 +42,7 @@ import tools.jackson.databind.json.JsonMapper;
  * thread pool, and a test sets what it does next.
  */
 @WebMvcTest(QueryController.class)
-@Import(QueryClient.class)
+@Import({QueryClient.class, QueryRateLimiter.class})
 class QueryControllerTest {
 
     private static final String TOKEN = "test-internal-token";
@@ -52,6 +55,7 @@ class QueryControllerTest {
     private static volatile int nextStatus;
     private static volatile String nextBody;
     private static volatile long nextDelayMs;
+    private static volatile String nextRetryAfter;
     private static volatile int calls;
     private static volatile String lastBody;
     private static volatile String lastToken;
@@ -73,6 +77,9 @@ class QueryControllerTest {
                 }
                 byte[] response = nextBody.getBytes(StandardCharsets.UTF_8);
                 exchange.getResponseHeaders().add("Content-Type", "application/json");
+                if (nextRetryAfter != null) {
+                    exchange.getResponseHeaders().add("Retry-After", nextRetryAfter);
+                }
                 exchange.sendResponseHeaders(nextStatus, response.length);
                 exchange.getResponseBody().write(response);
                 exchange.close();
@@ -110,6 +117,7 @@ class QueryControllerTest {
         nextStatus = 200;
         nextBody = ANSWER;
         nextDelayMs = 0;
+        nextRetryAfter = null;
         calls = 0;
         lastBody = null;
         lastToken = null;
@@ -265,6 +273,46 @@ class QueryControllerTest {
         mockMvc.perform(ask("2"))
                 .andExpect(status().is(expected))
                 .andExpect(jsonPath("$.error").value(reason));
+    }
+
+    @Test
+    void a_database_connection_that_does_not_come_in_time_is_a_503_in_the_usual_shape() throws Exception {
+        when(userRepository.findById(2L)).thenThrow(new CannotCreateTransactionException("no connection in time"));
+
+        mockMvc.perform(ask("2"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.error").value("the database is unavailable; try again shortly"));
+    }
+
+    @Test
+    void a_statement_that_gets_no_answer_from_the_database_is_a_503_in_the_usual_shape() throws Exception {
+        when(userRepository.findById(2L)).thenThrow(new DataAccessResourceFailureException("no answer in time"));
+
+        mockMvc.perform(ask("2"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.error").value("the database is unavailable; try again shortly"));
+    }
+
+    @Test
+    void when_llm_service_says_when_to_come_back_the_client_hears_it() throws Exception {
+        nextStatus = 503;
+        nextBody = "{\"error\":\"every model call slot is taken\"}";
+        nextRetryAfter = "7";
+
+        mockMvc.perform(ask("2"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(header().string("Retry-After", "7"))
+                .andExpect(jsonPath("$.error").value("every model call slot is taken"));
+    }
+
+    @Test
+    void a_failure_without_a_time_to_come_back_invents_none() throws Exception {
+        nextStatus = 503;
+        nextBody = "{\"error\":\"the document search is unavailable\"}";
+
+        mockMvc.perform(ask("2"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(header().doesNotExist("Retry-After"));
     }
 
     @ParameterizedTest

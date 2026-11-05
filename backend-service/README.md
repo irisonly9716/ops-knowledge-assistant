@@ -171,13 +171,40 @@ token (`INTERNAL_SERVICE_TOKEN` in `.env`; both services read it).
 |---|---|
 | `400` | empty or too long, or the body isn't JSON |
 | `401` | unknown user. Never because of the internal token: a token the two services disagree on is a `502` and an error in the log, since the client can do nothing about it |
+| `429` | over the rate limit, with `Retry-After` |
 | `502` | the model failed, or its answer failed validation (for example it cited an excerpt that doesn't exist) |
-| `503` | llm-service is down or not configured, the search is unavailable, or the provider is rate limiting |
+| `503` | llm-service is down or not configured, the search or this service's database is unavailable, or the provider is rate limiting. With `Retry-After` when every model call slot is taken or the provider gave a time |
 | `504` | no answer in time: llm-service's own budget of 12 s, or the read timeout of 14 s here if it is stuck |
 
 `spring.jpa.open-in-view` is off. Its default holds a database connection until the response is written, which here
 means through the whole model call. Measured with llm-service taking 2 s: 40 queries at once took 8.3 s, in batches the
 size of the connection pool of 10. With it off, 2.3 s.
+
+**Rate limit.** `QueryRateLimiter` is a token bucket in memory, set by `QUERY_RATE_LIMIT_QPS` (default 300, per backend
+instance). It holds one second's worth, because the peak is half of the staff asking in the same second. It runs after
+the user lookup and the validation, so an unknown user still gets `401` and a malformed request `400` and neither uses up
+the limit; the price is that a refused query still does that lookup. It is one bucket for everyone, so a runaway client
+can use up other people's share, and with several instances the limit has to be divided among them. Redis would share it,
+at the price of a network call and one more thing that can fail on every query.
+
+**Virtual threads** (`spring.threads.virtual.enabled`). Every query waits about 3 s for a model, so at 300 QPS 900 of them
+wait at once, against Tomcat's default of 200 threads. Measured with a stub answering in 3 s, 300 per second for 3 s:
+
+| | p50 | p95 | Slowest |
+|---|---|---|---|
+| 200 platform threads | 8.23 s | 13.29 s | 13.33 s |
+| Virtual threads | 3.21 s | 3.29 s | 3.29 s |
+
+300 per second for 10 s gave 3,000 answers and no `429`, slowest 3.35 s. Above the limit, 500 per second for 5 s let 1,586
+through and refused 914, the slowest refusal after 0.47 s. A refusal isn't instant because the user lookup comes first.
+
+**Waiting for the database.** With no limit on threads, nothing else limits how many requests can wait for a connection,
+so these waits have their own: 2 s for a connection (`connection-timeout`), 1 s to check an idle one, 10 s for a statement
+(`socketTimeout`). Measured with Postgres frozen: with the defaults every query waited 30 s for a `500`, and a statement
+already running waited out the whole 25 s freeze; with these, a `503` after 2.04 s, and 11.2 s for a statement already
+running. A query that needs both lookups can in theory take 23 s for each, if every round trip takes just under the limit,
+so the computed worst case is 61 s with the 15 s for llm-service. In that freeze 3 of 1,500 queries still got Spring's
+default `500`, because the rollback failed too (`JpaSystemException`).
 
 ### Outbox relay
 
@@ -256,7 +283,7 @@ consumer running it moves on to `done`), or read the message with `llm-service/s
 ## Tests
 
 ```bash
-.\mvnw.cmd test                                                # default: 201 unit/slice tests, no Docker needed, a few seconds
+.\mvnw.cmd test                                                # default: 219 unit/slice tests, no Docker needed, a few seconds
 .\mvnw.cmd test -DexcludedGroups=none -Dgroups=integration     # integration tests: need the docker compose Postgres
 .\mvnw.cmd test -Dtest=UploadControllerTest                    # one class only
 ```
@@ -268,7 +295,9 @@ consumer running it moves on to `done`), or read the message with `llm-service/s
 | `UploadControllerTest` (75) | `@WebMvcTest` slice + the real `UploadService` | takes effect at once / waits for approval, every `403` and `409`, 25 malformed requests each returning 400 + the reason + **no side effects**, missing / unknown `X-User-Id` → 401, a failed recording removes the file, malicious file names, the status endpoint's visibility |
 | `ApprovalControllerTest` (28) | `@WebMvcTest` slice + the real `UploadService` | the queues, approve writes the event, reject removes the file, **stale requests of every kind are void**, only the uploader's superior decides, a decision is made once |
 | `CampaignControllerTest` (10) | `@WebMvcTest` slice | own department or all, which days a month means, malformed months |
-| `QueryControllerTest` (29) | `@WebMvcTest` slice + the real `QueryClient` over a real socket to a stub llm-service | the role and department come from the users table and can't be chosen, the token is sent, every failure maps to its status with no internal details, read timeout, service down |
+| `QueryControllerTest` (33) | `@WebMvcTest` slice + the real `QueryClient` over a real socket to a stub llm-service | the role and department come from the users table and can't be chosen, the token is sent, every failure maps to its status with no internal details, read timeout, service down, `Retry-After` passed on and never invented, no database in time is a `503` |
+| `QueryRateLimiterTest` (11) | plain unit, hand-driven clock | a second's worth at once, what gets through under overload, refusals cost nothing, the wait in whole seconds, many threads at once |
+| `QueryRateLimitTest` (3) | `@WebMvcTest` slice | over the limit: `429` with `Retry-After` and nothing sent; `401` and `400` still come first |
 | `QueryContractTest` (2) | contract | every example in `contracts/query.examples.json` round-trips exactly in Java |
 | `UploadServiceTest` (2) | plain unit | the outbox row: topic, key, the event in the lowercase wire format; a waiting upload has no event |
 | `OutboxRelayTest` (7) | plain unit | publishing in order and marking; every Kafka failure (send throws Kafka's own `TimeoutException`, failed future, no acknowledgement in time, interruption) is recorded, stops the batch and is retried later |
@@ -279,6 +308,7 @@ consumer running it moves on to `done`), or read the message with `llm-service/s
 | `OutboxIntegrationTest` (4) | integration, `@Tag("integration")` | real Postgres: **the upload and its event commit together, and a failed outbox write leaves no upload behind**; the relay marks rows; a row locked by another relay is skipped, not waited for |
 | `UploadFlowIntegrationTest` (12) | integration, `@Tag("integration")` | whole requests against real Postgres: what the slices fake. The SOP natural key (case, spaces, Unicode forms, per department), the approval queues, what each decision commits, a void approval surviving as a commit with a `409` answer, data table versions, the campaign search |
 | `QueryConnectionIntegrationTest` (1) | integration, `@Tag("integration")` | waiting for llm-service holds no database connection: 6 queries at once on a pool of 2 |
+| `QueryThreadsIntegrationTest` (3) | integration, `@Tag("integration")` | a request in the real Tomcat runs on a virtual thread; the waits for the database have their limits |
 | `BackendServiceApplicationTests` (1) | integration, `@Tag("integration")` | the full container + a real Postgres; with `ddl-auto: validate` it also detects **drift between the entities and the migrations in `db/migration/`** |
 
 Notes:

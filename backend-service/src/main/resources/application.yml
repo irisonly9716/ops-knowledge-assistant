@@ -2,6 +2,10 @@ spring:
   application:
     name: backend-service
 
+  threads:
+    virtual:
+      enabled: true
+
   datasource:
     # ${VAR:default} -- use the value after the colon when VAR is not set.
     # VAR really is read from .env at the repository root (see config/DotenvEnvironmentPostProcessor.java;
@@ -14,6 +18,17 @@ spring:
     # placeholder 'POSTGRES_PASSWORD'", which is clearer than connecting with a password hard-coded
     # in a public repository and getting a puzzling authentication failure.
     password: ${POSTGRES_PASSWORD}
+    hikari:
+      # How long a request may wait for a connection. With the default of 30 s and Postgres frozen, every query waited
+      # 30 s for a 500, and on virtual threads nothing limits how many can wait. At the peak a connection takes far
+      # less: 300 queries arriving in the same instant all got theirs within 0.3 s
+      connection-timeout: 2000
+      # Checking a connection that has been idle. The default of 5 s let a query outlast the wait above: measured 5.05 s
+      validation-timeout: 1000
+      data-source-properties:
+        # Seconds a statement may wait for Postgres to answer. The driver's default is no limit: a lookup already running
+        # when Postgres froze waited out the whole 25 s freeze, and would wait forever if it never came back
+        socketTimeout: 10
 
   jpa:
     # Spring Boot's default (true) holds a database connection until the response is written. Measured with /query
@@ -89,6 +104,10 @@ llm-service:
   connect-timeout-ms: 1000
   # Above llm-service's budget for one query (12 s), so its own 504 with the reason arrives first
   read-timeout-ms: 14000
+
+query:
+  # Per backend instance. Above it, 429 with Retry-After
+  rate-limit-qps: ${QUERY_RATE_LIMIT_QPS:300}
 
 # Transactional outbox: an upload's event is written to the outbox table together with the upload, and
 # OutboxRelay publishes it to Kafka afterwards (see db/migration/V6__outbox.sql)
