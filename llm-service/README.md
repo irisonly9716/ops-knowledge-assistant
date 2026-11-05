@@ -63,6 +63,7 @@ app/
 ├── sql_agent/     Text-to-SQL + safety checks + row-level filtering
 ├── router/        query routing + combined answers
 └── memory/        Redis cache + conversation memory
+evaluation/        the evaluation dataset's format (dataset.py); not part of the service
 tests/             pytest; test_events (contract / cross-language drift) test_storage (path traversal)
                    test_upload_consumer (every branch of the consume loop) test_health
                    test_embeddings (fake OpenAI client) test_parsing (all three formats parse the same)
@@ -74,6 +75,8 @@ tests/             pytest; test_events (contract / cross-language drift) test_st
                    test_query_api (the real app with a fake service: who may call, failures, starting up)
                    test_ingestion (real Postgres: idempotency, rollback, replacements, conflicts, for documents and tables)
                    test_generate_corpus (the corpus generator without a model: numbers, the rules of a draft, authors)
+                   test_dataset (the dataset's format, the split, finding a labelled section)
+                   test_generate_questions (the question generator without a model: tasks, which answers are kept, SQL)
 tests/fixtures/documents/   docx / PDF fixtures, generated from Markdown by scripts/make_sample_documents.py
 ```
 
@@ -329,6 +332,19 @@ name, a rule and its exception, campaigns with only one of their two documents (
 
 Nine generated SOPs use lettered sub-steps (a, b, c), which Markdown doesn't treat as a list, so they become
 part of their step's text rather than `substeps`. The step stays whole either way.
+
+## The evaluation dataset
+
+```bash
+uv run python -m scripts.generate_questions --report   # what the candidates cover
+```
+
+[eval/](../eval/) holds 256 candidate questions written by `scripts/generate_questions.py` from the ingested corpus,
+with gpt-6-sol rather than the model that answers. Every label names a section by its document and heading path, so
+it survives a new ingestion; `evaluation.dataset.resolve()` finds the chunks. A question is only kept when its
+answer points' numbers are in the sections it cites, its SQL runs read-only and keeps to the asker's department,
+and an unauthorized question really is about something its asker can't see. The format, the split and the
+numbers: [eval/README.md](../eval/README.md).
 
 ## Tests
 

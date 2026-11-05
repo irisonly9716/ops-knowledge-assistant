@@ -71,7 +71,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Apply migrations | `docker compose run --rm flyway migrate` |
 | Python setup | `cd llm-service` · `uv venv` · `uv pip install -r requirements.txt` |
 | Create topics · mock data | `uv run python -m scripts.init_topics` · `uv run python -m scripts.generate_mock_data` |
-| Evaluation corpus: what's in it · load it | `uv run python -m scripts.generate_corpus --report` · `uv run python -m scripts.ingest_corpus` (needs the backend, Kafka and the consumer) |
+| Evaluation corpus: what's in it · load it · the questions | `uv run python -m scripts.generate_corpus --report` · `uv run python -m scripts.ingest_corpus` (needs the backend, Kafka and the consumer) · `uv run python -m scripts.generate_questions --report` |
 | Run backend (:8081) | `cd backend-service` · `.\mvnw.cmd spring-boot:run` |
 | Run consumer · LLM API (:8000) | `uv run python -m app.consumers.upload_consumer` · `uv run python -m app.server --reload` (not plain `uvicorn`: async psycopg needs the event loop it chooses) |
 | Python tests | `uv run pytest` (database tests use a throwaway database, skipped if Postgres is down) |
@@ -94,9 +94,11 @@ llm-service/app/       Python: ingestion and the query path
   rag/                 parsing/, chunking, document_fields, embeddings, store, retrieval, query_models, answering
   server.py            starts the API; query_api.py: POST /query, for the backend only
   time_budget.py       one time budget per message or query
+llm-service/evaluation/   the dataset's format and how a label finds today's chunks; not part of the service
 contracts/             upload-event and query examples, validated by both test suites
 db/migration/          Flyway migrations, V1 onwards
 sop_docs/ campaign_docs/   the evaluation corpus (85 documents); data_tables/: sample CSV uploads
+eval/                  the evaluation questions (JSONL) and their format
 docs/                  architecture, data-schema, permission-model, development
 ```
 
@@ -129,6 +131,7 @@ Key patterns:
 - Name tests as sentences about behavior: `a_new_sop_for_all_departments_waits_and_publishes_nothing`, `test_a_bad_csv_is_a_permanent_error_and_the_current_rows_stay`.
 - **Python:** fake embedder and fake Kafka for the logic; a throwaway Postgres database for SQL, never development data.
 - **Java:** `@WebMvcTest` plus the real `UploadService` with fake repositories, so status codes go through the rules. `@Tag("integration")` tests use the real Postgres and only touch rows they create.
+- **Evaluation:** tune thresholds, prompts and few-shot examples on `dev` only; `test` only reports final numbers and is never shown to a model. Label sections by document and heading path, never by chunk id.
 - **Mutation checks:** put each bug back on purpose and watch its test fail. First prove the baseline passes, and count only a named failing test; a compile error or a tool that didn't run proves nothing.
 - **End to end:** anything crossing a process needs a real run with the backend, Kafka, consumer and Postgres; slice tests can't see Tomcat or the network.
 - **Measure before deciding** (size, time, memory), compare alternatives fairly, and report worst cases.
@@ -193,4 +196,4 @@ A new document for one's own department takes effect at once. Replacing anything
 - v5 · 2026-11-03 · Arianna · Commits are authored as Arianna Ge; don't rerun tests to answer a question.
 - v6 · 2026-11-03 · Arianna · The delivery count and the reconciliation job.
 - v7 · 2026-11-04 · Arianna · The rate limit, the limit on model calls, virtual threads and worker processes.
-- v8 · 2026-11-05 · Arianna · The evaluation corpus.
+- v8 · 2026-11-05 · Arianna · The evaluation corpus and dataset; tune on dev only.
