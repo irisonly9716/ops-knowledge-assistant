@@ -70,7 +70,7 @@ tests/             pytest; test_events (contract / cross-language drift) test_st
                    test_data_tables (every refusal says what to fix and where)
                    test_retrieval (real Postgres: who sees what, the approximate index, the pool)
                    test_answering (fake models: refusals, citations, nothing held while waiting)
-                   test_query_models (fake client: retries inside the budget)
+                   test_query_models (fake client: retries inside the budget, the limit on calls at once)
                    test_query_api (the real app with a fake service: who may call, failures, starting up)
                    test_ingestion (real Postgres: idempotency, rollback, replacements, conflicts, for documents and tables)
 tests/fixtures/documents/   docx / PDF fixtures, generated from Markdown by scripts/make_sample_documents.py
@@ -222,8 +222,41 @@ the server, model 1.3 to 3.1 s with one at 8 s. So a full answer takes about 2 t
 target**. On Windows each search also costs about 44 ms in Docker Desktop's port forwarding: the 19 KB vector takes 44 ms
 through it and 0.2 ms inside the container, so that part is specific to this setup.
 
-**Not built yet:** the rate limit and the model concurrency limit, the router (a question about numbers belongs to
-Text-to-SQL, but today it can only be answered from documents), the cache and the audit table.
+**The limit on model calls.** `ModelCallLimit` is an `asyncio.Semaphore`, one per process, shared by embeddings and answers.
+`MODEL_MAX_CONCURRENT_CALLS` (default 900) sets its size; development can set a low value in `.env`, which says nothing
+about production. The rate limit in the backend controls how many queries come in; this protects against what that can't
+see: at 6 s per answer, 300 queries a second would become 1,800 calls at once. A query waits up to
+`MODEL_SLOT_WAIT_SECONDS` (default 1 s, about 300 slots freeing up at the peak) and never past its budget, then gets `503`
+with `Retry-After`, so nobody queues until their time runs out. Measured with a model that hangs, 2 slots and 10 queries:
+the model saw at most 2 calls, 8 queries got the `503` in about 1.1 s, and the other 2 got the `504` at 12 s. A slot is held
+only during the request itself, not while waiting to retry, or a rate-limited provider would use up every slot with queries
+that are only sleeping. The SDK's own limits follow this setting, because its default of 1,000 connections, 100 kept
+alive, would be a hidden limit below the 500 QPS target.
+
+**How much one process can do** (real code and real Postgres in a Linux container with 12 CPUs, a stub model taking 2.9 s,
+5 s of load, every query answered. Not the load test of #11, and the backend isn't in it):
+
+| Processes | QPS | p50 | p95 | Slowest | Most calls at once |
+|---|---|---|---|---|---|
+| 1 | 100 | 2.96 s | 3.14 s | 3.18 s | 296 |
+| 1 | 140 | 3.41 s | 4.74 s | 4.89 s | 356 |
+| 1 | 300 | 8.27 s | 12.96 s | 13.50 s | 355 |
+| 2 | 300 | 4.20 s | 6.42 s | 6.66 s | 644 |
+| 4 | 300 | 2.95 s | 3.11 s | 3.18 s | 900 |
+| 4 | 500 | 3.67 s | 5.65 s | 5.82 s | 1,207 |
+| 6 | 500 | 3.05 s | 3.37 s | 3.48 s | 1,488 |
+
+So one process reaches about 100 QPS: past that, the limit is one CPU core, not the slots. **`python -m app.server` starts
+one process, so as it stands it doesn't reach 300 QPS.** With 4 uvicorn workers on one port at 300 QPS, 300 slots each gave
+no refusals (slowest 3.33 s), and 225 each refused 53 of 1,500, because the kernel doesn't share out connections evenly.
+
+**On Windows, don't push it past about 250 queries at once.** Async psycopg needs the selector event loop, and `select()`
+there watches at most 512 sockets, while each query uses about two. Measured at 300 QPS: `too many file descriptors in
+select()` stopped the event loop, and the process stayed alive but stopped answering, even `/health`. It takes a restart.
+Linux doesn't have this limit, so load tests belong there.
+
+**Not built yet:** the router (a question about numbers belongs to Text-to-SQL, but today it can only be answered from
+documents), the cache and the audit table.
 
 ## Creating the Kafka topics
 

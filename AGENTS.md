@@ -36,8 +36,9 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Queries in flight (QPS × latency) | 900 | 1,500 |
 
 - **Where 300 QPS comes from:** half of the 500 staff sending in the same second (250), plus 20% headroom. It is a burst, not a sustained rate: people wait for an answer before asking again.
-- **Rate limit:** designed for the 300 QPS peak; above it, `429` with `Retry-After`.
-- **Model concurrency:** sized for the peak (900 across all instances) and configurable. Development sets a low value in `.env` because those tests are paid for privately; that value is never a production default or evidence for sizing.
+- **Rate limit:** designed for the 300 QPS peak; above it, `429` with `Retry-After`. `QUERY_RATE_LIMIT_QPS`, per backend instance.
+- **Model concurrency:** sized for the peak (900 across all instances) and configurable: `MODEL_MAX_CONCURRENT_CALLS`, per process. Development sets a low value in `.env` because those tests are paid for privately; that value is never a production default or evidence for sizing.
+- **Processes:** one llm-service process reaches about 100 QPS (measured on Linux with a stub model). 300 QPS met the 3 s target with 4 processes, not with 2; 3 wasn't run. `python -m app.server` starts one.
 - **Reranking:** only sees chunks that passed the department filter and counts toward the 3 s; on a timeout or an error, fall back to vector order. It is on by default unless the eval shows no gain or it breaks the 3 s budget: then it stays in the code, is switched off in config, and the numbers go in the report.
 - **Not load tested yet (#11).** Until it is, write "designed for 300 QPS", not "handles 300 QPS".
 - **Upload path:** 1 partition, 1 consumer, 1 broker and local files, because the volume wasn't known when it was designed; #10 is the way out. Partitions follow upload volume: queries don't pass through Kafka.
@@ -104,6 +105,7 @@ Key patterns:
 - **Delivery count:** `uploads.delivery_count` goes up once per delivery, before any work, because retries in memory die with the process. After 3 deliveries that didn't finish, the next is dead-lettered. Only the consumer writes it, so the backend's entity doesn't map it.
 - **Reconciliation:** `UploadReconciler` decides by the owning group's lag, never by age alone: lag above 0 means the message is still in Kafka, so publish nothing and alert if the position stalls; lag 0 means it is gone, so publish again, at most 3 times. Unknown lag means do nothing.
 - **Errors:** a `PermanentError` goes straight to the dead-letter topic (retrying gives the same answer); anything else is retried within the time budget. A failed upload records why, naming the row and column for a bad CSV.
+- **Query limits:** the rate limit runs in the backend after the checks, so `401` and `400` come first and use none of it. A model call holds a slot only during the request, never while waiting to retry, and a query that can't get one within 1 s gets `503` with `Retry-After`. The backend's waits for the database are bounded too, because virtual threads put no limit on how many can wait.
 - **Query path:** async in llm-service, so no blocking call in it; ordinary blocking code in the backend. llm-service trusts the role it is sent, so `/query` requires `X-Internal-Token` and port 8000 must never be exposed. No database connection is held while waiting for a model. An answer needs real citations; anything else is a refusal or an error.
 - **Time budget:** every layer shares one budget per message or query, with SDK retries off. Compute the worst case from every timeout and retry, not just the typical case.
 - **Replacements:** optimistic concurrency. An upload names the version it replaces (`replaces_upload_id`) and is void if that is no longer current. `doc_id` stays stable, `version` goes up.
@@ -189,3 +191,4 @@ A new document for one's own department takes effect at once. Replacing anything
 - v4 · 2026-11-03 · Arianna · Say where 300 QPS comes from; state the relay's row locks as an exception to the rule on locks across network calls.
 - v5 · 2026-11-03 · Arianna · Commits are authored as Arianna Ge; don't rerun tests to answer a question.
 - v6 · 2026-11-03 · Arianna · The delivery count and the reconciliation job.
+- v7 · 2026-11-04 · Arianna · The rate limit, the limit on model calls, virtual threads and what one process can do.
