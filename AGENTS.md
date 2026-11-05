@@ -71,6 +71,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Apply migrations | `docker compose run --rm flyway migrate` |
 | Python setup | `cd llm-service` · `uv venv` · `uv pip install -r requirements.txt` |
 | Create topics · mock data | `uv run python -m scripts.init_topics` · `uv run python -m scripts.generate_mock_data` |
+| Evaluation corpus: what's in it · load it | `uv run python -m scripts.generate_corpus --report` · `uv run python -m scripts.ingest_corpus` (needs the backend, Kafka and the consumer) |
 | Run backend (:8081) | `cd backend-service` · `.\mvnw.cmd spring-boot:run` |
 | Run consumer · LLM API (:8000) | `uv run python -m app.consumers.upload_consumer` · `uv run python -m app.server --reload` (not plain `uvicorn`: async psycopg needs the event loop it chooses) |
 | Python tests | `uv run pytest` (database tests use a throwaway database, skipped if Postgres is down) |
@@ -95,7 +96,7 @@ llm-service/app/       Python: ingestion and the query path
   time_budget.py       one time budget per message or query
 contracts/             upload-event and query examples, validated by both test suites
 db/migration/          Flyway migrations, V1 onwards
-sop_docs/ campaign_docs/ data_tables/    sample uploads
+sop_docs/ campaign_docs/   the evaluation corpus (85 documents); data_tables/: sample CSV uploads
 docs/                  architecture, data-schema, permission-model, development
 ```
 
@@ -192,3 +193,4 @@ A new document for one's own department takes effect at once. Replacing anything
 - v5 · 2026-11-03 · Arianna · Commits are authored as Arianna Ge; don't rerun tests to answer a question.
 - v6 · 2026-11-03 · Arianna · The delivery count and the reconciliation job.
 - v7 · 2026-11-04 · Arianna · The rate limit, the limit on model calls, virtual threads and worker processes.
+- v8 · 2026-11-05 · Arianna · The evaluation corpus.

@@ -46,6 +46,11 @@ uv run python -m app.consumers.upload_consumer
 #    scope=department takes effect at once; scope=all would wait for approval by the manager (user 1).
 curl -X POST http://localhost:8081/documents/upload -H "X-User-Id: 2" -F "file=@sop_docs/account-restriction-handling.md" -F "contentKind=document" -F "docType=sop" -F "mode=new" -F "scope=department" -F "title=Account Restriction Handling"
 
+# 6b. Or load the whole evaluation corpus (85 documents) through the API, approvals included. The consumer
+#     embeds about 51,000 tokens, well under a cent
+cd llm-service
+uv run python -m scripts.ingest_corpus
+
 # 7. Upload a data table: a CSV for campaign 11, which is still running and so has no rows yet
 curl -X POST http://localhost:8081/documents/upload -H "X-User-Id: 2" -F "file=@data_tables/beauty-weekly-live-special-products.csv" -F "contentKind=data_table" -F "tableType=campaign_products" -F "mode=new" -F "campaignId=11"
 
