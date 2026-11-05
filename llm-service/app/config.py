@@ -68,6 +68,14 @@ class Settings(BaseSettings):
     query_top_k: int = 5
     # Temporary, from a small measurement on the sample documents; the eval sets the real value
     query_min_similarity: float = 0.35
+    # Model calls at once in this process, embeddings and answers together. Sized for the peak, 900 across all
+    # processes, so give each process a share. Not an exact share when workers share a port, because they don't get
+    # equal work: measured with 4 at 300 QPS, 225 each refused 53 of 1,500 queries and 300 each refused none.
+    # Development can set a low value in .env because those tests are paid for privately; that says nothing about production
+    model_max_concurrent_calls: int = 900
+    # How long a query waits for a free slot before it is refused. A queue that keeps growing helps nobody: at the
+    # peak about 300 slots free up per second, so this holds about a second of work
+    model_slot_wait_seconds: float = 1.0
     # A connection is held only for the search, so few are needed. Postgres allows 100 in total
     query_pool_size: int = 20
 

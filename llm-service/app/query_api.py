@@ -21,6 +21,7 @@ from pydantic.alias_generators import to_camel
 
 from app.config import settings
 from app.rag.answering import InvalidAnswer, QueryAnswer, QueryService
+from app.rag.query_models import ModelBusy
 from app.rag.retrieval import ROLES_LIMITED_TO_A_DEPARTMENT
 from app.time_budget import TimeBudget
 
@@ -106,9 +107,14 @@ async def query(body: QueryRequest, service: QueryService = Depends(query_servic
     except InvalidAnswer as e:
         log.warning("query user=%s answer refused: %s", body.user_id, e)
         raise HTTPException(502, "the model's answer failed validation") from e
+    except ModelBusy as e:
+        log.warning("query user=%s refused: every model call slot is taken", body.user_id)
+        raise HTTPException(503, "too many questions are being answered right now; try again shortly",
+                            headers={"Retry-After": "1"}) from e
     except RateLimitError as e:
         log.warning("query user=%s rate limited by the model provider", body.user_id)
-        raise HTTPException(503, "the model provider is rate limiting; try again shortly") from e
+        raise HTTPException(503, "the model provider is rate limiting; try again shortly",
+                            headers={"Retry-After": e.response.headers.get("retry-after", "1")}) from e
     except APIError as e:
         log.warning("query user=%s model call failed: %s", body.user_id, type(e).__name__)
         raise HTTPException(502, "the model call failed") from e

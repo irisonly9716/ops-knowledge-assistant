@@ -17,6 +17,7 @@ from app.config import settings
 from app.main import app, lifespan
 from app.query_api import MAX_QUESTION_CHARS, QueryRequest, QueryResponse
 from app.rag.answering import ANSWERED, REFUSAL_TEXT, REFUSED, Citation, InvalidAnswer, QueryAnswer
+from app.rag.query_models import ModelBusy
 from app.rag.retrieval import RetrievedChunk
 
 TOKEN = "test-internal-token"
@@ -187,6 +188,32 @@ def test_each_failure_has_its_status_and_the_same_shape_without_details(client, 
     assert "bug" not in r.text
 
 
+def test_every_slot_being_taken_is_a_503_that_says_when_to_come_back(client):
+    app.state.query_service = FakeService(error=ModelBusy("every model call slot is taken"))
+    r = client.post("/query", json=body(), headers=HEADERS)
+    assert r.status_code == 503
+    assert r.headers["retry-after"] == "1"
+    assert list(r.json()) == ["error"]
+
+
+def test_a_rate_limited_provider_passes_on_when_to_come_back(client):
+    response = httpx.Response(429, headers={"retry-after": "20"}, request=REQUEST)
+    app.state.query_service = FakeService(error=openai.RateLimitError("slow down", response=response, body=None))
+    r = client.post("/query", json=body(), headers=HEADERS)
+    assert r.status_code == 503
+    assert r.headers["retry-after"] == "20"
+
+
+def test_a_rate_limited_provider_that_gives_no_time_still_gets_an_answer_with_one(client):
+    app.state.query_service = FakeService(error=openai.RateLimitError("slow down", response=httpx.Response(429, request=REQUEST), body=None))
+    assert client.post("/query", json=body(), headers=HEADERS).headers["retry-after"] == "1"
+
+
+def test_other_failures_invent_no_time_to_come_back(client):
+    app.state.query_service = FakeService(error=psycopg.OperationalError("down"))
+    assert "retry-after" not in client.post("/query", json=body(), headers=HEADERS).headers
+
+
 def test_the_pools_timeout_counts_as_the_search_being_unavailable(client):
     from psycopg_pool import PoolTimeout
     app.state.query_service = FakeService(error=PoolTimeout("no connection"))
@@ -252,6 +279,27 @@ async def test_it_refuses_to_start_without_the_internal_token(monkeypatch):
     with pytest.raises(RuntimeError, match="INTERNAL_SERVICE_TOKEN"):
         async with lifespan(app):
             pass
+
+
+@pytest.mark.anyio
+async def test_the_started_service_has_one_model_limit_for_both_kinds_of_call_sized_from_the_settings(monkeypatch):
+    class FakePool:
+        async def open(self):
+            pass
+
+        async def close(self):
+            pass
+    monkeypatch.setattr(settings, "internal_service_token", TOKEN)
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(settings, "model_max_concurrent_calls", 7)
+    monkeypatch.setattr(settings, "model_slot_wait_seconds", 0.25)
+    monkeypatch.setattr(db, "query_pool", FakePool)
+    async with lifespan(app):
+        service = app.state.query_service
+        limit = service._embedder._limit
+        assert limit is service._model._limit
+        assert limit._semaphore._value == 7
+        assert limit._max_wait == 0.25
 
 
 def test_the_contract_has_the_cases_it_should():
