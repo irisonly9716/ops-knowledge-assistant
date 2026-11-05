@@ -29,6 +29,7 @@ public class QueryController {
 
     private final QueryClient queryClient;
     private final DepartmentRepository departmentRepository;
+    private final QueryRateLimiter rateLimiter;
 
     @PostMapping("/query")
     public LlmQueryResponse query(@CurrentUser User user, @RequestBody QueryRequest body) {
@@ -38,6 +39,12 @@ public class QueryController {
         }
         if (question.length() > MAX_QUESTION_CHARS) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "question is longer than " + MAX_QUESTION_CHARS + " characters");
+        }
+        // After the checks above, so an unknown user or a malformed request can't use up the limit of real questions
+        long secondsToWait = rateLimiter.acquireOrSecondsToWait();
+        if (secondsToWait > 0) {
+            throw new TryAgainLaterException(HttpStatus.TOO_MANY_REQUESTS, "too many questions right now; try again shortly",
+                    String.valueOf(secondsToWait));
         }
         return queryClient.ask(new LlmQueryRequest(question, user.getUserId(), user.getRole(), departmentOf(user)));
     }

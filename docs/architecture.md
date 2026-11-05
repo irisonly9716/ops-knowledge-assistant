@@ -265,6 +265,19 @@ Design decisions so far:
   `spring.jpa.open-in-view`, whose default limited the whole service to 10 queries in flight.
 - **Time is limited twice in llm-service**: a hard stop that cancels, and a budget the layers consult so a retry that
   can't fit gives up with the real reason.
+- **Two limits, in two places, for two different things.** The rate limit in the backend is about how many queries come in
+  per second: `429` at once. The limit on model calls in llm-service is about how many run at the same moment, which also
+  grows when the model slows down: `503` after at most 1 s. By Little's law, 300 QPS at 3 s is 900 at once.
+- **The rate limit is in memory, not in Redis**: per instance and one bucket for everyone. Redis would share it across
+  instances at the price of a network call and one more failure on every query.
+- **Virtual threads in the backend.** Measured at 300 QPS with a stub answering in 3 s: p50 8.23 s on Tomcat's 200 threads,
+  3.21 s on virtual threads. They also remove what used to limit how many requests wait for a database connection, so that
+  wait now has its own limit of 2 s.
+- **Several llm-service processes, on one port.** One process reaches about 100 QPS, measured on Linux: past that, the
+  limit is one CPU core. Production runs `python -m app.server --workers 4`, which met the 300 QPS peak; 500 QPS took 8.
+  Uvicorn's workers need no load balancer, at the price of an uneven share of the work, so each process gets 300 model
+  call slots rather than an exact 225, and 5 database connections because all their pools share the 100 Postgres allows.
+  Numbers: "The query path" in [llm-service/README.md](../llm-service/README.md).
 
 ## Ports (local development)
 

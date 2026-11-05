@@ -17,7 +17,7 @@ from app import db
 from app.config import settings
 from app.query_api import router as query_router
 from app.rag.answering import QueryService
-from app.rag.query_models import OpenAIAnswerModel, OpenAIQueryEmbedder, openai_client_from_settings
+from app.rag.query_models import ModelCallLimit, OpenAIAnswerModel, OpenAIQueryEmbedder, openai_client_from_settings
 
 
 @asynccontextmanager
@@ -30,9 +30,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     client = openai_client_from_settings()
     pool = db.query_pool()
     await pool.open()
+    limit = ModelCallLimit(settings.model_max_concurrent_calls, settings.model_slot_wait_seconds)
     app.state.query_service = QueryService(
-        OpenAIQueryEmbedder(client, settings.embedding_model, settings.query_embedding_timeout_seconds),
-        OpenAIAnswerModel(client, settings.chat_model, settings.query_model_timeout_seconds, settings.answer_max_output_tokens),
+        OpenAIQueryEmbedder(client, settings.embedding_model, limit, settings.query_embedding_timeout_seconds),
+        OpenAIAnswerModel(client, settings.chat_model, limit, settings.query_model_timeout_seconds, settings.answer_max_output_tokens),
         pool, min_similarity=settings.query_min_similarity, top_k=settings.query_top_k)
     try:
         yield
@@ -48,7 +49,7 @@ app.include_router(query_router)
 # Every error has the same shape as the backend's: {"error": "..."}
 @app.exception_handler(StarletteHTTPException)
 async def http_error(_: Request, e: StarletteHTTPException) -> JSONResponse:
-    return JSONResponse({"error": str(e.detail)}, status_code=e.status_code)
+    return JSONResponse({"error": str(e.detail)}, status_code=e.status_code, headers=e.headers)
 
 
 @app.exception_handler(RequestValidationError)

@@ -5,6 +5,7 @@ import java.time.Duration;
 import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
@@ -81,7 +82,8 @@ public class QueryClient {
             case 400, 429, 503, 504 -> HttpStatus.valueOf(status);
             default -> HttpStatus.BAD_GATEWAY;
         };
-        return error(mapped, reasonIn(e));
+        String retryAfter = e.getResponseHeaders() == null ? null : e.getResponseHeaders().getFirst(HttpHeaders.RETRY_AFTER);
+        return retryAfter == null ? error(mapped, reasonIn(e)) : new TryAgainLaterException(mapped, reasonIn(e), retryAfter);
     }
 
     private static String reasonIn(RestClientResponseException e) {

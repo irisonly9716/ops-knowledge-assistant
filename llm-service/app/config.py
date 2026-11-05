@@ -68,11 +68,23 @@ class Settings(BaseSettings):
     query_top_k: int = 5
     # Temporary, from a small measurement on the sample documents; the eval sets the real value
     query_min_similarity: float = 0.35
-    # A connection is held only for the search, so few are needed. Postgres allows 100 in total
-    query_pool_size: int = 20
+    # Model calls at once in this process, embeddings and answers together. The peak is 900 in flight across 4 processes.
+    # Not an exact share of it, because workers on one port don't get equal work: measured at 300 QPS, 225 each refused
+    # 53 of 1,500 queries and 300 each refused none, with at most 898 at once. One process couldn't use many more anyway.
+    # Development can set a low value in .env because those tests are paid for privately; that says nothing about production
+    model_max_concurrent_calls: int = 300
+    # How long a query waits for a free slot before it is refused. A queue that keeps growing helps nobody: at the
+    # peak about 300 slots free up per second, so this holds about a second of work
+    model_slot_wait_seconds: float = 1.0
+    # Per process, and Postgres allows 100 in total, shared with the backend and the consumers. A connection is held only
+    # for the search, so few are needed. Measured at 300 QPS on 4 processes: 5 each was as fast as 20 each, with at most 2
+    # statements running at once. At 20 each, 8 processes took 99 connections and Postgres started refusing them
+    query_pool_size: int = 5
 
     llm_service_host: str = "127.0.0.1"
     llm_service_port: int = 8000
+    # Processes of the API. One reaches about 100 QPS, and 4 met the 300 QPS peak
+    llm_service_workers: int = 1
 
     @property
     def doc_upload_dlq_topic(self) -> str:
