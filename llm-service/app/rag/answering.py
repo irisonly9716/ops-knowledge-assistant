@@ -2,8 +2,8 @@
 
 Two defenses against answers made up from nothing:
   1. A similarity threshold, before the model is called: a question far from everything is refused for free.
-     Measured, it can't do the whole job: on the sample documents, answerable questions scored 0.40 to 0.69 and
-     related but unanswerable ones 0.21 to 0.41, so the two overlap. The value is temporary until the eval sets it.
+     It can't tell a near miss from an answerable question: on dev, questions to refuse scored 0.33 to 0.65 and
+     answerable ones 0.27 to 0.70. So it only saves model calls; the value and why are in config.py.
   2. The model itself, told to reply with one fixed word when the excerpts don't answer the question.
      On the evaluation's dev questions it does almost all of the refusing: similarity can't tell a near miss from
      an answerable question, the model can. Its rules were chosen there (eval/results): telling it only to answer
