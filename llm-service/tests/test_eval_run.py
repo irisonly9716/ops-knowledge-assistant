@@ -42,7 +42,7 @@ class FakeEncoding:
 
 
 def traced(candidates, result=None, error=None) -> QueryTrace:
-    return QueryTrace(result, error, candidates, candidates[0].score if candidates else 0.0, 1.0, 2.0, 3.0, 10, 5)
+    return QueryTrace(result, error, False, candidates, candidates[0].score if candidates else 0.0, 1.0, 2.0, 3.0, 10, 5)
 
 
 @pytest.mark.anyio

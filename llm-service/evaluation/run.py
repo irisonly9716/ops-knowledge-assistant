@@ -137,6 +137,7 @@ async def ask_one(service: QueryService, question: Question, chunks_of: dict[Sec
     record |= {
         "status": metrics.ERROR if traced.error else traced.result.status,
         "error": str(traced.error) if traced.error else None,
+        "uncited": traced.uncited,
         "answer": traced.result.text if traced.result else None,
         "citations": [c.number for c in traced.result.citations] if traced.result else [],
         "top_score": traced.top_score,
@@ -200,7 +201,9 @@ def summarize(records: list[dict], questions: dict[str, Question], name: str, sp
              f"{len(records)} questions from `eval/{split}.jsonl`. Answers by {settings.chat_model}, embeddings "
              f"{settings.embedding_model}, top {settings.query_top_k} excerpts in the prompt, {CANDIDATES} candidates "
              f"searched. The run used a threshold of 0, so every question reached the model. "
-             f"{sum(r['status'] == metrics.ERROR for r in records)} ended in an error. {run_seconds:.0f} s in all.", ""]
+             f"{sum(r['status'] == metrics.ERROR for r in records)} ended in an error, and "
+             f"{sum(bool(r.get('uncited')) for r in records)} replies citing nothing were shown as refusals. "
+             f"{run_seconds:.0f} s in all.", ""]
 
     # Retrieval
     lines += ["## Retrieval", "",

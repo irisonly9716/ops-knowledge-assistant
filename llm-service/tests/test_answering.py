@@ -198,6 +198,23 @@ def test_an_answer_with_no_citation_is_an_error(text):
 
 
 @pytest.mark.anyio
+async def test_a_reply_citing_nothing_is_shown_as_a_refusal_and_logged(setup, caplog):
+    service, _, _, _, _ = setup([chunk(0.6)], text="The excerpts don't say when the host announces it.")
+    with caplog.at_level("WARNING", logger="query"):
+        result = await ask(service)
+    assert (result.status, result.text, result.citations) == (REFUSED, REFUSAL_TEXT, [])
+    assert "cited no excerpt" in caplog.text
+    assert (await trace(service)).uncited
+
+
+@pytest.mark.anyio
+async def test_a_cut_off_reply_citing_nothing_is_still_an_error(setup):
+    service, _, _, _, _ = setup([chunk(0.6)], text="The first step is", complete=False)
+    with pytest.raises(InvalidAnswer, match="cut off"):
+        await ask(service)
+
+
+@pytest.mark.anyio
 async def test_a_made_up_citation_never_reaches_the_user(setup):
     service, _, _, _, _ = setup([chunk(0.6, 1), chunk(0.5, 2)], text="Do this [3].")
     with pytest.raises(InvalidAnswer):

@@ -10,8 +10,11 @@ Two defenses against answers made up from nothing:
      from what the excerpts cover made it answer near misses with "the documents don't say exactly when" plus
      whatever was close (1 wrong answer of 15 became 3), so the rule says outright that the topic without the
      specific thing asked is not an answer; with it, 0 of 15 in two runs.
-After generating, the citations are checked: an answer citing an excerpt that doesn't exist, or none at all, is
-an error and never reaches the user. This doesn't prove each sentence is supported, only that the links are real.
+After generating, the citations are checked: an answer citing an excerpt that doesn't exist is an error and never
+reaches the user. This doesn't prove each sentence is supported, only that the links are real. A reply citing nothing
+at all is shown as a refusal: on dev, 1 or 2 replies a run were the model refusing in its own words ("the excerpts
+don't say ...") instead of with the fixed word, and as errors they gave the user a 502. Either way nothing uncited is
+shown; a citation that doesn't exist stays an error, because that is the model making something up.
 
 A refusal reads the same whether a document exists in another department or not: anything else would tell
 people what other departments have.
@@ -54,6 +57,10 @@ class InvalidAnswer(Exception):
     """The model answered, but the answer can't be shown: its citations don't hold, or it was cut off."""
 
 
+class Uncited(InvalidAnswer):
+    """The reply cites no excerpt at all: the query path shows it as a refusal."""
+
+
 @dataclass(frozen=True)
 class Citation:
     number: int   # the [n] in the answer text
@@ -78,7 +85,7 @@ def cited_numbers(text: str, excerpt_count: int) -> list[int]:
     each of them exists."""
     numbers = {int(number) for match in _CITATION.findall(text) for number in match.split(",")}
     if not numbers:
-        raise InvalidAnswer("the answer cites no excerpt")
+        raise Uncited("the answer cites no excerpt")
     unknown = sorted(n for n in numbers if not 1 <= n <= excerpt_count)
     if unknown:
         raise InvalidAnswer(f"the answer cites excerpts that don't exist: {unknown} (there are {excerpt_count})")
@@ -90,6 +97,7 @@ class QueryTrace:
     """What one question went through: the answer, and what the evaluation needs to see behind it."""
     result: QueryAnswer | None         # None when the answer failed validation: see error
     error: InvalidAnswer | None
+    uncited: bool                      # the model's reply cited nothing and was shown as a refusal
     candidates: list[RetrievedChunk]   # everything the search returned, best first; the prompt gets the first top_k
     top_score: float
     embed_ms: float
@@ -138,7 +146,7 @@ class QueryService:
         chunks = found[:self._top_k]
         top_score = chunks[0].score if chunks else 0.0
         input_tokens = output_tokens = 0
-        result, error = QueryAnswer(REFUSED, REFUSAL_TEXT, [], departments), None
+        result, error, uncited = QueryAnswer(REFUSED, REFUSAL_TEXT, [], departments), None, False
         if top_score >= self._min_similarity:
             reply = await self._model.answer(self._instructions, build_prompt(question, chunks), budget)
             input_tokens, output_tokens = reply.input_tokens, reply.output_tokens
@@ -149,8 +157,13 @@ class QueryService:
                     numbers = cited_numbers(reply.text, len(chunks))
                     result = QueryAnswer(ANSWERED, reply.text.strip(), [Citation(n, chunks[n - 1]) for n in numbers],
                                          departments)
+            except Uncited:
+                # The refusal it was meant to be. Logged, so a model that stops citing shows up in the query log
+                log.warning("the model's reply cited no excerpt and is shown as a refusal")
+                uncited = True
             except InvalidAnswer as invalid:   # returned, not raised, so the evaluation keeps what the search found
                 result, error = None, invalid
         finished = time.perf_counter()
-        return QueryTrace(result, error, found, top_score, (embedded - started) * 1000, (searched - embedded) * 1000,
+        return QueryTrace(result, error, uncited, found, top_score, (embedded - started) * 1000,
+                          (searched - embedded) * 1000,
                           (finished - searched) * 1000, input_tokens, output_tokens)
