@@ -71,7 +71,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Apply migrations | `docker compose run --rm flyway migrate` |
 | Python setup | `cd llm-service` · `uv venv` · `uv pip install -r requirements.txt` |
 | Create topics · mock data | `uv run python -m scripts.init_topics` · `uv run python -m scripts.generate_mock_data` |
-| Evaluation corpus: what's in it · load it · the questions | `uv run python -m scripts.generate_corpus --report` · `uv run python -m scripts.ingest_corpus` (needs the backend, Kafka and the consumer) · `uv run python -m scripts.generate_questions --report` |
+| Evaluation corpus: what's in it · load it · the questions | `uv run python -m scripts.generate_corpus --report` · `uv run python -m scripts.ingest_corpus` (needs the backend, Kafka and the consumer) · `uv run python -m scripts.generate_questions --report` · review: `uv run python -m evaluation.review` |
 | Run backend (:8081) | `cd backend-service` · `.\mvnw.cmd spring-boot:run` |
 | Run consumer · LLM API (:8000) | `uv run python -m app.consumers.upload_consumer` · `uv run python -m app.server --reload` (not plain `uvicorn`: async psycopg needs the event loop it chooses) |
 | Python tests | `uv run pytest` (database tests use a throwaway database, skipped if Postgres is down) |
@@ -196,4 +196,4 @@ A new document for one's own department takes effect at once. Replacing anything
 - v5 · 2026-11-03 · Arianna · Commits are authored as Arianna Ge; don't rerun tests to answer a question.
 - v6 · 2026-11-03 · Arianna · The delivery count and the reconciliation job.
 - v7 · 2026-11-04 · Arianna · The rate limit, the limit on model calls, virtual threads and worker processes.
-- v8 · 2026-11-05 · Arianna · The evaluation corpus and dataset; tune on dev only.
+- v8 · 2026-11-05 · Arianna · The evaluation corpus, dataset and review; tune on dev only.

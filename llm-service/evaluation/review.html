@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Question review</title>
+<style>
+  :root { --bg: #f7f7f5; --panel: #fff; --ink: #1d1d1b; --muted: #6b6b66; --line: #e2e1dc; --accent: #2f5d8a;
+          --ok: #2e7d4f; --bad: #b3412e; --warn: #8a6d1f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1b1b1a; --panel: #242423; --ink: #ecebe6; --muted: #a3a29b; --line: #3a3a37; --accent: #8fb6dd;
+            --ok: #7fc79c; --bad: #e58f7f; --warn: #d9bd6a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--ink); }
+  header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 1; }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; }
+  .counts span { margin-right: 12px; }
+  main { display: grid; grid-template-columns: minmax(260px, 34%) 1fr; height: calc(100vh - 58px); }
+  #list { overflow-y: auto; border-right: 1px solid var(--line); }
+  #list .row { padding: 8px 12px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  #list .row.current { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  #list .row small { color: var(--muted); display: block; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--muted); }
+  .dot.accepted { background: var(--ok); } .dot.rejected { background: var(--bad); }
+  #detail { overflow-y: auto; padding: 16px 20px 40px; }
+  label { display: block; font-weight: 600; margin: 14px 0 4px; }
+  textarea, input, select { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  textarea { width: 100%; min-height: 56px; resize: vertical; }
+  .inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .tags label { display: inline-flex; gap: 4px; font-weight: 400; margin: 2px 10px 2px 0; }
+  button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--panel); border-color: var(--accent); }
+  button.ok { border-color: var(--ok); color: var(--ok); } button.bad { border-color: var(--bad); color: var(--bad); }
+  .meta { color: var(--muted); font-size: 12px; }
+  .section { border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; margin: 6px 0; background: var(--panel); }
+  .section pre { white-space: pre-wrap; font: 12px/1.45 ui-monospace, monospace; margin: 6px 0 0; color: var(--muted); }
+  table { border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+  td { border: 1px solid var(--line); padding: 2px 6px; }
+  #message { min-height: 20px; margin-top: 10px; }
+  .error { color: var(--bad); } .done { color: var(--ok); }
+  .bar { position: sticky; bottom: 0; background: var(--bg); padding: 10px 0; display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--line); margin-top: 18px; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; height: auto; } #list { max-height: 40vh; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Question review</h1>
+  <div class="counts" id="counts"></div>
+  <div class="inline">
+    <select id="f-status"><option value="">every status</option><option>candidate</option><option>accepted</option><option>rejected</option></select>
+    <select id="f-kind"><option value="">every kind</option></select>
+    <select id="f-split"><option value="">dev and test</option><option>dev</option><option>test</option></select>
+    <input id="f-text" placeholder="search" size="14">
+    <button id="new">New question</button>
+    <button id="export" class="primary">Export dev and test</button>
+  </div>
+</header>
+<main>
+  <div id="list"></div>
+  <div id="detail"><p class="meta">Loading…</p></div>
+</main>
+<script>
+const ROLES = ["staff", "manager", "executive", "admin"];
+const DEPARTMENTS = ["Beauty", "Consumer Electronics", "Fresh Grocery", "Home Goods"];
+const ROUTES = ["documents", "data", "both", "none"];
+const TAGS = ["direct", "keyword", "paraphrase", "colloquial", "vague", "cross_document", "near_miss", "unauthorized",
+              "out_of_scope", "general_knowledge", "multi_turn", "planning_advice", "single_table", "multi_table", "time_range"];
+let questions = [], corpus = [], current = null, draft = null;
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, props = {}, ...children) => {
+  const node = Object.assign(document.createElement(tag), props);
+  for (const child of children) node.append(child);
+  return node;
+};
+const refKey = (r) => [r.doc_type, r.department, r.title || "", r.campaign || "", r.campaign_start || ""].join("|");
+const kindOf = (q) => q.group.split(":")[0];
+
+async function api(method, path, body) {
+  const response = await fetch(path, { method, headers: { "Content-Type": "application/json" }, body: body && JSON.stringify(body) });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+
+function say(text, kind = "done") {
+  const box = $("message");
+  if (box) { box.className = kind; box.textContent = text; }
+}
+
+function counts() {
+  const by = (s) => questions.filter((q) => q.status === s).length;
+  const human = questions.filter((q) => q.source === "human").length;
+  $("counts").replaceChildren(
+    el("span", { textContent: `${questions.length} questions` }),
+    el("span", { textContent: `${by("accepted")} accepted` }),
+    el("span", { textContent: `${by("rejected")} rejected` }),
+    el("span", { textContent: `${by("candidate")} to review` }),
+    el("span", { textContent: `${human} written by hand` }));
+}
+
+function visible() {
+  const status = $("f-status").value, kind = $("f-kind").value, split = $("f-split").value, text = $("f-text").value.toLowerCase();
+  return questions.filter((q) => (!status || q.status === status) && (!kind || kindOf(q) === kind)
+    && (!split || q.split === split) && (!text || JSON.stringify(q).toLowerCase().includes(text)));
+}
+
+function renderList() {
+  counts();
+  const rows = visible().map((q) => {
+    const row = el("div", { className: "row" + (current && q.id === current.id ? " current" : "") },
+      el("span", { className: "dot " + q.status }),
+      el("span", { textContent: q.question }),
+      el("small", { textContent: `${kindOf(q)} · ${q.route} · ${q.expected} · ${q.split} · ${q.id}` }));
+    row.onclick = () => open(q.id);
+    return row;
+  });
+  $("list").replaceChildren(...rows);
+}
+
+function sectionText(section) {
+  const doc = corpus.find((d) => refKey(d.ref) === refKey(section.document));
+  if (!doc) return { label: refKey(section.document), text: "(not in the corpus)" };
+  if (!section.heading_path.length) return { label: doc.label + " (whole document)", text: doc.sections.map((s) => s.text).join("\n\n") };
+  const found = doc.sections.find((s) => s.heading_path.join(">") === section.heading_path.join(">"));
+  return { label: `${doc.label} › ${section.heading_path.slice(1).join(" › ")}`, text: found ? found.text : "(no such section)" };
+}
+
+function sectionList(q, field) {
+  const box = el("div");
+  for (const [index, section] of q[field].entries()) {
+    const { label, text } = sectionText(section);
+    const body = el("pre", { textContent: text, hidden: true });
+    const toggle = el("button", { textContent: "text", type: "button" });
+    toggle.onclick = () => (body.hidden = !body.hidden);
+    const remove = el("button", { textContent: "remove", type: "button" });
+    remove.onclick = () => { q[field].splice(index, 1); render(q); };
+    box.append(el("div", { className: "section" }, el("div", { className: "inline" }, el("span", { textContent: label }), toggle, remove), body));
+  }
+  if (!q[field].length) box.append(el("div", { className: "meta", textContent: "none" }));
+  return box;
+}
+
+function sectionPicker(q) {
+  const docSelect = el("select");
+  for (const [i, d] of corpus.entries()) docSelect.append(el("option", { value: i, textContent: d.label }));
+  const sectionSelect = el("select");
+  const fill = () => {
+    const doc = corpus[docSelect.value];
+    sectionSelect.replaceChildren(el("option", { value: -1, textContent: "(whole document)" }),
+      ...doc.sections.map((s, i) => el("option", { value: i, textContent: s.heading_path.slice(1).join(" › ") || s.heading_path[0] })));
+  };
+  docSelect.onchange = fill; fill();
+  const field = el("select");
+  for (const f of ["relevant", "hidden", "related"]) field.append(el("option", { value: f, textContent: f }));
+  const add = el("button", { textContent: "add section", type: "button" });
+  add.onclick = () => {
+    const doc = corpus[docSelect.value], i = Number(sectionSelect.value);
+    q[field.value].push({ document: doc.ref, heading_path: i < 0 ? [] : doc.sections[i].heading_path });
+    render(q);
+  };
+  return el("div", { className: "inline" }, docSelect, sectionSelect, field, add);
+}
+
+function resultTable(rows) {
+  if (!rows) return el("div", { className: "meta", textContent: "no result" });
+  const table = el("table");
+  for (const row of rows.slice(0, 20)) table.append(el("tr", {}, ...row.map((v) => el("td", { textContent: v ?? "null" }))));
+  return el("div", {}, table, rows.length > 20 ? el("div", { className: "meta", textContent: `${rows.length} rows, 20 shown` }) : "");
+}
+
+function select(options, value, onchange) {
+  const node = el("select");
+  for (const o of options) node.append(el("option", { value: o, textContent: o || "(none)", selected: o === (value ?? "") }));
+  node.onchange = () => onchange(node.value || null);
+  return node;
+}
+
+function render(q) {
+  const isNew = !q.id;
+  const question = el("textarea", { value: q.question }); question.oninput = () => (q.question = question.value);
+  const points = el("textarea", { value: q.answer_points.join("\n") });
+  points.oninput = () => (q.answer_points = points.value.split("\n").map((s) => s.trim()).filter(Boolean));
+  const sql = el("textarea", { value: q.gold_sql || "", style: "font-family: ui-monospace, monospace; min-height: 90px" });
+  sql.oninput = () => (q.gold_sql = sql.value);
+  const note = el("textarea", { value: q.note || "", placeholder: "why it was changed or rejected" });
+  note.oninput = () => (q.note = note.value || null);
+  const tried = el("div");
+  const run = el("button", { textContent: "run SQL", type: "button" });
+  run.onclick = async () => {
+    try { tried.replaceChildren(resultTable((await api("POST", "/api/sql", { sql: q.gold_sql || "" })).rows)); }
+    catch (e) { tried.replaceChildren(el("div", { className: "error", textContent: e.message })); }
+  };
+  const tags = el("div", { className: "tags" });
+  for (const tag of TAGS) {
+    const box = el("input", { type: "checkbox", checked: q.tags.includes(tag) });
+    box.onchange = () => (q.tags = box.checked ? [...q.tags, tag] : q.tags.filter((t) => t !== tag));
+    tags.append(el("label", {}, box, tag));
+  }
+  const turns = el("div");
+  for (const turn of q.turns) {
+    const t = el("textarea", { value: turn.content }); t.oninput = () => (turn.content = t.value);
+    turns.append(el("div", { className: "meta", textContent: turn.role }), t);
+  }
+  const addTurns = el("button", { textContent: q.turns.length ? "remove the earlier turn" : "make it a follow-up", type: "button" });
+  addTurns.onclick = () => { q.turns = q.turns.length ? [] : [{ role: "user", content: "" }, { role: "assistant", content: "" }]; render(q); };
+
+  const save = el("button", { textContent: isNew ? "Create" : "Save", className: "primary", type: "button" });
+  save.onclick = () => store(q);
+  const accept = el("button", { textContent: "Accept and next", className: "ok", type: "button", hidden: isNew });
+  accept.onclick = () => store({ ...q, status: "accepted" }, true);
+  const reject = el("button", { textContent: "Reject and next", className: "bad", type: "button", hidden: isNew });
+  reject.onclick = () => store({ ...q, status: "rejected" }, true);
+  const back = el("button", { textContent: "Back to candidate", type: "button", hidden: isNew || q.status === "candidate" });
+  back.onclick = () => store({ ...q, status: "candidate" });
+
+  $("detail").replaceChildren(
+    el("div", { className: "meta", textContent: isNew ? "A new question, written by hand" : `${q.id} · ${q.source} · ${q.group} · ${q.split} · ${q.status}` }),
+    el("label", { textContent: "Question" }), question,
+    el("label", { textContent: "Earlier turns" }), turns, addTurns,
+    el("label", { textContent: "Asked by" }),
+    el("div", { className: "inline" },
+      select(ROLES, q.asker.role, (v) => (q.asker.role = v)),
+      select(["", ...DEPARTMENTS], q.asker.department, (v) => (q.asker.department = v))),
+    el("label", { textContent: "Route and expected outcome" }),
+    el("div", { className: "inline" },
+      select(ROUTES, q.route, (v) => (q.route = v)),
+      select(["answer", "refuse"], q.expected, (v) => (q.expected = v))),
+    el("label", { textContent: "Tags" }), tags,
+    el("label", { textContent: "Answer points, one per line" }), points,
+    el("label", { textContent: "Sections a right answer cites (relevant)" }), sectionList(q, "relevant"),
+    el("label", { textContent: "Sections this asker must not get (hidden)" }), sectionList(q, "hidden"),
+    el("label", { textContent: "Close to the question, without its answer (related)" }), sectionList(q, "related"),
+    sectionPicker(q),
+    el("label", { textContent: "Gold SQL" }), sql, el("div", { className: "inline" }, run), tried,
+    el("label", { textContent: "Stored result" }), resultTable(q.gold_result),
+    el("label", { textContent: "Note" }), note,
+    el("div", { className: "bar" }, save, accept, reject, back),
+    el("div", { id: "message" }));
+}
+
+function open(id) {
+  const q = questions.find((x) => x.id === id);
+  current = JSON.parse(JSON.stringify(q));
+  draft = null;
+  render(current);
+  renderList();
+}
+
+async function store(q, next = false) {
+  try {
+    const saved = q.id ? await api("PUT", `/api/questions/${q.id}`, q) : await api("POST", "/api/questions", q);
+    const at = questions.findIndex((x) => x.id === saved.id);
+    if (at >= 0) questions[at] = saved; else questions.push(saved);
+    const list = visible();
+    const position = list.findIndex((x) => x.id === saved.id);
+    if (next) {
+      const following = list.slice(position + 1).find((x) => x.status === "candidate") || list.find((x) => x.status === "candidate");
+      if (following) return open(following.id);
+    }
+    open(saved.id);
+    say("saved");
+  } catch (e) { say(e.message, "error"); }
+}
+
+$("new").onclick = () => {
+  current = { question: "", turns: [], asker: { department: "Beauty", role: "staff" }, route: "documents", expected: "answer",
+              relevant: [], hidden: [], related: [], gold_sql: null, gold_result: null, answer_points: [], tags: ["colloquial"],
+              note: null, status: "accepted" };
+  render(current);
+};
+$("export").onclick = async () => {
+  try { const c = await api("POST", "/api/export"); alert(`Exported ${c.dev} to eval/dev.jsonl and ${c.test} to eval/test.jsonl`); }
+  catch (e) { alert(e.message); }
+};
+for (const id of ["f-status", "f-kind", "f-split"]) $(id).onchange = renderList;
+$("f-text").oninput = renderList;
+
+(async () => {
+  [questions, corpus] = await Promise.all([api("GET", "/api/questions"), api("GET", "/api/corpus")]);
+  for (const kind of [...new Set(questions.map(kindOf))].sort()) $("f-kind").append(el("option", { textContent: kind }));
+  const first = questions.find((q) => q.status === "candidate") || questions[0];
+  if (first) open(first.id); else renderList();
+})();
+</script>
+</body>
+</html>
