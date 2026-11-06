@@ -132,8 +132,10 @@ Rules decided while reviewing, each with the question that raised it in its `not
   every day together, and the gold SQL returns both.
 - **What the asker may not see is neither used nor guessed at.** A Beauty employee asking to compare Beauty's growth
   with Fresh Grocery's gets a refusal. A Fresh Grocery manager asking to estimate GMV "the way Beauty does it" gets
-  the company-wide practice, and the answer says it doesn't include Beauty's. A question about a topic only other
-  departments' SOPs cover is answered from the asker's own department and company-wide documents, or refused.
+  the company-wide practice, and the answer says it doesn't include Beauty's. A request for references on a topic
+  is answered from what the asker may see, the asker's own department's documents and company-wide ones together,
+  each cited: a Fresh Grocery employee writing an SOP for leftover stock gets the department's 24-hour rule and the
+  company-wide discount approvals. It is refused only when none of them covers the topic.
 - **A step without its how is not an answer.** A document that says "confirm the gift is missing" doesn't say how
   to confirm it, so a question about how is a near miss and should be refused.
 - **A question must stand on its own.** One that refers to "these products" with no earlier turn is removed, and one
