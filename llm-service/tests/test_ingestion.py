@@ -19,7 +19,7 @@ from app.consumers import data_tables
 from app.consumers.errors import PermanentError
 from app.consumers.events import UploadEvent
 from app.consumers.handlers import TABLE_WRITE_WORST_CASE_SECONDS, UploadHandler
-from app.rag import store
+from app.rag import retrieval, store
 from app.rag.embeddings import EMBEDDING_DIMENSIONS, EmbeddingBatch
 from app.time_budget import TimeBudget
 
@@ -252,6 +252,27 @@ def test_a_replacement_keeps_the_doc_id_and_rebuilds_the_chunks(conn, upload, ma
     assert len(chunks) == 3
     assert not {chunk_id for chunk_id, _ in chunks} & set(old_chunk_ids)   # old chunks gone, not mixed in
     assert any("including partner shops" in content for _, content in chunks)
+
+
+@pytest.mark.anyio
+async def test_after_a_replacement_the_search_finds_only_the_new_version(conn, upload, make_handler, database):
+    handler = make_handler()
+    first = upload(SOP)
+    handler(first)
+    new_version = SOP.read_text(encoding="utf-8").replace(
+        "Applies to every department.", "Applies to every department, including partner shops.")
+    handler(upload(new_version, replaces=first.upload_id, filename="account-restriction-handling.md"))
+
+    # The fake embedder points every chunk the same way, so one search with a large top_k returns every chunk the
+    # search can reach at all: a single piece of the old version still searchable would be in it
+    async with db.query_pool(database) as pool:
+        await pool.wait()
+        async with pool.connection() as reader:
+            found = await retrieval.search(reader, [1.0] * EMBEDDING_DIMENSIONS, ["ALL"], "fake-embedding", top_k=50)
+    current = {row[0] for row in conn.execute("SELECT chunk_id FROM doc_chunks").fetchall()}
+    assert {chunk.chunk_id for chunk in found} == current
+    assert not any("Applies to every department." in chunk.content for chunk in found)
+    assert any("including partner shops" in chunk.content for chunk in found)
 
 
 def test_a_replacement_of_a_version_that_is_no_longer_current_is_rejected(conn, upload, make_handler):

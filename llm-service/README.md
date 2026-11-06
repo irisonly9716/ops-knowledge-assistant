@@ -63,6 +63,7 @@ app/
 ├── sql_agent/     Text-to-SQL + safety checks + row-level filtering
 ├── router/        query routing + combined answers
 └── memory/        Redis cache + conversation memory
+evaluation/        the evaluation dataset's format (dataset.py) and the review page (review.py); not part of the service
 tests/             pytest; test_events (contract / cross-language drift) test_storage (path traversal)
                    test_upload_consumer (every branch of the consume loop) test_health
                    test_embeddings (fake OpenAI client) test_parsing (all three formats parse the same)
@@ -73,6 +74,10 @@ tests/             pytest; test_events (contract / cross-language drift) test_st
                    test_query_models (fake client: retries inside the budget, the limit on calls at once)
                    test_query_api (the real app with a fake service: who may call, failures, starting up)
                    test_ingestion (real Postgres: idempotency, rollback, replacements, conflicts, for documents and tables)
+                   test_generate_corpus (the corpus generator without a model: numbers, the rules of a draft, authors)
+                   test_dataset (the dataset's format, the split, finding a labelled section)
+                   test_generate_questions (the question generator without a model: tasks, which answers are kept, SQL)
+                   test_review (the review page's API: what can change, what is checked, what is exported)
 tests/fixtures/documents/   docx / PDF fixtures, generated from Markdown by scripts/make_sample_documents.py
 ```
 
@@ -295,6 +300,53 @@ run produces the same rows (the campaign documents in `campaign_docs/` quote the
 the business tables, and through the foreign keys also uploads / documents / chunks. A campaign that is still
 running has no product or customer rows: its export doesn't exist yet, so uploading one is a real `mode=new`
 (`data_tables/` has samples for campaign 11).
+
+## The evaluation corpus
+
+```bash
+uv run python -m scripts.generate_corpus --report   # who wrote what, and how long the paragraphs are
+uv run python -m scripts.ingest_corpus              # upload all of it through the API
+```
+
+`sop_docs/` and `campaign_docs/` hold 85 documents: 30 SOPs, and 27 plans and 28 reviews of 30 campaigns. Seven
+were written by hand; `scripts/generate_corpus.py` generated the rest from `scripts/corpus_spec.py`, and they are
+committed because a model writes different text every time. Running it again writes only what is missing. It is the
+corpus retrieval is measured on, so it is built to be hard: the same SOP in every department, campaigns of the same
+name, a rule and its exception, campaigns with only one of their two documents (the folders' READMEs list them).
+
+- **The numbers can't drift from SQL.** Every table and figure of a campaign document is rendered from the
+  database and put into the model's text at a placeholder. A draft that uses a number not in its facts is
+  rejected and written again, at most 3 times; so is one that writes a table out itself, which models asked to
+  try again did in the first batch. An SOP may only contain the numbers of its brief.
+- **Different authors.** A first batch written to one template came out with every paragraph about the same
+  length. Each document now has an author with its own sections, length and habits: five for SOPs, three for
+  plans, four for reviews. Across the 85 documents, paragraphs run from 1 word to 165 (median 25); 19 documents
+  have a paragraph of 100 words or more and 49 one of 20 or fewer.
+- **What the checks can't see.** They check numbers, not claims: a sentence like "every product's return rate
+  was above 10%" passes because 10% is in the facts, true or not. That is for the human review of the dataset.
+- **Ingestion goes through the API**, as the uploads of real people would: a staff member of the department
+  uploads each document, and a company-wide one waits for that person's manager, who approves it. Measured on a
+  freshly generated database: all 85 done, 10 of them approved, in 35 s; 347 chunks, 3 to 9 per document. Each
+  department's staff can search 107 to 127 chunks, far more than the 5 a query returns.
+- **Cost.** Generating the 78 documents cost about $0.03 with gpt-6-luna, retries included; embedding the
+  corpus, about 51,000 tokens, about $0.001.
+
+Nine generated SOPs use lettered sub-steps (a, b, c), which Markdown doesn't treat as a list, so they become
+part of their step's text rather than `substeps`. The step stays whole either way.
+
+## The evaluation dataset
+
+```bash
+uv run python -m scripts.generate_questions --report   # what the candidates cover
+```
+
+[eval/](../eval/) holds the dataset: 257 reviewed questions in `dev.jsonl` and `test.jsonl`, from 256 candidates
+written by `scripts/generate_questions.py` with gpt-6-sol rather than the model that answers, and questions written by
+hand. `uv run python -m evaluation.review` opens a local page to review them (127.0.0.1:8765). Every label names a section by its document and heading path, so
+it survives a new ingestion; `evaluation.dataset.resolve()` finds the chunks. A question is only kept when its
+answer points' numbers are in the sections it cites, its SQL runs read-only and keeps to the asker's department,
+and an unauthorized question really is about something its asker can't see. The format, the split and the
+numbers: [eval/README.md](../eval/README.md).
 
 ## Tests
 

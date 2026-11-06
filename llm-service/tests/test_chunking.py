@@ -25,6 +25,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "documents"
 SOPS = sorted((REPO_ROOT / "sop_docs").glob("*.md"))
 SOPS.remove(REPO_ROOT / "sop_docs" / "README.md")
+# Written by hand, each with at least 7 numbered steps. The generated SOPs come from authors who write differently:
+# some have 3 big steps, an FAQ has none
+HAND_WRITTEN_SOPS = {"account-restriction-handling", "new-campaign-launch-checklist", "livestream-review-process-beauty",
+                     "host-onboarding-and-review-electronics", "sale-event-inventory-check-fresh-grocery"}
 REVIEW = REPO_ROOT / "campaign_docs" / "beauty-black-friday-live-review.md"
 
 SOP_INFO = DocumentInfo(type_label="SOP", department_label="All departments", title="Some SOP")
@@ -54,7 +58,8 @@ def test_every_sop_step_is_whole_inside_exactly_one_chunk(sop: Path):
     document = parse_file(sop)
     chunks = chunk_document(document, SOP_INFO)
     steps = sop_steps(document)
-    assert len(steps) >= 7
+    if sop.stem in HAND_WRITTEN_SOPS:
+        assert len(steps) >= 7
     for step in steps:
         line = f"{step['order']}. {step['text']}"
         assert sum(line in chunk.content for chunk in chunks) == 1, line
