@@ -78,41 +78,72 @@ def cited_numbers(text: str, excerpt_count: int) -> list[int]:
     return sorted(numbers)
 
 
+@dataclass(frozen=True)
+class QueryTrace:
+    """What one question went through: the answer, and what the evaluation needs to see behind it."""
+    result: QueryAnswer | None         # None when the answer failed validation: see error
+    error: InvalidAnswer | None
+    candidates: list[RetrievedChunk]   # everything the search returned, best first; the prompt gets the first top_k
+    top_score: float
+    embed_ms: float
+    search_ms: float
+    model_ms: float
+    input_tokens: int
+    output_tokens: int
+
+
 class QueryService:
-    def __init__(self, embedder: QueryEmbedder, model: AnswerModel, pool: Any, *, min_similarity: float, top_k: int):
+    def __init__(self, embedder: QueryEmbedder, model: AnswerModel, pool: Any, *, min_similarity: float, top_k: int,
+                 instructions: str = INSTRUCTIONS):
         self._embedder = embedder
         self._model = model
         self._pool = pool
         self._min_similarity = min_similarity
         self._top_k = top_k
+        self._instructions = instructions
 
     async def answer(self, question: str, *, user_id: int, role: str, department: str | None,
                      budget: TimeBudget) -> QueryAnswer:
+        traced = await self.trace(question, role=role, department=department, budget=budget)
+        if traced.error:
+            raise traced.error
+        # The question itself stays out of the logs: what people ask is private (see the audit rules)
+        log.info("query user=%s role=%s status=%s chunks=%d top_score=%.3f embed_ms=%.0f search_ms=%.0f model_ms=%.0f "
+                 "tokens_in=%d tokens_out=%d", user_id, role, traced.result.status, min(len(traced.candidates), self._top_k),
+                 traced.top_score, traced.embed_ms, traced.search_ms, traced.model_ms, traced.input_tokens,
+                 traced.output_tokens)
+        return traced.result
+
+    async def trace(self, question: str, *, role: str, department: str | None, budget: TimeBudget,
+                    candidates: int = 0) -> QueryTrace:
+        """The query path itself, shared by /query and the evaluation, so the evaluation measures the code that runs.
+        `candidates` searches deeper than top_k without changing what the model sees: the evaluation needs the top 50
+        to tell a chunk ranked too low from one the search never found."""
         departments = retrieval.visible_departments(role, department)   # before anything costs money or time
 
         started = time.perf_counter()
         vector = await self._embedder.embed_question(question, budget)
         embedded = time.perf_counter()
         async with self._pool.connection(timeout=max(budget.remaining(), 0)) as conn:
-            chunks = await retrieval.search(conn, vector, departments, self._embedder.model, self._top_k)
+            found = await retrieval.search(conn, vector, departments, self._embedder.model, max(self._top_k, candidates))
         searched = time.perf_counter()
 
+        chunks = found[:self._top_k]
         top_score = chunks[0].score if chunks else 0.0
         input_tokens = output_tokens = 0
-        result = QueryAnswer(REFUSED, REFUSAL_TEXT, [], departments)
+        result, error = QueryAnswer(REFUSED, REFUSAL_TEXT, [], departments), None
         if top_score >= self._min_similarity:
-            reply = await self._model.answer(INSTRUCTIONS, build_prompt(question, chunks), budget)
+            reply = await self._model.answer(self._instructions, build_prompt(question, chunks), budget)
             input_tokens, output_tokens = reply.input_tokens, reply.output_tokens
-            if not reply.complete:
-                raise InvalidAnswer("the model's answer was cut off")
-            if reply.text.strip() != NOT_IN_DOCUMENTS:
-                numbers = cited_numbers(reply.text, len(chunks))
-                result = QueryAnswer(ANSWERED, reply.text.strip(), [Citation(n, chunks[n - 1]) for n in numbers], departments)
+            try:
+                if not reply.complete:
+                    raise InvalidAnswer("the model's answer was cut off")
+                if reply.text.strip() != NOT_IN_DOCUMENTS:
+                    numbers = cited_numbers(reply.text, len(chunks))
+                    result = QueryAnswer(ANSWERED, reply.text.strip(), [Citation(n, chunks[n - 1]) for n in numbers],
+                                         departments)
+            except InvalidAnswer as invalid:   # returned, not raised, so the evaluation keeps what the search found
+                result, error = None, invalid
         finished = time.perf_counter()
-
-        # The question itself stays out of the logs: what people ask is private (see the audit rules)
-        log.info("query user=%s role=%s status=%s chunks=%d top_score=%.3f embed_ms=%.0f search_ms=%.0f model_ms=%.0f "
-                 "tokens_in=%d tokens_out=%d", user_id, role, result.status, len(chunks), top_score,
-                 (embedded - started) * 1000, (searched - embedded) * 1000, (finished - searched) * 1000,
-                 input_tokens, output_tokens)
-        return result
+        return QueryTrace(result, error, found, top_score, (embedded - started) * 1000, (searched - embedded) * 1000,
+                          (finished - searched) * 1000, input_tokens, output_tokens)
