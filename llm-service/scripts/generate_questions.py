@@ -34,7 +34,7 @@ from pydantic import ValidationError
 
 from app import db
 from app.config import settings
-from evaluation.dataset import Asker, DocumentRef, Question, Section, Turn, load, save, split_of, visible
+from evaluation.dataset import Asker, DocumentRef, Question, Section, Turn, load, save, split_for, visible
 from scripts.generate_corpus import stray_numbers
 from scripts.generate_mock_data import AS_OF, DEPARTMENTS
 
@@ -490,7 +490,8 @@ def build(conn, task: Task, item: dict, chunks_by_id: dict[str, Chunk], index: i
         hidden=hidden, related=tuple(c.section for c in task.chunks) if task.kind == "near_miss" else (),
         gold_sql=gold_sql, gold_result=gold_result,
         answer_points=tuple(item["answer_points"]) if expected == "answer" else (),
-        tags=tuple(dict.fromkeys(tags)), source=f"generated:{MODEL}", group=task.id, split=split_of(task.id))
+        tags=tuple(dict.fromkeys(tags)), source=f"generated:{MODEL}", group=task.id,
+        split=split_for(question_id, task.id, expected, f"generated:{MODEL}"))
 
 
 def normalized(text: str) -> str:

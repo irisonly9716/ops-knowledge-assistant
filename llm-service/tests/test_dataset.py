@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from app import db
 from app.rag.embeddings import EMBEDDING_DIMENSIONS
 from app.rag.store import vector_literal
-from evaluation.dataset import Asker, DocumentRef, Question, Section, load, resolve, save, split_of, visible
+from evaluation.dataset import Asker, DocumentRef, Question, Section, load, resolve, save, split_for, split_of, visible
 
 SOP = DocumentRef(doc_type="sop", department="ALL", title="Refund and Return Requests")
 REVIEW = DocumentRef(doc_type="campaign_review", department="Home Goods", campaign="Home New Product Launch",
@@ -61,14 +61,29 @@ def test_a_question_about_documents_needs_the_sections_it_cites():
         question(relevant=())
 
 
-def test_an_unauthorized_question_names_what_the_asker_may_not_see():
-    with pytest.raises(ValidationError, match="may not see"):
-        question(tags=("unauthorized",), expected="refuse", answer_points=(), relevant=())
+def test_a_hidden_section_must_be_one_the_asker_can_not_see():
+    beauty_only = Section(document=DocumentRef(doc_type="sop", department="Beauty", title="Beauty SOP"))
+    with pytest.raises(ValidationError, match="can't see"):
+        question(tags=("unauthorized",), expected="refuse", answer_points=(), relevant=(), hidden=(beauty_only,))
 
 
-def test_the_split_follows_the_group():
+def test_a_question_about_another_departments_data_can_be_unauthorized_with_nothing_hidden():
+    refusal = question(id="h-1", route="data", tags=("unauthorized",), expected="refuse", answer_points=(), relevant=(),
+                       source="human", split="dev")
+    assert refusal.hidden == ()
+
+
+def test_a_question_to_answer_follows_its_group():
     with pytest.raises(ValidationError, match="split"):
         question(split="test" if split_of("g1") == "dev" else "dev")
+
+
+def test_a_refusal_is_split_on_its_own_and_one_written_by_hand_goes_to_dev():
+    assert split_for("q-7", "g1", "refuse", "generated:m") == split_of("q-7")
+    assert split_for("q-7", "g1", "answer", "generated:m") == split_of("g1")
+    assert split_for("h-7", "human:h-7", "refuse", "human") == "dev"
+    ids = [f"q-{i}" for i in range(200)]
+    assert len({split_for(i, "one group", "refuse", "generated:m") for i in ids}) == 2   # not all on one side
 
 
 def test_about_40_percent_of_groups_go_to_dev_always_the_same_ones():

@@ -20,6 +20,7 @@ Route = Literal["documents", "data", "both", "none"]
 Tag = Literal[
     "direct", "keyword", "paraphrase", "colloquial", "vague",            # how it is asked
     "cross_document", "near_miss", "unauthorized", "out_of_scope",      # what makes it hard
+    "general_knowledge",     # out of scope, but public knowledge: what a router for general questions would answer
     "multi_turn", "planning_advice",
     "single_table", "multi_table", "time_range",                        # what its SQL needs
 ]
@@ -80,6 +81,7 @@ class Question(Record):
     group: str                                # questions from one source: they share a split
     split: Literal["dev", "test"]
     status: Literal["candidate", "accepted", "rejected"] = "candidate"
+    note: str | None = None                   # the reviewer's reason for a change or a rejection
 
     @model_validator(mode="after")
     def consistent(self):
@@ -89,18 +91,28 @@ class Question(Record):
             raise ValueError(f"route={self.route} needs a gold SQL")
         if self.route in ("documents", "both") and self.expected == "answer" and not self.relevant:
             raise ValueError(f"route={self.route} needs the sections a right answer cites")
-        if "unauthorized" in self.tags and not self.hidden:
-            raise ValueError("an unauthorized question names what the asker may not see")
-        if self.split != split_of(self.group):
-            raise ValueError("the split follows the group")
+        if any(visible(self.asker, section.document.department) for section in self.hidden):
+            raise ValueError("a hidden section must be one the asker can't see")
+        if self.split != split_for(self.id, self.group, self.expected, self.source):
+            raise ValueError("the split doesn't follow the rule in split_for")
         return self
 
 
-def split_of(group: str) -> str:
-    """Stable for a group, whatever else is added: questions written from the same section or about the same SQL
-    land on the same side, or a reworded question in test would have its answer shown in dev."""
-    value = int(hashlib.sha256(group.encode("utf-8")).hexdigest()[:8], 16) / 2 ** 32
+def split_of(key: str) -> str:
+    """Stable for a key, whatever else is added."""
+    value = int(hashlib.sha256(key.encode("utf-8")).hexdigest()[:8], 16) / 2 ** 32
     return "dev" if value < DEV_SHARE else "test"
+
+
+def split_for(question_id: str, group: str, expected: str, source: str) -> str:
+    """A question to answer goes with its group: questions written from the same section or about the same SQL land
+    on the same side, or a reworded question in test would have its answer shown in dev. A refusal has no answer to
+    show, so each is split on its own: by group, the 39 refusals came from 12 groups and 32 of them landed in test,
+    leaving dev too few to calibrate the refusal threshold on. A refusal written by hand goes to dev for the same
+    reason."""
+    if expected == "refuse":
+        return "dev" if source == "human" else split_of(question_id)
+    return split_of(group)
 
 
 def load(path: Path) -> list[Question]:
