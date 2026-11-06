@@ -63,7 +63,7 @@ app/
 ├── sql_agent/     Text-to-SQL + safety checks + row-level filtering
 ├── router/        query routing + combined answers
 └── memory/        Redis cache + conversation memory
-evaluation/        the evaluation dataset's format (dataset.py); not part of the service
+evaluation/        the evaluation dataset's format (dataset.py) and the review page (review.py); not part of the service
 tests/             pytest; test_events (contract / cross-language drift) test_storage (path traversal)
                    test_upload_consumer (every branch of the consume loop) test_health
                    test_embeddings (fake OpenAI client) test_parsing (all three formats parse the same)
@@ -77,6 +77,7 @@ tests/             pytest; test_events (contract / cross-language drift) test_st
                    test_generate_corpus (the corpus generator without a model: numbers, the rules of a draft, authors)
                    test_dataset (the dataset's format, the split, finding a labelled section)
                    test_generate_questions (the question generator without a model: tasks, which answers are kept, SQL)
+                   test_review (the review page's API: what can change, what is checked, what is exported)
 tests/fixtures/documents/   docx / PDF fixtures, generated from Markdown by scripts/make_sample_documents.py
 ```
 
@@ -339,8 +340,9 @@ part of their step's text rather than `substeps`. The step stays whole either wa
 uv run python -m scripts.generate_questions --report   # what the candidates cover
 ```
 
-[eval/](../eval/) holds 256 candidate questions written by `scripts/generate_questions.py` from the ingested corpus,
-with gpt-6-sol rather than the model that answers. Every label names a section by its document and heading path, so
+[eval/](../eval/) holds the dataset: 257 reviewed questions in `dev.jsonl` and `test.jsonl`, from 256 candidates
+written by `scripts/generate_questions.py` with gpt-6-sol rather than the model that answers, and questions written by
+hand. `uv run python -m evaluation.review` opens a local page to review them (127.0.0.1:8765). Every label names a section by its document and heading path, so
 it survives a new ingestion; `evaluation.dataset.resolve()` finds the chunks. A question is only kept when its
 answer points' numbers are in the sections it cites, its SQL runs read-only and keeps to the asker's department,
 and an unauthorized question really is about something its asker can't see. The format, the split and the
