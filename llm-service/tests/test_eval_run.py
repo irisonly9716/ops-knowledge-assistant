@@ -41,8 +41,9 @@ class FakeEncoding:
         return text.split()
 
 
-def traced(candidates, result=None, error=None) -> QueryTrace:
-    return QueryTrace(result, error, False, candidates, candidates[0].score if candidates else 0.0, 1.0, 2.0, 3.0, 10, 5)
+def traced(candidates, result=None, error=None, reranked=False) -> QueryTrace:
+    return QueryTrace(result, error, False, candidates, reranked, candidates[0].score if candidates else 0.0,
+                      1.0, 2.0, 0.5, 3.0, 10, 5)
 
 
 @pytest.mark.anyio
@@ -98,3 +99,24 @@ def test_the_report_names_questions_whose_hidden_sections_were_retrieved():
               "output_tokens": 1, "embedding_tokens": 1}
     report = run.summarize([record], {q.id: q}, "t", "dev", "rules", None, 1.0)
     assert "among the candidates: 1 questions (q-leak)" in report
+
+
+@pytest.mark.anyio
+async def test_a_reranked_question_records_both_the_vector_and_the_used_rank():
+    relevant = section("Refunds")
+    vector = [chunk(i, score=0.9 - i / 100) for i in range(1, 9)]
+    used = [vector[6], *vector[:6], vector[7]]   # the reranker moved chunk 7 first
+    service = FakeService(traced(used, QueryAnswer(ANSWERED, "A [1].", [], ["Beauty", "ALL"]), reranked=True))
+    record = await run.ask_one(service, question(relevant=[relevant]), {relevant: [7]}, FakeEncoding())
+    assert (record["vector_section_ranks"], record["section_ranks"], record["reranked"]) == ([7], [1], True)
+
+
+def test_the_report_shows_recall_before_and_after_reranking():
+    q = question()
+    record = {"id": q.id, "question": "How?", "asker": {"role": "staff", "department": "Beauty"}, "route": "documents",
+              "expected": "answer", "tags": ["direct"], "status": "refused", "top_score": 0.5, "section_ranks": [1],
+              "vector_section_ranks": [7], "reranked": True, "hidden_retrieved": 0, "embed_ms": 1, "search_ms": 1,
+              "rerank_ms": 40, "model_ms": 1, "input_tokens": 1, "output_tokens": 1, "embedding_tokens": 1}
+    report = run.summarize([record], {q.id: q}, "t", "dev", "rules", None, 1.0, "bge")
+    assert "| all | 1 | 0.0% | 100.0% | 100.0% | 0.143 | 1.000 |" in report
+    assert "1 of 1 questions reranked" in report

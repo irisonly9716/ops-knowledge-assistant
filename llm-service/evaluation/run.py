@@ -35,6 +35,7 @@ from app.config import settings
 from app.rag.answering import INSTRUCTIONS, QueryService
 from app.rag.chunking import TOKEN_ENCODING
 from app.rag.query_models import ModelBusy, ModelCallLimit, OpenAIAnswerModel, OpenAIQueryEmbedder, openai_client_from_settings
+from app.rag.reranking import Reranker, tei_reranker_from_settings
 from app.server import choose_event_loop
 from app.time_budget import TimeBudget
 from evaluation import metrics
@@ -95,7 +96,7 @@ def resolve_sections(questions: list[Question]) -> dict[Section, list[int]]:
 
 
 async def ask_all(questions: list[Question], chunks_of: dict[Section, list[int]], client: AsyncOpenAI,
-                  instructions: str) -> list[dict]:
+                  instructions: str, reranker: Reranker | None, budget_seconds: float) -> list[dict]:
     pool = db.query_pool()
     await pool.open()
     limit = ModelCallLimit(settings.model_max_concurrent_calls, settings.model_slot_wait_seconds)
@@ -103,12 +104,13 @@ async def ask_all(questions: list[Question], chunks_of: dict[Section, list[int]]
         OpenAIQueryEmbedder(client, settings.embedding_model, limit, settings.query_embedding_timeout_seconds),
         OpenAIAnswerModel(client, settings.chat_model, limit, settings.query_model_timeout_seconds,
                           settings.answer_max_output_tokens),
-        pool, min_similarity=0.0, top_k=settings.query_top_k, instructions=instructions)
+        pool, min_similarity=0.0, top_k=settings.query_top_k, instructions=instructions,
+        reranker=reranker, rerank_candidates=CANDIDATES)
     encoding = tiktoken.get_encoding(TOKEN_ENCODING)
     records = []
     try:
         for number, question in enumerate(questions, 1):
-            records.append(await ask_one(service, question, chunks_of, encoding))
+            records.append(await ask_one(service, question, chunks_of, encoding, budget_seconds))
             print(f"\r{number}/{len(questions)}", end="", flush=True)
         print()
     finally:
@@ -116,22 +118,26 @@ async def ask_all(questions: list[Question], chunks_of: dict[Section, list[int]]
     return records
 
 
-async def ask_one(service: QueryService, question: Question, chunks_of: dict[Section, list[int]], encoding) -> dict:
+async def ask_one(service: QueryService, question: Question, chunks_of: dict[Section, list[int]], encoding,
+                  budget_seconds: float | None = None) -> dict:
+    budget_seconds = budget_seconds or settings.query_budget_seconds
     record = {"id": question.id, "question": question.question, "asker": question.asker.model_dump(),
               "route": question.route, "expected": question.expected, "tags": list(question.tags),
               "answer_points": list(question.answer_points), "embedding_tokens": len(encoding.encode(question.question))}
     started = time.perf_counter()
     try:
-        async with asyncio.timeout(settings.query_budget_seconds):
+        async with asyncio.timeout(budget_seconds):
             traced = await service.trace(question.question, role=question.asker.role,
                                          department=question.asker.department,
-                                         budget=TimeBudget(settings.query_budget_seconds), candidates=CANDIDATES)
+                                         budget=TimeBudget(budget_seconds), candidates=CANDIDATES)
     except (TimeoutError, APIError, ModelBusy, psycopg.Error) as error:
         # Nothing comes back from these, not even the search: the question is counted as an error everywhere
         return record | {"status": metrics.ERROR, "error": f"{type(error).__name__}: {error}"[:300],
                          "total_ms": (time.perf_counter() - started) * 1000}
 
     candidate_ids = [c.chunk_id for c in traced.candidates]
+    # The search's own order, whatever the reranker did: by similarity, ties by chunk id, as retrieval.search sorts
+    vector_ids = [c.chunk_id for c in sorted(traced.candidates, key=lambda c: (-c.score, c.chunk_id))]
     hidden_ids = {i for s in question.hidden for i in chunks_of[s]}
     prompt_chunks = traced.candidates[:settings.query_top_k]
     record |= {
@@ -144,8 +150,11 @@ async def ask_one(service: QueryService, question: Question, chunks_of: dict[Sec
         "excerpts": [{"title": c.title, "department": c.department, "heading_path": list(c.heading_path),
                       "score": round(c.score, 4), "content": c.content} for c in prompt_chunks],
         "section_ranks": [metrics.section_ranks(candidate_ids, [chunks_of[s]])[0] for s in question.relevant],
+        "vector_section_ranks": [metrics.section_ranks(vector_ids, [chunks_of[s]])[0] for s in question.relevant],
+        "reranked": traced.reranked,
         "hidden_retrieved": len(hidden_ids & set(candidate_ids)),
-        "embed_ms": traced.embed_ms, "search_ms": traced.search_ms, "model_ms": traced.model_ms,
+        "embed_ms": traced.embed_ms, "search_ms": traced.search_ms, "rerank_ms": traced.rerank_ms,
+        "model_ms": traced.model_ms,
         "input_tokens": traced.input_tokens, "output_tokens": traced.output_tokens,
     }
     return record
@@ -177,14 +186,14 @@ def pct(value: float | None) -> str:
     return "–" if value is None else f"{value * 100:.1f}%"
 
 
-def retrieval_rows(records: list[dict]) -> list[tuple[str, metrics.RetrievalScores]]:
-    labelled = [r for r in records if r.get("section_ranks")]
+def retrieval_rows(records: list[dict], key: str = "section_ranks") -> list[tuple[str, metrics.RetrievalScores]]:
+    labelled = [r for r in records if r.get(key)]
     groups: list[tuple[str, list[dict]]] = [("all", labelled)]
     groups += [(f"route: {route}", [r for r in labelled if r["route"] == route]) for route in ("documents", "both")]
     groups += [(tag, [r for r in labelled if tag in r["tags"]]) for tag in RETRIEVAL_TAGS]
     rows = []
     for name, group in groups:
-        scores = metrics.retrieval_scores([r["section_ranks"] for r in group])
+        scores = metrics.retrieval_scores([r[key] for r in group])
         if scores:
             rows.append((name, scores))
     return rows
@@ -196,23 +205,32 @@ def outcomes(records: list[dict], questions: dict[str, Question]) -> list[metric
 
 
 def summarize(records: list[dict], questions: dict[str, Question], name: str, split: str, instructions: str,
-              judge: OpenAIJudge | None, run_seconds: float) -> str:
+              judge: OpenAIJudge | None, run_seconds: float, reranking: str = "none") -> str:
     lines = [f"# Evaluation run: {split}-{name}", "",
              f"{len(records)} questions from `eval/{split}.jsonl`. Answers by {settings.chat_model}, embeddings "
              f"{settings.embedding_model}, top {settings.query_top_k} excerpts in the prompt, {CANDIDATES} candidates "
              f"searched. The run used a threshold of 0, so every question reached the model. "
              f"{sum(r['status'] == metrics.ERROR for r in records)} ended in an error, and "
              f"{sum(bool(r.get('uncited')) for r in records)} replies citing nothing were shown as refusals. "
-             f"{run_seconds:.0f} s in all.", ""]
+             f"{run_seconds:.0f} s in all.", "",
+             f"Reranking: {reranking}. "
+             f"{sum(bool(r.get('reranked')) for r in records)} of {sum('embed_ms' in r for r in records)} questions "
+             f"reranked; the others kept the vector order (no reranker, a failure, or a top score below the threshold).",
+             ""]
 
     # Retrieval
     lines += ["## Retrieval", "",
               "By section: a section counts as found at the rank of its best chunk. Only questions with labelled "
               "sections.", "",
-              "| Questions | n | Recall@5 | Recall@50 | MRR |", "|---|---|---|---|---|"]
+              "Vector: the search's own order. Used: the order the prompt took its excerpts from, after reranking.", "",
+              "| Questions | n | Recall@5 vector | Recall@5 used | Recall@50 | MRR vector | MRR used |",
+              "|---|---|---|---|---|---|---|"]
     rows = retrieval_rows(records)
-    lines += [f"| {label} | {s.questions} | {pct(s.recall_at_5)} | {pct(s.recall_at_50)} | {s.mrr:.3f} |"
-              for label, s in rows]
+    vector = dict(retrieval_rows(records, "vector_section_ranks"))
+    for label, s in rows:
+        v = vector.get(label, s)   # runs from before both orders were recorded have only one
+        lines.append(f"| {label} | {s.questions} | {pct(v.recall_at_5)} | {pct(s.recall_at_5)} | {pct(s.recall_at_50)} "
+                     f"| {v.mrr:.3f} | {s.mrr:.3f} |")
     leaks = [r["id"] for r in records if r.get("hidden_retrieved")]
     lines += ["", f"Sections the asker may not see, among the candidates: {len(leaks)} questions"
               + (f" ({', '.join(leaks)})" if leaks else "") + ".", ""]
@@ -284,13 +302,15 @@ def summarize(records: list[dict], questions: dict[str, Question], name: str, sp
 
     # Latency and cost
     ran = [r for r in records if "embed_ms" in r]   # an error before the trace came back has no timings
-    before_model = [r["embed_ms"] + r["search_ms"] for r in ran]
-    with_model = [r["embed_ms"] + r["search_ms"] + r["model_ms"] for r in ran]
-    at_chosen = [r["embed_ms"] + r["search_ms"] + (r["model_ms"] if r["top_score"] >= chosen else 0) for r in ran]
+    before_model = [r["embed_ms"] + r["search_ms"] + r.get("rerank_ms", 0) for r in ran]
+    with_model = [b + r["model_ms"] for b, r in zip(before_model, ran)]
+    at_chosen = [b + (r["model_ms"] if r["top_score"] >= chosen else 0) for b, r in zip(before_model, ran)]
+    reranked = [r["rerank_ms"] for r in ran if r.get("reranked")]
     lines += ["## Latency and cost", "",
               f"One query at a time, in llm-service, without the backend. {len(ran)} queries.", "",
               "| ms | p50 | p95 | max |", "|---|---|---|---|"]
-    for label, values in (("embedding + search", before_model), ("whole query, model always asked", with_model),
+    for label, values in (("embedding + search + rerank", before_model), ("rerank, when it reranked", reranked),
+                          ("whole query, model always asked", with_model),
                           (f"whole query at threshold {chosen:.2f}", at_chosen),
                           ("model only", [r["model_ms"] for r in ran])):
         if values:
@@ -347,12 +367,19 @@ async def main_async(args: argparse.Namespace) -> None:
     instructions = Path(args.instructions).read_text(encoding="utf-8").strip() if args.instructions else INSTRUCTIONS
 
     started = time.perf_counter()
+    reranker = None if args.no_rerank else tei_reranker_from_settings(args.rerank_timeout)
+    reranking = (f"bge-reranker-v2-m3 at {settings.reranker_url}, {CANDIDATES} candidates, "
+                 f"{args.rerank_timeout or settings.rerank_timeout_seconds:g} s limit") if reranker else "none"
+    # A longer rerank limit gets its own room, so the rest of a question keeps the budget a query has
+    budget_seconds = settings.query_budget_seconds + (args.rerank_timeout or 0)
     client = openai_client_from_settings()
     judge_client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url,
                                max_retries=JUDGE_RETRIES)
     judge = None
     try:
-        records = await ask_all(questions, chunks_of, client, instructions)
+        records = await ask_all(questions, chunks_of, client, instructions, reranker, budget_seconds)
+        if reranker and not any(r.get("reranked") for r in records):
+            print(f"WARNING: no question was reranked: is the reranker running at {settings.reranker_url}?")
         if not args.no_judge:
             judge = OpenAIJudge(judge_client, JUDGE_MODEL, JUDGE_TIMEOUT_SECONDS)
             to_grade = [r for r in records if graded_for_answer(by_id[r["id"]]) and r["status"] == metrics.ANSWERED]
@@ -361,13 +388,16 @@ async def main_async(args: argparse.Namespace) -> None:
     finally:
         await client.close()
         await judge_client.close()
+        if reranker:
+            await reranker.aclose()
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     stem = RESULTS_DIR / f"{args.split}-{args.name}"
     with stem.with_suffix(".jsonl").open("w", encoding="utf-8", newline="\n") as out:
         for record in records:
             out.write(json.dumps(record, ensure_ascii=False) + "\n")
-    report = summarize(records, by_id, args.name, args.split, instructions, judge, time.perf_counter() - started)
+    report = summarize(records, by_id, args.name, args.split, instructions, judge, time.perf_counter() - started,
+                       reranking)
     stem.with_suffix(".md").write_text(report, encoding="utf-8", newline="\n")
     if judge:
         Path(f"{stem}-spot-check.md").write_text(spot_check(records, by_id, f"{args.split}-{args.name}"),
@@ -383,6 +413,9 @@ def main() -> None:
     parser.add_argument("--limit", type=int, help="only this many questions, picked at random: a quick check")
     parser.add_argument("--no-judge", action="store_true", help="skip grading the answers (no grading cost)")
     parser.add_argument("--instructions", help="a file of answer instructions to try instead of the service's")
+    parser.add_argument("--no-rerank", action="store_true", help="vector order only, whatever RERANKER_URL says")
+    parser.add_argument("--rerank-timeout", type=float,
+                        help="seconds to wait for the reranker, for one on a development CPU; latency is then not a query's")
     args = parser.parse_args()
     if args.split == "test" and args.instructions:
         parser.error("test only reports final numbers: try instructions on dev")

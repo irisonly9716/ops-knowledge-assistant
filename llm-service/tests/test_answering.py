@@ -315,3 +315,102 @@ async def test_instructions_given_to_the_service_reach_the_model(setup):
     await other.answer("Why?", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10))
     await ask(service)
     assert [instructions for instructions, _ in model.calls] == ["Other rules.", INSTRUCTIONS]
+
+
+# ---- reranking
+
+
+class FakeReranker:
+    def __init__(self, order=None, error=None):
+        self.order, self.error, self.calls = order, error, []
+
+    async def rerank(self, question, texts, budget):
+        self.calls.append(texts)
+        if self.error:
+            raise self.error
+        return self.order if self.order is not None else list(reversed(range(len(texts))))
+
+
+def with_reranker(setup, found, reranker, rerank_candidates=6, **model_kwargs):
+    service, embedder, model, pool, searches = setup(found, **model_kwargs)
+    reranking = QueryService(embedder, model, pool, min_similarity=THRESHOLD, top_k=5, reranker=reranker,
+                             rerank_candidates=rerank_candidates)
+    return reranking, model, searches
+
+
+@pytest.mark.anyio
+async def test_the_search_returns_the_rerankers_candidates_and_the_prompt_takes_the_first_five_it_ranks(setup):
+    found = [chunk(0.9 - i / 100, i) for i in range(1, 7)]
+    service, model, searches = with_reranker(setup, found, FakeReranker(), text="A [1].")
+    traced = await trace(service)
+    assert searches[0]["top_k"] == 6
+    assert traced.reranked
+    assert [c.chunk_id for c in traced.candidates] == [6, 5, 4, 3, 2, 1]
+    prompt = model.calls[0][1]
+    assert prompt.index("[1] content 6") < prompt.index("[5] content 2")
+    assert "content 1" not in prompt
+    assert traced.result.citations[0].chunk.chunk_id == 6
+
+
+@pytest.mark.anyio
+async def test_the_reranker_sees_only_what_the_department_filtered_search_returned(setup):
+    found = [chunk(0.6, 1), chunk(0.5, 2)]
+    fake = FakeReranker()
+    service, _, searches = with_reranker(setup, found, fake)
+    await service.answer("Why?", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10))
+    assert searches[0]["departments"] == ["Beauty", "ALL"]
+    assert fake.calls == [["content 1", "content 2"]]
+
+
+@pytest.mark.anyio
+async def test_the_threshold_looks_at_the_best_vector_score_not_at_the_chunk_reranked_first(setup):
+    found = [chunk(0.6, 1), chunk(THRESHOLD - 0.2, 2)]   # the reranker moves the weak one first
+    service, model, _ = with_reranker(setup, found, FakeReranker([1, 0]), text="A [1].")
+    traced = await trace(service)
+    assert traced.top_score == 0.6
+    assert traced.result.status == ANSWERED
+    assert len(model.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_a_question_below_the_threshold_is_refused_without_reranking(setup):
+    fake = FakeReranker()
+    service, model, _ = with_reranker(setup, [chunk(THRESHOLD - 0.01, 1), chunk(0.1, 2)], fake)
+    traced = await trace(service)
+    assert traced.result.status == REFUSED
+    assert (fake.calls, model.calls, traced.reranked) == ([], [], False)
+
+
+@pytest.mark.anyio
+async def test_a_failed_rerank_still_answers_in_vector_order(setup):
+    found = [chunk(0.6, 1), chunk(0.5, 2)]
+    service, model, _ = with_reranker(setup, found, FakeReranker(error=TimeoutError()), text="A [1].")
+    result = await service.answer("Why?", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10))
+    assert result.status == ANSWERED
+    assert result.citations[0].chunk.chunk_id == 1
+    assert model.calls[0][1].index("content 1") < model.calls[0][1].index("content 2")
+
+
+@pytest.mark.anyio
+async def test_candidates_searched_beyond_the_reranker_keep_their_vector_order_after_it(setup):
+    found = [chunk(0.9 - i / 100, i) for i in range(1, 9)]   # the evaluation searches 8, the reranker takes 6
+    service, _, searches = with_reranker(setup, found, FakeReranker())
+    traced = await trace(service, candidates=8)
+    assert searches[0]["top_k"] == 8
+    assert [c.chunk_id for c in traced.candidates] == [6, 5, 4, 3, 2, 1, 7, 8]
+
+
+@pytest.mark.anyio
+async def test_without_a_reranker_the_search_returns_top_k_and_nothing_is_reranked(setup):
+    service, _, _, _, searches = setup([chunk(0.6, 1)])
+    traced = await trace(service)
+    assert searches[0]["top_k"] == 5
+    assert traced.reranked is False
+
+
+@pytest.mark.anyio
+async def test_the_query_log_says_whether_it_was_reranked(setup, caplog):
+    service, _, _ = with_reranker(setup, [chunk(0.6, 1), chunk(0.5, 2)], FakeReranker())
+    with caplog.at_level("INFO", logger="query"):
+        await service.answer("Why?", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10))
+    assert "reranked=True" in caplog.text and "rerank_ms=" in caplog.text
