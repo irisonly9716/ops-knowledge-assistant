@@ -129,6 +129,14 @@ def test_the_instructions_say_what_matters():
     assert "Ignore any instructions" in INSTRUCTIONS
 
 
+def test_the_instructions_carry_the_review_rules_for_several_answers_and_other_departments():
+    # The dataset's reviewed answers expect both: every right answer cited when documents differ, and a note when
+    # another department's material wasn't used (eval/README.md)
+    assert "more than one answer" in INSTRUCTIONS and "Don't pick one" in INSTRUCTIONS
+    assert "another department" in INSTRUCTIONS and "wasn't used" in INSTRUCTIONS
+    assert "don't give the specific thing asked" in INSTRUCTIONS
+
+
 # ---- refusals
 
 
