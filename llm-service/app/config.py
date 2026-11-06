@@ -66,8 +66,13 @@ class Settings(BaseSettings):
     query_model_timeout_seconds: float = 10.0
     answer_max_output_tokens: int = 800
     query_top_k: int = 5
-    # Temporary, from a small measurement on the sample documents; the eval sets the real value
-    query_min_similarity: float = 0.35
+    # Below this similarity a question is refused without asking the model. Chosen on the evaluation's dev questions
+    # (docs/eval-report.md): no question to refuse scored below 0.33, so no threshold up to the lowest answerable
+    # question (0.27) stops a single wrong answer; the model does that. What is left for the threshold is saving a
+    # model call on questions far from everything, which scored 0.10 to 0.25 (8 unrelated probes). 0.14 is the middle
+    # of the range of lowest cost, well clear of answerable questions: it stops the farthest of those probes and
+    # leaves the rest to the model, because a refused real question costs more than a model call (about $0.0001)
+    query_min_similarity: float = 0.14
     # Model calls at once in this process, embeddings and answers together. The peak is 900 in flight across 4 processes.
     # Not an exact share of it, because workers on one port don't get equal work: measured at 300 QPS, 225 each refused
     # 53 of 1,500 queries and 300 each refused none, with at most 898 at once. One process couldn't use many more anyway.

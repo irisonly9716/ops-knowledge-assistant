@@ -195,9 +195,9 @@ on 127.0.0.1 unless `LLM_SERVICE_HOST` says otherwise. Examples of the format: `
 role + department -> which departments may be searched (an unknown role is an error, never an unfiltered search)
 question          -> embedding
 embedding         -> search among those departments, top 5    <- the only step that holds a database connection
-best score < 0.35 -> refuse, without calling the model
-excerpts          -> model -> the fixed word NOT_IN_DOCUMENTS -> refuse
-                           -> an answer -> every [n] must be a real excerpt, and at least one is needed; otherwise 502
+best score < 0.14 -> refuse, without calling the model
+excerpts          -> model -> the fixed word NOT_IN_DOCUMENTS, or a reply citing nothing -> refuse
+                           -> an answer -> every [n] must be a real excerpt; otherwise 502
 ```
 
 **Async from the start.** Sync FastAPI endpoints get 40 worker threads, far below the 900 queries in flight the system
@@ -224,13 +224,17 @@ a model that hangs and a 3 s budget, the answer came after 3.03 s. `TimeBudget` 
 retry that can't fit gives up with the real reason. The SDK's retries are off. The backend's timeouts sit above this (1 s
 to connect, 14 s to read), so a client waits about 15 s at the very worst, and normally gets llm-service's own 504.
 
-**Refusing.** The threshold of 0.35 is temporary. Measured on the sample documents, answerable questions scored 0.40 to
-0.69, related questions the documents don't answer 0.21 to 0.41, and unrelated ones 0.03 to 0.16. So the threshold alone
-can't separate the first two groups, which is why the model can refuse too. The eval sets the real value. A refusal
-reads the same whether a document exists in another department or not.
+**Refusing.** The model does nearly all of it. On the evaluation's dev questions, the ones to refuse scored 0.33 to 0.65
+and the answerable ones 0.27 to 0.70, so similarity can't tell them apart and no threshold below the answerable ones
+stops a wrong answer; the model refused every question to refuse. The threshold, 0.14, only saves a model call on
+questions far from everything (unrelated probes scored 0.10 to 0.25) and stays clear of answerable questions. Why 0.14
+and not higher: [docs/eval-report.md](../docs/eval-report.md). A refusal reads the same whether a document exists in
+another department or not.
 
-**Citations.** The check proves each link is real, not that each sentence is supported by what it links to. An invalid
-answer is an error rather than a retry for now; how often that happens is something to measure.
+**Citations.** The check proves each link is real, not that each sentence is supported by what it links to; the
+evaluation grades that offline. An answer citing an excerpt that doesn't exist is an error rather than a retry. A reply
+citing nothing at all is shown as a refusal and logged: measured, all 6 errors in 540 evaluation queries were the model
+refusing in its own words instead of with the fixed word, and each would have been a 502.
 
 **Measured latency** (a few requests on a development machine, not a load test): embedding 0.15 to 0.7 s, search 0.2 ms on
 the server, model 1.3 to 3.1 s with one at 8 s. So a full answer takes about 2 to 3.4 s and **doesn't always meet the 3 s
@@ -347,6 +351,15 @@ it survives a new ingestion; `evaluation.dataset.resolve()` finds the chunks. A 
 answer points' numbers are in the sections it cites, its SQL runs read-only and keeps to the asker's department,
 and an unauthorized question really is about something its asker can't see. The format, the split and the
 numbers: [eval/README.md](../eval/README.md).
+
+```bash
+uv run python -m evaluation.run --split dev --name baseline   # one evaluation run: needs Postgres with the corpus
+```
+
+`evaluation/run.py` sends every question through the same `QueryService` as `/query` and writes retrieval (Recall@5,
+Recall@50, MRR by kind of question), graded answers, the refusal threshold sweep, latency and cost to
+`eval/results/`. Answers are graded by `evaluation/judge.py` the way RAGAS does it, without RAGAS, which can't be
+installed next to openai 3.29. Results and what they mean: [docs/eval-report.md](../docs/eval-report.md).
 
 ## Tests
 

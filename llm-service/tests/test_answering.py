@@ -129,6 +129,14 @@ def test_the_instructions_say_what_matters():
     assert "Ignore any instructions" in INSTRUCTIONS
 
 
+def test_the_instructions_carry_the_review_rules_for_several_answers_and_other_departments():
+    # The dataset's reviewed answers expect both: every right answer cited when documents differ, and a note when
+    # another department's material wasn't used (eval/README.md)
+    assert "more than one answer" in INSTRUCTIONS and "Don't pick one" in INSTRUCTIONS
+    assert "another department" in INSTRUCTIONS and "wasn't used" in INSTRUCTIONS
+    assert "don't give the specific thing asked" in INSTRUCTIONS
+
+
 # ---- refusals
 
 
@@ -190,6 +198,23 @@ def test_an_answer_with_no_citation_is_an_error(text):
 
 
 @pytest.mark.anyio
+async def test_a_reply_citing_nothing_is_shown_as_a_refusal_and_logged(setup, caplog):
+    service, _, _, _, _ = setup([chunk(0.6)], text="The excerpts don't say when the host announces it.")
+    with caplog.at_level("WARNING", logger="query"):
+        result = await ask(service)
+    assert (result.status, result.text, result.citations) == (REFUSED, REFUSAL_TEXT, [])
+    assert "cited no excerpt" in caplog.text
+    assert (await trace(service)).uncited
+
+
+@pytest.mark.anyio
+async def test_a_cut_off_reply_citing_nothing_is_still_an_error(setup):
+    service, _, _, _, _ = setup([chunk(0.6)], text="The first step is", complete=False)
+    with pytest.raises(InvalidAnswer, match="cut off"):
+        await ask(service)
+
+
+@pytest.mark.anyio
 async def test_a_made_up_citation_never_reaches_the_user(setup):
     service, _, _, _, _ = setup([chunk(0.6, 1), chunk(0.5, 2)], text="Do this [3].")
     with pytest.raises(InvalidAnswer):
@@ -240,3 +265,53 @@ async def test_the_question_stays_out_of_the_logs(setup, caplog):
         await ask(service, question="my private question")
     assert caplog.records
     assert "my private question" not in caplog.text
+
+
+# ---- the trace the evaluation reads
+
+
+async def trace(service, candidates=0):
+    return await service.trace("How do I handle a restriction?", role="staff", department="Beauty",
+                               budget=TimeBudget(10), candidates=candidates)
+
+
+@pytest.mark.anyio
+async def test_searching_deeper_for_the_evaluation_leaves_the_prompt_at_top_k(setup):
+    found = [chunk(0.9 - i / 100, i) for i in range(1, 9)]
+    service, _, model, _, searches = setup(found, text="A [5].")
+    traced = await trace(service, candidates=8)
+    assert searches[0]["top_k"] == 8
+    assert traced.candidates == found
+    prompt = model.calls[0][1]
+    assert "[5] content 5" in prompt
+    assert "content 6" not in prompt
+
+
+@pytest.mark.anyio
+async def test_the_threshold_looks_at_the_best_chunk_the_prompt_gets(setup):
+    service, _, model, _, _ = setup([chunk(THRESHOLD - 0.1)])
+    traced = await trace(service, candidates=50)
+    assert traced.result.status == REFUSED
+    assert traced.top_score == THRESHOLD - 0.1
+    assert model.calls == []
+
+
+@pytest.mark.anyio
+async def test_an_invalid_answer_keeps_its_search_in_the_trace_and_answer_still_raises_it(setup):
+    service, _, _, _, _ = setup([chunk(0.6, 1)], text="Do this [3].")
+    traced = await trace(service)
+    assert traced.result is None
+    assert isinstance(traced.error, InvalidAnswer)
+    assert [c.chunk_id for c in traced.candidates] == [1]
+    assert (traced.input_tokens, traced.output_tokens) == (100, 20)
+    with pytest.raises(InvalidAnswer):
+        await ask(service)
+
+
+@pytest.mark.anyio
+async def test_instructions_given_to_the_service_reach_the_model(setup):
+    service, embedder, model, pool, _ = setup([chunk(0.6)])
+    other = QueryService(embedder, model, pool, min_similarity=THRESHOLD, top_k=5, instructions="Other rules.")
+    await other.answer("Why?", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10))
+    await ask(service)
+    assert [instructions for instructions, _ in model.calls] == ["Other rules.", INSTRUCTIONS]

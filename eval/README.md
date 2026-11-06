@@ -144,3 +144,16 @@ Rules decided while reviewing, each with the question that raised it in its `not
   shopping livestream" is how a plan describes its Black Friday Live.
 - **A question that makes correct data look wrong is removed.** The customer table holds a sample of customers, so
   its total never matches product sales.
+
+## Running the evaluation
+
+```bash
+cd llm-service
+uv run python -m evaluation.run --split dev --name baseline
+uv run python -m evaluation.run --split dev --name try-this --instructions my-instructions.txt   # dev only
+```
+
+Every question goes through the query path the service uses, and `results/<split>-<name>.*` gets what each question
+went through, the tables, and 30 graded answers picked at random for a person to check the grader against. How it works
+and what the numbers say: [docs/eval-report.md](../docs/eval-report.md). A run on `dev` costs about $0.27, almost all of
+it grading; `--no-judge` skips the grading.

@@ -254,7 +254,9 @@ TTL is only a safety net.
 
 **What exists today:** the backend's `/query`, the internal token, the search with its department filter, and steps 1
 and 5 for documents, with citations and refusals. Rewriting, cache, routing and Text-to-SQL are still to come. Details
-and measurements: "The query path" in [llm-service/README.md](../llm-service/README.md).
+and measurements: "The query path" in [llm-service/README.md](../llm-service/README.md). How well it answers, measured on the evaluation
+dataset, and why the refusal threshold and the answer instructions are what they are:
+[eval-report.md](eval-report.md).
 
 Design decisions so far:
 - **Async in llm-service, blocking in the backend.** Sync FastAPI endpoints get 40 worker threads against 900 queries in
