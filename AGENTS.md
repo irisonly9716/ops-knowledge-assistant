@@ -72,6 +72,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Python setup | `cd llm-service` · `uv venv` · `uv pip install -r requirements.txt` |
 | Create topics · mock data | `uv run python -m scripts.init_topics` · `uv run python -m scripts.generate_mock_data` |
 | Evaluation corpus: what's in it · load it · the questions | `uv run python -m scripts.generate_corpus --report` · `uv run python -m scripts.ingest_corpus` (needs the backend, Kafka and the consumer) · `uv run python -m scripts.generate_questions --report` · review: `uv run python -m evaluation.review` |
+| Evaluation run (needs Postgres with the corpus; about $0.27 on `dev`, almost all grading) | `uv run python -m evaluation.run --split dev --name <name>` · results in `eval/results/`, what they mean in `docs/eval-report.md` |
 | Run backend (:8081) | `cd backend-service` · `.\mvnw.cmd spring-boot:run` |
 | Run consumer · LLM API (:8000) | `uv run python -m app.consumers.upload_consumer` · `uv run python -m app.server --reload` (not plain `uvicorn`: async psycopg needs the event loop it chooses) |
 | Python tests | `uv run pytest` (database tests use a throwaway database, skipped if Postgres is down) |
@@ -94,7 +95,7 @@ llm-service/app/       Python: ingestion and the query path
   rag/                 parsing/, chunking, document_fields, embeddings, store, retrieval, query_models, answering
   server.py            starts the API; query_api.py: POST /query, for the backend only
   time_budget.py       one time budget per message or query
-llm-service/evaluation/   the dataset's format and how a label finds today's chunks; not part of the service
+llm-service/evaluation/   the dataset's format, how a label finds today's chunks, the run and its grader; not part of the service
 contracts/             upload-event and query examples, validated by both test suites
 db/migration/          Flyway migrations, V1 onwards
 sop_docs/ campaign_docs/   the evaluation corpus (85 documents); data_tables/: sample CSV uploads
@@ -197,3 +198,4 @@ A new document for one's own department takes effect at once. Replacing anything
 - v6 · 2026-11-03 · Arianna · The delivery count and the reconciliation job.
 - v7 · 2026-11-04 · Arianna · The rate limit, the limit on model calls, virtual threads and worker processes.
 - v8 · 2026-11-05 · Arianna · The evaluation corpus, dataset and review; tune on dev only.
+- v9 · 2026-11-06 · Arianna · The evaluation run and where its results go.
