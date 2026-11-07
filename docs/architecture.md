@@ -254,8 +254,9 @@ when a new campaign finishes the key changes; a question that still has one afte
 TTL is only a safety net.
 
 **What exists today:** the backend's `/query`, the internal token, the search with its department filter and the
-reranker, and steps 1 and 5 for documents, with citations and refusals. Rewriting, cache, routing and Text-to-SQL are
-still to come. Details
+reranker, and steps 1 and 5 for documents, with citations and refusals. For Text-to-SQL, the data dictionary, the
+metric views and a baseline agent measured on the evaluation dataset; none of it is reachable from `/query`.
+Rewriting, cache, routing and the Text-to-SQL pipeline are still to come. Details
 and measurements: "The query path" in [llm-service/README.md](../llm-service/README.md). How well it answers, measured on the evaluation
 dataset, and why the refusal threshold and the answer instructions are what they are:
 [eval-report.md](eval-report.md).
@@ -332,9 +333,11 @@ Design decisions so far:
   an if/else in the consumer is enough; two topics would add one more topic to create and configure and
   nothing else. The principle: split topics by *semantically different kinds of events*, not to make code
   branches look tidier.
-- **Why ROI / per-product attribution / customer segments are not structured fields**: this project's core
+- **Why per-product attribution and customer segments are not structured fields**: this project's core
   value is "AI analyzes content and results", not rebuilding a BI computation engine. Clean numbers
   (GMV / DAU / conversion rate / concurrent viewers) go into `campaign_metrics`; content that needs judgment
   and attribution goes into `documents` (the review); raw data ops already has but we shouldn't recompute
   (product sales, customer behavior) goes into its structured table as is, with no computation layer of ours
-  in between.
+  in between. ROI is the one figure computed here, because it is a fixed formula over two uploaded numbers: the
+  `campaign_summary` view (V9) writes it once, so no generated query has to get it right again. Why a campaign's
+  ROI came out as it did stays in its review.

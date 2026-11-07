@@ -1,9 +1,9 @@
 # Evaluation report
 
-**Draft.** Numbers from the `dev` split only: the baseline with vector search alone, and reranking compared against
-it. Hybrid search and the final `test` numbers come later. Every number below comes from a file in
-[eval/results/](../eval/results/), and every table can be rebuilt from the `.jsonl` next to it, except the comparison
-of reranking models, which says where it comes from.
+**Draft.** Numbers from the `dev` split only: the baseline with vector search alone, reranking compared against it,
+and the zero-shot Text-to-SQL baseline. Hybrid search and the final `test` numbers come later. Every number below
+comes from a file in [eval/results/](../eval/results/), and every table can be rebuilt from the `.jsonl` next to it,
+except the comparison of reranking models, which says where it comes from.
 
 ```bash
 cd llm-service
@@ -238,13 +238,59 @@ same CPU; the evaluation waited up to 120 s for it (`--rerank-timeout`), so ever
 On the development CPU, through TEI, reranking 50 candidates took 42.6 s at p50 and 51.1 s at p95 (the first run; the
 second took 49.9 s at p50, most likely because other work on the machine took CPU from it). The answering model took
 about as long as without reranking: p50 1.3 s against 1.2 s, with the longer prompt. In production the reranker runs
-on a GPU, and that hasn't been measured, so whether reranking fits in the 3 s target isn't known. At the 300 QPS peak it would have to score 15,000 question-chunk pairs a second (300 × 50).
+on a GPU, and that hasn't been measured, so whether reranking fits in the 3 s target isn't known. At the 300 QPS
+peak it would have to score 15,000 question-chunk pairs a second (300 × 50).
 
 Until it is measured, a query waits at most 0.5 s for the reranker (`RERANK_TIMEOUT_SECONDS`) and then goes on in vector
 order with a warning. Checked through the real app on this CPU: the query fell back after the timeout and was answered;
 with the reranker stopped, the same, the refused connection showing up as the timeout because Windows takes about 2 s
 to give up on one. Not checked: whether TEI keeps computing a request after the client has given up on it. If it does,
 the timeout doesn't take load off an overloaded reranker.
+
+## Text-to-SQL: the zero-shot baseline
+
+```bash
+uv run python -m evaluation.sql_run --split dev --name zero-shot-1   # needs Postgres with the mock data and V9
+```
+
+The 39 questions of `dev` with a gold SQL go to the baseline agent ("Text-to-SQL: the baseline" in
+[llm-service/README.md](../llm-service/README.md)): LangChain's `create_agent` with gpt-6-luna and tools to list the
+tables, see their columns and run a query. Its instructions say who asks, what they may see and today's date; no data
+dictionary, no views, no examples. A question is scored on the rows of the last query that ran. Two runs.
+
+| Questions | n | Execution accuracy, run 1 / 2 | Strict | Gold numbers found |
+|---|---|---|---|---|
+| data: the number is the answer | 27 | 66.7% / 70.4% | 55.6% / 55.6% | 80.0% / 80.0% |
+| both: numbers that support an answer | 12 | 58.3% / 58.3% | 50.0% / 50.0% | 73.3% / 84.2% |
+
+3 of the 39 questions changed between the runs. Why the 9 data questions of run 1 are wrong:
+
+| Why | Questions | What would fix it |
+|---|---|---|
+| ROI computed as (GMV − operating cost) / operating cost, the textbook marketing ROI, instead of profit / operating cost | all 4 ROI questions, in both runs | the data dictionary (profit already nets product cost) and the `roi` column of `campaign_summary` |
+| A follow-up asked without the turn before it | 2 | conversation memory |
+| "The conversion rate of our launch" read as the rate of its last day | 1 | `avg_conversion_rate` in `campaign_summary` |
+| An average with two definitions, one given | 1 | the data dictionary or examples; the dataset asks for both |
+| All products sorted, the answer first, instead of the one asked for | 1, run 1 only | nothing: execution accuracy scores the rows, not the reply |
+
+Run 2 got the sorted list right and missed nothing run 1 got among the data questions.
+
+- **Three gold answers were corrected before these runs**, through the review page, which runs the corrected SQL and
+  stores what the database returns. One average was in percent rounded to two places (8.09, 8.23), which no query
+  returning the stored rates could match; two queries on both documents and data returned `campaign_id`, a number no
+  question asks for and the scorer then required. Two earlier runs on the old gold scored the data questions 66.7%
+  both times; these runs replace them.
+- **Strict against lenient.** 18 and 19 of the 27 data questions return the gold's numbers, 15 return its names and
+  dates too. The others return the number without saying which campaign it is from, which answers the question.
+- **Every final query for staff and managers named the asker's department**: 31 of 31 and 32 of 32 (one question of
+  run 1 was stopped at the limit of model calls before a final query). The instructions are followed here, but they
+  are not a safeguard: the filter code adds and row-level security are ([permission-model.md](permission-model.md)).
+- **Questions on both documents and data** are an imperfect fit for execution accuracy: their gold is one choice of
+  supporting numbers, so the share of the gold's numbers found is the fairer reading. One of the two corrected ones is
+  still wrong in both runs, for the ROI.
+- **Latency and cost.** p50 8.9 s and 8.4 s, p95 28 s and 34 s, one question at a time; 4 model calls a question at the
+  median, 8 at most, because the agent lists the tables and reads their columns before every query. About $0.001 a
+  question, about 6 times a document answer with reranking ($0.00016). Far over the 3 s a query has.
 
 ## What these numbers don't show
 
@@ -257,7 +303,8 @@ the timeout doesn't take load off an overloaded reranker.
   word. On a few answers seen so far it is strict: it marked "the warehouse must have enough cold-storage capacity" as
   unsupported by "confirm cold-storage capacity".
 - **`test` hasn't been run.** It reports the final numbers once, after the choices above are made on `dev`.
-- **Questions about numbers** aren't graded until Text-to-SQL exists, and follow-ups until there is conversation memory.
+- **Answers to questions about numbers** aren't graded: Text-to-SQL is scored on its rows, not on the reply. Follow-ups
+  aren't either until there is conversation memory.
 - **Latency** is one query at a time on a development machine, not under load. The reranker's was measured only on
   a CPU, where it can't be used.
 
@@ -272,6 +319,9 @@ the timeout doesn't take load off an overloaded reranker.
 | `dev-prompt-v3-rerun` | now in the code | noise; ran alongside another run |
 | `dev-rerank-1` | now in the code | with reranking |
 | `dev-rerank-2` | now in the code | with reranking; noise; reranked slower than run 1, so its latency isn't used |
+| `dev-sql-zero-shot-1` | the SQL baseline's | Text-to-SQL, zero-shot |
+| `dev-sql-zero-shot-2` | the SQL baseline's | Text-to-SQL, zero-shot; noise |
 
 Each run is a `.jsonl` of what every question went through, an `.md` of its tables with the instructions it used, and a
-spot-check file of 30 graded answers picked at random. The seven runs cost about $1.98, $1.87 of it grading.
+spot-check file of 30 graded answers picked at random, except the SQL runs, which need no grader. The seven document
+runs cost about $1.98, $1.87 of it grading; the two SQL runs $0.08, and the two they replace $0.06.

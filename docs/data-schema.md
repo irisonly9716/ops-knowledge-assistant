@@ -3,7 +3,7 @@
 > The actual DDL lives in the Flyway migrations under [db/migration/](../db/migration/) (V1 pgvector, V2 base
 > schema, V3 uploads / roles / chunk department, V4 the `document_catalog` view, V5 its `catalog_entry()` function,
 > V6 the `outbox` table, V7 `documents.version` and `uploads.category`, V8 the delivery and republish counts on
-> `uploads`), applied in
+> `uploads`, V9 the data dictionary and the metric views), applied in
 > version order (this document explains them; the SQL files are authoritative for column types).
 > The data is mock data generated with Python + Faker (see `llm-service/scripts/generate_mock_data.py`).
 
@@ -66,6 +66,9 @@ ROI = SUM(campaign_products.profit) / campaigns.actual_operating_cost
   ROI asks "was this marketing spend worth it", not "is the whole business worth it"
 - Planned and actual cost are stored separately because invoices never match the budget exactly
   (the mock data makes them differ on purpose)
+- The formula is written once, as the `roi` column of the `campaign_summary` view (V9), so a query never
+  rebuilds it. It is a fixed formula over uploaded numbers, not analysis: why a campaign's ROI came out as it
+  did stays in its review
 
 `has_plan_doc` / `has_review_doc` are **a shortcut, not the source of truth**: the truth is whether
 `documents` has a row with this `campaign_id` and `doc_type`. The flags only let the router answer
@@ -75,9 +78,9 @@ deliberate, not an oversight.
 
 ### campaign_metrics (daily campaign metrics)
 
-Only clean numbers the system can get directly. ROI, per-product breakdowns and root-cause analysis
-need judgment and **do not belong here**: they are content and go through the RAG pipeline of the
-`documents` table (`campaign_review` documents).
+Only clean numbers the system can get directly. Attribution and root-cause analysis need judgment and
+**do not belong here**: they are content and go through the RAG pipeline of the `documents` table
+(`campaign_review` documents). ROI is not stored either: the `campaign_summary` view computes it.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -144,6 +147,34 @@ current version: that is the last `done` upload of the campaign and table type. 
 above in any order, plus an optional `campaign_id` that must match the upload; `products_purchased` is
 semicolon-separated (`Serum;Lipstick`). Samples are in `data_tables/`.
 
+### The data dictionary and the metric views (V9)
+
+Text-to-SQL is told what the data means by the database itself. Every business table and column has a
+`COMMENT`: its meaning, its unit (US dollars, minutes, a fraction where 0.0874 is 8.74%) and what it is not
+(planned cost has no product cost in it; the customer table is a sample). `app/sql_agent/schema.py` reads them
+from the catalog at run time, so a model sees the definitions in the migrations, never a copy that drifts.
+
+| View | One row per | What it saves a query from working out |
+|---|---|---|
+| `campaign_summary` | campaign | department and host names; GMV, conversion, viewers summed or averaged over its days; units, sales and profit over its products; `roi` |
+| `campaign_daily_metrics` | campaign and day | the campaign's name, department and start date next to each day |
+| `campaign_product_sales` | campaign and product | the same, next to each product |
+| `campaign_customers` | campaign and sampled customer | the same, without `ip_address` |
+| `host_profiles` | host | the host's department name |
+
+- **Days and products are summed apart.** Joined together, each campaign's 20-odd daily rows would multiply
+  its 3–6 product rows, and every sum would come out several times too large. Each is summed in its own
+  subquery.
+- **`avg_conversion_rate` is the mean of the daily rates**, each day counting the same. Averaging several
+  campaigns' values weighs each campaign the same; averaging their daily rows weighs longer campaigns more.
+  The column comment says so, because a question can mean either.
+- **`security_invoker = true` on every view.** A view normally reads its tables as its owner, and the owner
+  isn't subject to row-level security, so a view would bypass it. With this option the tables are read as
+  whoever queries the view (PostgreSQL 15 and later).
+- **No view has `ip_address`**, and the schema a model is shown leaves it out of the table too: personal data
+  no question needs.
+- Campaign and department are carried as names (`department = 'Beauty'`), the way questions name them.
+
 ## Document tables (SOP / campaign plan / post-campaign review)
 
 The three document types share one table and differ by `doc_type`, because they go through **the same
@@ -154,7 +185,7 @@ of the ingestion logic.
 |---|---|---|
 | `sop` | any time | operating procedures / guidelines; may be `ALL` (every department) |
 | `campaign_plan` | uploaded before the campaign goes live | livestream plan, kept so AI can compare plans with results and improve future plans |
-| `campaign_review` | uploaded after the campaign | post-campaign review -- **ROI and per-product results are part of this document's content**, not structured fields |
+| `campaign_review` | uploaded after the campaign | post-campaign review -- **why the results came out as they did**: which choices worked, which products carried the campaign. The numbers themselves are in the tables |
 
 ### documents
 | Column | Type | Notes |
