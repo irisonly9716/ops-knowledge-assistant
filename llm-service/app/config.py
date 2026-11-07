@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     # Not reachable or too slow, every query falls back to vector order with a warning (app/rag/reranking.py)
     reranker_url: str = "http://127.0.0.1:8082"
     # Candidates the search returns for the reranker; the prompt still gets query_top_k. On dev, 30 and 50 reranked to
-    # the same Recall@5 (92.7%), but with 30 one labelled section was never a candidate
+    # the same Recall@5 (92.7%), but with 30 two labelled sections were never candidates, and the corpus will grow
     rerank_candidates: int = 50
     # The 3 s target minus the rest of a query (measured p50 1.4 s, p95 2.6 s, without the backend) leaves little. A
     # reranker on a GPU is designed to take a fraction of this, not measured yet (#11); the limit bounds what a slow

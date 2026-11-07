@@ -1,8 +1,9 @@
 # Evaluation report
 
-**Draft.** Numbers from the `dev` split only, with vector search alone. Reranking, hybrid search and the final `test`
-numbers come later and will be compared against this baseline. Every number below comes from a file in
-[eval/results/](../eval/results/), and every table can be rebuilt from the `.jsonl` next to it.
+**Draft.** Numbers from the `dev` split only: the baseline with vector search alone, and reranking compared against
+it. Hybrid search and the final `test` numbers come later. Every number below comes from a file in
+[eval/results/](../eval/results/), and every table can be rebuilt from the `.jsonl` next to it, except the comparison
+of reranking models, which says where it comes from.
 
 ```bash
 cd llm-service
@@ -146,7 +147,8 @@ how often each kind of question comes up in real use isn't known, so the two are
    that scores 0.26. A refused real question costs more than a model call.
 
 **What would change it:** questions out of scope are the weakest part of the sample (2 in dev, both 0.33). More of
-them, written by hand, and a threshold sweep after reranking, whose scores are on a different scale, come next.
+them, written by hand, come next. Reranking doesn't change it: the threshold is applied to the best vector score,
+before reranking, and the sweep on the reranked runs picks 0.14 again (see "Reranking").
 
 ## Replies that cite nothing
 
@@ -155,6 +157,94 @@ excerpts don't say ...") instead of with the fixed word. With no citation, the r
 would have got a 502. Such a reply is now shown as the standard refusal and logged as a warning. Nothing uncited is
 shown either way. A citation of an excerpt that doesn't exist is still an error, because that is the model making
 something up.
+
+## Reranking: bge-reranker-v2-m3
+
+The search returns 50 candidates in vector order, a cross-encoder reads the question together with each of them and
+reorders them, and the prompt takes the first 5. The model runs in Text Embeddings Inference (TEI), a service of its
+own (`app/rag/reranking.py` says why). It only sees chunks that passed the department filter. The refusal threshold is
+applied to the best vector score before reranking: the reranker's scores aren't on the cosine scale, and a question far
+from every document has nothing worth reordering.
+
+### Which model, and how many candidates
+
+Measured once, on the 50 candidates of the baseline run for the 66 questions with labelled sections, with each model in
+PyTorch on the development CPU (6 cores). The script was a one-off and isn't in the repository; its bge row at 50
+candidates matches the runs through the service below, which are.
+
+| Order | Candidates | Recall@5 | MRR | Recall@5, paraphrase | MRR, paraphrase | p50 a query, CPU |
+|---|---|---|---|---|---|---|
+| Vector search | | 80.3% | 0.743 | 78.3% | 0.840 | |
+| ms-marco-MiniLM-L6-v2 | 30 | 88.7% | 0.802 | 72.5% | 0.642 | 1.1 s |
+| ms-marco-MiniLM-L6-v2 | 50 | 88.7% | 0.802 | 72.5% | 0.642 | 1.9 s |
+| bge-reranker-v2-m3 | 30 | 92.7% | 0.920 | 80.4% | 0.833 | 29 s (3 queries) |
+| **bge-reranker-v2-m3** | **50** | **92.7%** | **0.913** | 80.4% | 0.833 | 44 s |
+
+- **bge over MiniLM:** 4 more points of Recall@5 and 0.11 more MRR. MiniLM, trained on web search queries, ranked
+  paraphrased questions worse than vector search did; bge didn't. bge is about 25 times larger, which is why it runs
+  on a GPU in its own service. It also reads other languages; the corpus is English, so that isn't measured here.
+- **50 candidates over 30:** the same Recall@5, but at 30 two labelled sections (in two questions) were never
+  candidates, so no reranker could have raised them: vector search's Recall@30 is 98.9%, its Recall@50 100%. MRR is
+  0.007 lower at 50, one more wrong chunk getting ahead. The corpus will grow and push sections further down the vector
+  order, so the margin is worth more than the 0.007. Each candidate costs the reranker time, which matters only once
+  its latency on a GPU is known.
+
+### Through the service: two runs with reranking
+
+The same instructions, run twice with and twice without (the runs of "The answer instructions"). TEI `cpu-1.9.4` on the
+same CPU; the evaluation waited up to 120 s for it (`--rerank-timeout`), so every question was reranked.
+
+| | Without, run 1 | Without, run 2 | With, run 1 | With, run 2 |
+|---|---|---|---|---|
+| Recall@5 / MRR of what the prompt got | 80.3% / 0.743 | 80.3% / 0.743 | 92.7% / 0.913 | 92.7% / 0.913 |
+| Answered / refused by the model (of 54) | 46 / 8 | 47 / 7 | **53 / 1** | **53 / 1** |
+| Wrong answers to the 15 questions to refuse | 0 | 0 | 0 | 0 |
+| Faithfulness | 100% | 100% | 99.6% | 96.5% |
+| Coverage, every graded answer | 84.1% | 82.1% | 88.9% | 85.3% |
+| Coverage, the 45 answers graded in all four runs | 83.7% | 83.5% | 88.3% | 84.1% |
+| Input tokens a query | 1,136 | 1,136 | 1,389 | 1,389 |
+
+- **The gain is in what gets answered.** Seven answerable questions that both runs without reranking refused were
+  answered in both runs with it. In each, a labelled section had ranked 6th to 21st, or 41st, and the model, as
+  instructed, refused rather than answer from excerpts that didn't hold it. Reranking put the section first or second
+  in six; those six were answered with every answer point. The seventh asks about two documents: its second section
+  rose from 41st to 12th, still outside the prompt, and it was answered for the half it had.
+- **The one still refused** also needs two documents: its second section rose from 19th to 6th, one short of the
+  prompt, and the model refused. Putting more excerpts in the prompt would answer it; that is a separate choice.
+- **Answers that were already given didn't get better:** on the 45 graded in all four runs, coverage moved within
+  the run-to-run noise.
+- **Faithfulness is within the noise too.** Four answers had unsupported claims across the two runs. One is the
+  grader's known strictness (it marked "Cold-storage capacity can handle the sale's order spike" as unsupported by a
+  step to confirm cold-storage capacity). Three are the answer adding or dropping a condition: the Pricing team
+  approves price changes only after the 24-hour lock; the price paid replaces the list price only for livestream-only
+  prices; and an added "before featuring it prominently". The instructions' 100% without reranking rested on two or
+  three claims; the original instructions scored 96.5% and 96.8%.
+- **One answer couldn't be graded,** the same one in both runs: in one of its two checking steps the grader returned
+  an empty list of verdicts for 3 items. Without reranking it was graded, with different excerpts. It counts as
+  ungraded, not as a score; it wasn't investigated further.
+- **Wrong answers stay at 0,** and the threshold sweep is the same as without reranking apart from the wrong refusals:
+  1 of 54 at every threshold from 0 to 0.25. 0.14 stays.
+- **Keyword questions** reach Recall@5 100% after reranking, against 92.7% for all: still no case for hybrid search on
+  this corpus.
+- **The prompt grows by about a fifth** (1,136 to 1,389 input tokens): the excerpts the reranker puts first are longer
+  on average. $0.00016 a query instead of $0.00013.
+- **The order is the same every time and matches PyTorch.** Both runs reranked every question identically. Against the
+  PyTorch measurement, 2 of 66 questions had a section one place apart (3rd instead of 2nd, 20th instead of 21st),
+  none across the 5th, so Recall@5 and MRR are the same. TEI's CPU backend computes GeLU with an approximation, so its
+  scores aren't exactly PyTorch's, and close calls can swap.
+
+### Latency: not measured where it would run
+
+On the development CPU, through TEI, reranking 50 candidates took 42.6 s at p50 and 51.1 s at p95 (the first run; the
+second took 49.9 s at p50, most likely because other work on the machine took CPU from it). The answering model took
+about as long as without reranking: p50 1.3 s against 1.2 s, with the longer prompt. In production the reranker runs
+on a GPU, and that hasn't been measured, so whether reranking fits in the 3 s target isn't known. At the 300 QPS peak it would have to score 15,000 question-chunk pairs a second (300 × 50).
+
+Until it is measured, a query waits at most 0.5 s for the reranker (`RERANK_TIMEOUT_SECONDS`) and then goes on in vector
+order with a warning. Checked through the real app on this CPU: the query fell back after the timeout and was answered;
+with the reranker stopped, the same, the refused connection showing up as the timeout because Windows takes about 2 s
+to give up on one. Not checked: whether TEI keeps computing a request after the client has given up on it. If it does,
+the timeout doesn't take load off an overloaded reranker.
 
 ## What these numbers don't show
 
@@ -168,7 +258,8 @@ something up.
   unsupported by "confirm cold-storage capacity".
 - **`test` hasn't been run.** It reports the final numbers once, after the choices above are made on `dev`.
 - **Questions about numbers** aren't graded until Text-to-SQL exists, and follow-ups until there is conversation memory.
-- **Latency** is one query at a time on a development machine, not under load.
+- **Latency** is one query at a time on a development machine, not under load. The reranker's was measured only on
+  a CPU, where it can't be used.
 
 ## The runs
 
@@ -179,6 +270,8 @@ something up.
 | `dev-prompt-v2` | "answer only from what the excerpts cover" | rejected |
 | `dev-prompt-v3` | now in the code | spot-check file for the grader |
 | `dev-prompt-v3-rerun` | now in the code | noise; ran alongside another run |
+| `dev-rerank-1` | now in the code | with reranking |
+| `dev-rerank-2` | now in the code | with reranking; noise; reranked slower than run 1, so its latency isn't used |
 
 Each run is a `.jsonl` of what every question went through, an `.md` of its tables with the instructions it used, and a
-spot-check file of 30 graded answers picked at random. The five runs cost about $1.35, $1.27 of it grading.
+spot-check file of 30 graded answers picked at random. The seven runs cost about $1.98, $1.87 of it grading.
