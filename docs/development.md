@@ -93,6 +93,22 @@ docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server loca
 
 Kafka UI is available at http://localhost:8080.
 
+## The reranker (optional)
+
+```bash
+docker compose --profile rerank up -d reranker   # Text Embeddings Inference with bge-reranker-v2-m3, on :8082
+curl -s localhost:8082/rerank -H "Content-Type: application/json" -d '{"query": "refund", "texts": ["Refunds take 5 days.", "Hosts rotate weekly."]}'
+```
+
+The first start downloads the model (2.2 GB) into the `reranker_models` volume; the container needs about 5 GB of
+memory. It isn't started by `docker compose up -d`, and nothing needs it: llm-service keeps the vector order when it is
+missing or slow, and logs a warning on each query. Set `RERANKER_URL=` (empty) in `.env` to turn reranking off and the
+warnings with it. On a laptop CPU one query's rerank takes about 40 s, so `/query` always falls back; the evaluation
+waits for it with `--rerank-timeout`.
+
+If the container exits with code 137 while "Warming up model", Docker ran out of memory: give Docker Desktop more, or
+stop containers you don't need. `--max-batch-tokens 1024` in `docker-compose.yml` is what made it fit in 8 GB.
+
 ## Troubleshooting
 
 **`password authentication failed for user "ops"` although `.env` looks right**

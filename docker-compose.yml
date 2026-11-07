@@ -141,12 +141,16 @@ services:
   # Reranker -- bge-reranker-v2-m3 served by Text Embeddings Inference (Hugging Face's server for embedding and
   # reranking models). llm-service sends it the question and the search's 50 candidates; it answers with their order
   #   - only started when asked for:  docker compose --profile rerank up -d reranker
-  #     It needs about 2 GB of memory, and on a development CPU about 44 s for 50 candidates, so a query's 0.5 s limit
-  #     always falls back to vector order. It is here for the evaluation (--rerank-timeout) and to test the real API.
+  #     It holds about 5 GB of memory once warmed up, and on a development CPU takes about 43 s for 50 candidates,
+  #     so a query's 0.5 s limit always falls back to vector order. It is here for the evaluation (--rerank-timeout)
+  #     and to test the real API.
   #     Production runs a GPU image of the same server and model
   #   - the weights (2.2 GB) are downloaded into the volume on the first start. The revision is pinned: a new
   #     version of the model would change the evaluation's numbers without anything in this repository changing
   #   - TEI takes 32 texts a request by default and answers more with 413; a query sends 50
+  #   - it splits a request into batches of at most --max-batch-tokens, and it warms up with one. Docker Desktop's 8 GB
+  #     killed the container for memory while warming up with the default 16384 and with 4096; 1024 changes the peak
+  #     memory, not the scores. Inputs here are at most about 500 tokens (question and chunk), so nothing is cut
   #   - on localhost only: it is sent the documents' text
   # -------------------------------------------------------------------------
   reranker:
@@ -154,7 +158,7 @@ services:
     container_name: oka-reranker
     profiles: ["rerank"]
     command: ["--model-id", "BAAI/bge-reranker-v2-m3", "--revision", "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
-              "--max-client-batch-size", "64"]
+              "--max-client-batch-size", "64", "--max-batch-tokens", "1024"]
     ports:
       - "127.0.0.1:${RERANKER_PORT:-8082}:80"
     volumes:
