@@ -60,10 +60,12 @@ app/
 │   ├── retrieval.py         who may see what, and the search itself
 │   ├── query_models.py      the async model calls of a query, with retries inside the budget
 │   └── answering.py         a question to an answer: threshold, prompt, citation check, refusal
-├── sql_agent/     Text-to-SQL + safety checks + row-level filtering
+├── sql_agent/     Text-to-SQL. Now: schema.py (what a model is shown: tables, data dictionary, names in the data)
+│                  and execute.py (one SELECT, read-only, time and row limits); the pipeline itself is to come
 ├── router/        query routing + combined answers
 └── memory/        Redis cache + conversation memory
-evaluation/        the evaluation dataset's format (dataset.py) and the review page (review.py); not part of the service
+evaluation/        the evaluation dataset's format (dataset.py), the review page (review.py), the runs (run.py for
+                   documents, sql_run.py with the baseline agent in sql_agent.py for SQL); not part of the service
 tests/             pytest; test_events (contract / cross-language drift) test_storage (path traversal)
                    test_upload_consumer (every branch of the consume loop) test_health
                    test_embeddings (fake OpenAI client) test_parsing (all three formats parse the same)
@@ -78,6 +80,8 @@ tests/             pytest; test_events (contract / cross-language drift) test_st
                    test_dataset (the dataset's format, the split, finding a labelled section)
                    test_generate_questions (the question generator without a model: tasks, which answers are kept, SQL)
                    test_review (the review page's API: what can change, what is checked, what is exported)
+                   test_sql_agent (real Postgres: the metric views, what a model is shown, running a generated
+                   query, the baseline agent with a fake model, what a run scores)
 tests/fixtures/documents/   docx / PDF fixtures, generated from Markdown by scripts/make_sample_documents.py
 ```
 
@@ -374,6 +378,33 @@ uv run python -m evaluation.run --split dev --name baseline   # one evaluation r
 Recall@50, MRR by kind of question), graded answers, the refusal threshold sweep, latency and cost to
 `eval/results/`. Answers are graded by `evaluation/judge.py` the way RAGAS does it, without RAGAS, which can't be
 installed next to openai 3.29. Results and what they mean: [docs/eval-report.md](../docs/eval-report.md).
+
+## Text-to-SQL: the baseline
+
+```bash
+uv run python -m evaluation.sql_run --split dev --name zero-shot-agent   # needs Postgres with the mock data and V9
+```
+
+The questions with a gold SQL go to a LangChain agent (`create_agent`, on LangGraph) with three tools: list the
+tables, show their columns, run a query. They do what the tools of LangChain's SQL agent do, written here because
+those are in `langchain-community`, which LangChain stopped maintaining in May 2026 and which needs a newer
+pydantic-settings than this service pins; its schema tool also shows the model three rows of every table, IP
+addresses included. Measured: `langchain` and `langchain-openai` add 7 packages and about 4 MB; with
+`langchain-community` it would be 20 packages and 75 MB.
+
+- **Zero-shot**: the model is told who asks, what they may see and today's date, and finds the schema with its
+  tools. `--dictionary` adds the comments of V9 and the names in the data (the asker's department's only);
+  `--views` offers the metric views instead of the tables.
+- **Bounded**: at most 8 model calls of 30 s each with no retries, 5 s and 200 rows a query, 120 s a question.
+- **Read-only**: queries run on the query path's read-only connections, and `execute.run_select` opens a read-only
+  transaction of its own. That is one layer of the several generated SQL gets; nothing here is reachable from
+  `/query`.
+- **Scored on the last query that ran** (`evaluation/metrics.py`): the same number of rows as the gold result, each
+  holding its gold row's numbers within 0.5%, or all its values when it has none. A gold result often carries the
+  campaign's name and dates next to the number asked for, and a query that returns only the number answers the
+  question too; the strict reading is reported beside it. Questions on both documents and data are reported apart:
+  their gold SQL is one choice of supporting numbers. For staff and managers the run also counts final queries that
+  don't name the asker's department.
 
 ## Tests
 

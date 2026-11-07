@@ -101,3 +101,76 @@ def test_a_sample_does_not_depend_on_the_order_items_come_in():
     items = list(range(40))
     assert metrics.sample(items, 5, "seed") == metrics.sample(list(reversed(items)), 5, "seed")
     assert len(metrics.sample(items, 50, "seed")) == 40
+
+
+# ---- Text-to-SQL
+
+GOLD = (("Electronics Black Friday Live", "2025-11-16", "2025-12-12", "1043330.18"),)
+
+
+def test_a_query_that_returns_only_the_number_asked_for_is_right():
+    assert metrics.rows_match(GOLD, (("1043330.18",),))
+    assert not metrics.rows_match(GOLD, (("1043330.18",),), every_value=True)
+
+
+def test_extra_columns_and_another_column_order_are_fine():
+    assert metrics.rows_match(GOLD, (("1043330.18", "Electronics Black Friday Live", "15568"),))
+
+
+def test_the_number_of_another_campaign_is_wrong():
+    assert not metrics.rows_match(GOLD, (("987654.32",),))
+
+
+def test_rounding_inside_half_a_percent_is_the_same_number_and_beyond_it_is_not():
+    roi = (("1.1434101017208975",),)
+    assert metrics.rows_match(roi, (("1.14",),))
+    assert metrics.rows_match((("0.08736",),), (("0.0874",),))
+    assert not metrics.rows_match((("0.08736",),), (("0.09",),))
+
+
+def test_a_row_without_numbers_must_have_all_its_values():
+    gold = (("Home New Product Launch", "2026-03-01", "2026-03-17"),)
+    assert metrics.rows_match(gold, (("2026-03-17", "Home New Product Launch", "2026-03-01"),))
+    assert not metrics.rows_match(gold, (("Home New Product Launch",),))
+
+
+def test_every_row_must_be_there_once_whatever_the_order():
+    gold = (("Serum", "796"), ("Sheet Mask", "470"))
+    assert metrics.rows_match(gold, (("470",), ("796",)))
+    assert not metrics.rows_match(gold, (("796",), ("796",)))                  # one row can't answer both
+    assert not metrics.rows_match((("796",), ("796",)), (("796",), ("470",)))
+    assert not metrics.rows_match(gold, (("796",), ("470",), ("12",)))        # a row too many
+
+
+def test_a_metric_with_two_definitions_needs_both():
+    gold = (("8.09", "8.23"),)
+    assert metrics.rows_match(gold, (("8.23", "8.09"),))
+    assert not metrics.rows_match(gold, (("8.09",),))
+
+
+def test_the_same_value_twice_in_a_row_must_be_there_twice():
+    assert not metrics.rows_match((("5", "5"),), (("5",),))
+
+
+def test_an_empty_result_matches_only_an_empty_gold():
+    assert not metrics.rows_match(GOLD, ())
+    assert metrics.rows_match((), ())
+
+
+def test_nulls_match_only_nulls_and_text_is_compared_exactly():
+    assert metrics.rows_match(((None, "Beauty"),), ((None, "Beauty"),))
+    assert not metrics.rows_match((("Beauty",),), (("beauty",),))
+
+
+def test_value_recall_is_the_share_of_the_gold_numbers_found_anywhere():
+    gold = (("Grocery Black Friday Live", "28866.58", "34027.23"), ("Grocery Black Friday Live", "181056.65", "1960"))
+    assert metrics.value_recall(gold, (("181056.65", "x"), ("28866.58",))) == pytest.approx(0.5)
+    assert metrics.value_recall((("Beauty",),), (("Beauty",),)) is None
+
+
+def test_a_query_names_the_department_by_name_or_by_its_id():
+    assert metrics.mentions_department("SELECT 1 FROM campaigns c JOIN departments d USING (department_id) "
+                                       "WHERE d.name = 'Beauty'", "Beauty")
+    assert metrics.mentions_department("SELECT 1 FROM campaigns WHERE department_id = 3", "Beauty", 3)
+    assert not metrics.mentions_department("SELECT 1 FROM campaigns WHERE department_id = 31", "Beauty", 3)
+    assert not metrics.mentions_department("SELECT 1 FROM campaigns WHERE name = 'Beauty Black Friday Live'", "Beauty")

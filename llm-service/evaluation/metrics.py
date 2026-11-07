@@ -16,8 +16,10 @@ question ends as it did in the run. So the whole sweep comes from one run, witho
 """
 import math
 import random
+import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 
 ANSWERED = "answered"
 REFUSED = "refused"
@@ -133,6 +135,88 @@ def choose_threshold(rates: Sequence[Rates], wrong_answer_cost: float) -> float:
         previous = r.threshold
     widest = max(runs, key=len)   # the first of equally wide runs: the lower threshold refuses less
     return round(widest[len(widest) // 2], 4)
+
+
+# ---------------------------------------------------------------------------
+# Text-to-SQL
+# ---------------------------------------------------------------------------
+# A gold result often carries columns that say which campaign it is about (name, start date) next to the number the
+# question asks for. A query that returns only the number answers the question too, and a query that picked another
+# campaign returns another number. So when a gold row has numbers, those are what a predicted row must contain;
+# a row with no numbers (which campaign came before this one?) must contain all of its values. Extra columns and the
+# order of rows and columns don't matter; the number of rows does.
+_NUMBER = re.compile(r"-?\d+(\.\d+)?")
+# 1.14 from ROUND(roi, 2) is the gold's 1.1434 (0.3% off), and 0.0874 its 0.08736; 0.09 is 3% off and isn't
+RELATIVE_TOLERANCE = Decimal("0.005")
+
+
+def _number(value: str | None) -> Decimal | None:
+    return Decimal(value) if value is not None and _NUMBER.fullmatch(value.strip()) else None
+
+
+def values_equal(gold: str | None, predicted: str | None) -> bool:
+    g, p = _number(gold), _number(predicted)
+    if g is not None and p is not None:
+        return abs(g - p) <= RELATIVE_TOLERANCE * max(abs(g), abs(p))
+    return gold == predicted
+
+
+def answer_values(row: Sequence[str | None]) -> list[str | None]:
+    numbers = [v for v in row if _number(v) is not None]
+    return numbers or [v for v in row if v is not None]
+
+
+def _contains(predicted: Sequence[str | None], wanted: Sequence[str | None]) -> bool:
+    """Every wanted value has its own equal value in the predicted row."""
+    free = list(predicted)
+    for value in wanted:
+        match = next((i for i, p in enumerate(free) if values_equal(value, p)), None)
+        if match is None:
+            return False
+        free.pop(match)
+    return True
+
+
+def rows_match(gold: Sequence[Sequence[str | None]], predicted: Sequence[Sequence[str | None]], *,
+               every_value: bool = False) -> bool:
+    """Execution accuracy for one question. every_value: the strict reading, where a predicted row must contain all of
+    a gold row's values, the names and dates included."""
+    if len(gold) != len(predicted):
+        return False
+    wanted = [list(row) if every_value else answer_values(row) for row in gold]
+    can_take = [[j for j, p in enumerate(predicted) if _contains(p, w)] for w in wanted]
+    taken_by: dict[int, int] = {}   # predicted row -> gold row; each predicted row answers one gold row
+
+    def assign(i: int, seen: set[int]) -> bool:
+        for j in can_take[i]:
+            if j not in seen:
+                seen.add(j)
+                if j not in taken_by or assign(taken_by[j], seen):
+                    taken_by[j] = i
+                    return True
+        return False
+
+    return all(assign(i, set()) for i in range(len(gold)))
+
+
+def value_recall(gold: Sequence[Sequence[str | None]], predicted: Sequence[Sequence[str | None]]) -> float | None:
+    """The share of the gold's numbers found anywhere in the predicted rows. For questions where the numbers that
+    support an answer are a choice (why did this campaign miss its target?): partial credit, where a match is all or
+    nothing."""
+    numbers = [v for row in gold for v in row if _number(v) is not None]
+    if not numbers:
+        return None
+    found = [p for row in predicted for p in row]
+    return sum(any(values_equal(v, p) for p in found) for v in numbers) / len(numbers)
+
+
+def mentions_department(sql: str, department: str, department_id: int | None = None) -> bool:
+    """Whether a query for a staff member or a manager names their department. Only a reading of the text: the
+    department filter that counts is the one code adds and row-level security enforces, not one the model writes."""
+    text = sql.lower()
+    if f"'{department.lower()}'" in text:
+        return True
+    return department_id is not None and re.search(rf"department_id\s*=\s*{department_id}\b", text) is not None
 
 
 # ---------------------------------------------------------------------------
