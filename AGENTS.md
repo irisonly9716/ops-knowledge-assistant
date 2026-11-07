@@ -20,7 +20,7 @@ An assistant for live-commerce operations staff. One entry point answers SOP and
 
 **Principle:** the project analyzes content and results with AI; it does not recompute analytics. Clean numbers go in SQL columns, narrative (SOPs, plans, reviews) goes through RAG, and data other teams already computed is uploaded, not calculated here.
 
-**Status:** upload, approval, ingestion and document answers through `/query` are implemented. Reranking, Text-to-SQL, routing, cache and memory are not built yet (`app/sql_agent`, `app/router`, `app/memory` are empty packages).
+**Status:** upload, approval, ingestion, reranking and document answers through `/query` are implemented. Text-to-SQL, routing, cache and memory are not built yet (`app/sql_agent`, `app/router`, `app/memory` are empty packages).
 
 **Language:** documents and questions are in English. There is no cross-language retrieval.
 
@@ -59,7 +59,8 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Chunking | langchain-text-splitters · tiktoken | 1.1.3 · 0.14.0 |
 | Tests and mock data | pytest · httpx · faker · JUnit and Mockito via Boot | 9.1.1 · 0.28.1 · 33.1.0 |
 
-- Planned, not installed: LangGraph, sqlglot, a reranker (Cohere Rerank or `bge-reranker-v2-m3`, chosen by eval), and pandas with openpyxl (#9).
+- Reranker: `bge-reranker-v2-m3` (revision pinned) in Text Embeddings Inference `cpu-1.9.4`, a service of its own reached over HTTP; a GPU image of the same server in production.
+- Planned, not installed: LangGraph, sqlglot, and pandas with openpyxl (#9).
 - Never upgrade a major version inside a feature change.
 - Your training data may be older than these versions. Spring Boot 4 uses Jackson 3 (`tools.jackson.*`; annotations stay in `com.fasterxml.jackson.annotation`), `@MockitoBean`, and `@WebMvcTest` in `org.springframework.boot.webmvc.test.autoconfigure`. Check the docs for the installed version.
 
@@ -73,6 +74,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Create topics · mock data | `uv run python -m scripts.init_topics` · `uv run python -m scripts.generate_mock_data` |
 | Evaluation corpus: what's in it · load it · the questions | `uv run python -m scripts.generate_corpus --report` · `uv run python -m scripts.ingest_corpus` (needs the backend, Kafka and the consumer) · `uv run python -m scripts.generate_questions --report` · review: `uv run python -m evaluation.review` |
 | Evaluation run (needs Postgres with the corpus; about $0.27 on `dev`, almost all grading) | `uv run python -m evaluation.run --split dev --name <name>` · results in `eval/results/`, what they mean in `docs/eval-report.md` |
+| Reranker (optional, about 5 GB of memory; queries keep the vector order without it) | `docker compose --profile rerank up -d reranker` (:8082) |
 | Run backend (:8081) | `cd backend-service` · `.\mvnw.cmd spring-boot:run` |
 | Run consumer · LLM API (:8000) | `uv run python -m app.consumers.upload_consumer` · `uv run python -m app.server --reload` (not plain `uvicorn`: async psycopg needs the event loop it chooses) |
 | Python tests | `uv run pytest` (database tests use a throwaway database, skipped if Postgres is down) |
@@ -92,7 +94,7 @@ backend-service/       Spring Boot: REST API, permissions, approval, outbox rela
   campaign/ department/ document/ config/ web/
 llm-service/app/       Python: ingestion and the query path
   consumers/           consume loop, handlers (documents), data_tables (CSV), storage, events
-  rag/                 parsing/, chunking, document_fields, embeddings, store, retrieval, query_models, answering
+  rag/                 parsing/, chunking, document_fields, embeddings, store, retrieval, reranking, query_models, answering
   server.py            starts the API; query_api.py: POST /query, for the backend only
   time_budget.py       one time budget per message or query
 llm-service/evaluation/   the dataset's format, how a label finds today's chunks, the run and its grader; not part of the service
@@ -199,3 +201,4 @@ A new document for one's own department takes effect at once. Replacing anything
 - v7 · 2026-11-04 · Arianna · The rate limit, the limit on model calls, virtual threads and worker processes.
 - v8 · 2026-11-05 · Arianna · The evaluation corpus, dataset and review; tune on dev only.
 - v9 · 2026-11-06 · Arianna · The evaluation run and where its results go.
+- v10 · 2026-11-06 · Arianna · The reranker: bge-reranker-v2-m3 in its own TEI service.

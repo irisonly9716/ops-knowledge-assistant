@@ -18,6 +18,7 @@ from app.config import settings
 from app.query_api import router as query_router
 from app.rag.answering import QueryService
 from app.rag.query_models import ModelCallLimit, OpenAIAnswerModel, OpenAIQueryEmbedder, openai_client_from_settings
+from app.rag.reranking import tei_reranker_from_settings
 
 
 @asynccontextmanager
@@ -31,15 +32,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     pool = db.query_pool()
     await pool.open()
     limit = ModelCallLimit(settings.model_max_concurrent_calls, settings.model_slot_wait_seconds)
+    reranker = tei_reranker_from_settings()   # not checked here: a reranker that is down only costs answer quality
     app.state.query_service = QueryService(
         OpenAIQueryEmbedder(client, settings.embedding_model, limit, settings.query_embedding_timeout_seconds),
         OpenAIAnswerModel(client, settings.chat_model, limit, settings.query_model_timeout_seconds, settings.answer_max_output_tokens),
-        pool, min_similarity=settings.query_min_similarity, top_k=settings.query_top_k)
+        pool, min_similarity=settings.query_min_similarity, top_k=settings.query_top_k,
+        reranker=reranker, rerank_candidates=settings.rerank_candidates)
     try:
         yield
     finally:
         await pool.close()
         await client.close()
+        if reranker:
+            await reranker.aclose()
 
 
 app = FastAPI(title="ops-knowledge-assistant / llm-service", version="0.1.0", lifespan=lifespan)

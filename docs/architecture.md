@@ -228,7 +228,8 @@ backend /query
       │    (a hit returns immediately)
       │ 4. route: documents / data / both?
       │
-      ├── documents → vector search (filter: department IN (user's department, 'ALL'))
+      ├── documents → vector search (filter: department IN (user's department, 'ALL')), top 50
+      │               → reranker (a cross-encoder in its own service) → top 5
       │
       ├── data → Text-to-SQL
       │             - data dictionary + metric views in the prompt
@@ -252,13 +253,19 @@ between the two would keep serving old answers. Relative references are made con
 when a new campaign finishes the key changes; a question that still has one after rewriting skips the cache. The
 TTL is only a safety net.
 
-**What exists today:** the backend's `/query`, the internal token, the search with its department filter, and steps 1
-and 5 for documents, with citations and refusals. Rewriting, cache, routing and Text-to-SQL are still to come. Details
+**What exists today:** the backend's `/query`, the internal token, the search with its department filter and the
+reranker, and steps 1 and 5 for documents, with citations and refusals. Rewriting, cache, routing and Text-to-SQL are
+still to come. Details
 and measurements: "The query path" in [llm-service/README.md](../llm-service/README.md). How well it answers, measured on the evaluation
 dataset, and why the refusal threshold and the answer instructions are what they are:
 [eval-report.md](eval-report.md).
 
 Design decisions so far:
+- **The reranker is a service of its own.** bge-reranker-v2-m3 needs a GPU: on a 6-core CPU it took about 40 s for 50
+  candidates. In llm-service each of the 4 workers would load it (1.9 GB each) and its computing would stop the event
+  loop. In Text Embeddings Inference it is one model on one GPU, scaled apart from llm-service, which sends it one HTTP
+  request per query. gRPC would save a few milliseconds on a small request and add generated code and two
+  dependencies. Its latency on a GPU, and how many GPUs 15,000 pairs a second at the peak take, aren't measured (#11).
 - **Async in llm-service, blocking in the backend.** Sync FastAPI endpoints get 40 worker threads against 900 queries in
   flight. Spring keeps ordinary blocking code, because virtual threads remove its limit with one setting.
 - **A connection pool** (`psycopg-pool`, 171 KB). Measured with 300 queries at once: 6,774 per second with no failures,
@@ -289,6 +296,7 @@ Design decisions so far:
 | Redis | 6379 |
 | Kafka | 9092 |
 | Kafka UI | 8080 |
+| Reranker (Text Embeddings Inference, only with `--profile rerank`) | 8082, on localhost: it is sent the documents' text |
 | backend-service | 8081 |
 | llm-service | 8000: for the backend only. It trusts the role in the request, so it must never be reachable from outside |
 

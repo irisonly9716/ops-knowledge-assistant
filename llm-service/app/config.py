@@ -73,6 +73,17 @@ class Settings(BaseSettings):
     # of the range of lowest cost, well clear of answerable questions: it stops the farthest of those probes and
     # leaves the rest to the model, because a refused real question costs more than a model call (about $0.0001)
     query_min_similarity: float = 0.14
+    # Text Embeddings Inference serving bge-reranker-v2-m3 (docker-compose.yml, profile "rerank"). Empty: no reranking.
+    # Not reachable or too slow, every query falls back to vector order with a warning (app/rag/reranking.py)
+    reranker_url: str = "http://127.0.0.1:8082"
+    # Candidates the search returns for the reranker; the prompt still gets query_top_k. On dev, 30 and 50 reranked to
+    # the same Recall@5 (92.7%), but with 30 two labelled sections were never candidates, and the corpus will grow
+    rerank_candidates: int = 50
+    # The 3 s target minus the rest of a query (measured p50 1.4 s, p95 2.6 s, without the backend) leaves little. A
+    # reranker on a GPU is designed to take a fraction of this, not measured yet (#11); the limit bounds what a slow
+    # or overloaded one adds before the query goes on in vector order. On a development CPU it takes 44 s and always
+    # falls back
+    rerank_timeout_seconds: float = 0.5
     # Model calls at once in this process, embeddings and answers together. The peak is 900 in flight across 4 processes.
     # Not an exact share of it, because workers on one port don't get equal work: measured at 300 QPS, 225 each refused
     # 53 of 1,500 queries and 300 each refused none, with at most 898 at once. One process couldn't use many more anyway.

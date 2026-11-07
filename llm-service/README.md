@@ -194,11 +194,25 @@ on 127.0.0.1 unless `LLM_SERVICE_HOST` says otherwise. Examples of the format: `
 ```
 role + department -> which departments may be searched (an unknown role is an error, never an unfiltered search)
 question          -> embedding
-embedding         -> search among those departments, top 5    <- the only step that holds a database connection
-best score < 0.14 -> refuse, without calling the model
+embedding         -> search among those departments, top 50   <- the only step that holds a database connection
+best score < 0.14 -> refuse, without calling the model or the reranker
+50 candidates     -> reranker (bge-reranker-v2-m3 in TEI), 0.5 s at most; on a timeout or an error, vector order
+first 5 of them   -> the prompt
 excerpts          -> model -> the fixed word NOT_IN_DOCUMENTS, or a reply citing nothing -> refuse
                            -> an answer -> every [n] must be a real excerpt; otherwise 502
 ```
+
+**Reranking.** Vector search compares a question's vector with each chunk's; a cross-encoder reads the question and a
+chunk together and tells much better which chunk answers. The search returns 50 candidates, `bge-reranker-v2-m3` orders
+them, and the prompt takes the first 5. It runs in Text Embeddings Inference, a separate server (`docker compose
+--profile rerank up -d reranker` locally, a GPU in production), and llm-service sends it one HTTP request per query
+(`app/rag/reranking.py`): in this process it would load 1.9 GB per worker and its computing would stop the event loop.
+It only gets what the department-filtered search returned. The threshold still looks at the best vector similarity.
+A timeout, an error, or an answer that doesn't rank every text once is logged and the query goes on in vector order,
+so a reranker that is down makes answers worse, never absent. On a development CPU it takes about 40 s for 50
+candidates and always falls back; on Windows even a reranker that isn't running shows up as a timeout, because a
+refused connection there takes about 2 s to fail. Its latency on a GPU isn't measured yet (#11). What it gains:
+[docs/eval-report.md](../docs/eval-report.md). `RERANKER_URL=` (empty) turns it off.
 
 **Async from the start.** Sync FastAPI endpoints get 40 worker threads, far below the 900 queries in flight the system
 is designed for. The price: one blocking call in an async function stops every query in the process, so no sync SDK and

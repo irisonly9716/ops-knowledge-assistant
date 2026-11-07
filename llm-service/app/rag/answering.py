@@ -27,8 +27,9 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from app.rag import retrieval
+from app.rag import reranking, retrieval
 from app.rag.query_models import AnswerModel, QueryEmbedder
+from app.rag.reranking import Reranker
 from app.rag.retrieval import RetrievedChunk
 from app.time_budget import TimeBudget
 
@@ -98,10 +99,12 @@ class QueryTrace:
     result: QueryAnswer | None         # None when the answer failed validation: see error
     error: InvalidAnswer | None
     uncited: bool                      # the model's reply cited nothing and was shown as a refusal
-    candidates: list[RetrievedChunk]   # everything the search returned, best first; the prompt gets the first top_k
-    top_score: float
+    candidates: list[RetrievedChunk]   # everything the search returned, in the order used; the prompt gets the first top_k
+    reranked: bool                     # False: vector order, because there is no reranker or it failed
+    top_score: float                   # the best vector similarity, whatever the reranker did
     embed_ms: float
     search_ms: float
+    rerank_ms: float
     model_ms: float
     input_tokens: int
     output_tokens: int
@@ -109,13 +112,15 @@ class QueryTrace:
 
 class QueryService:
     def __init__(self, embedder: QueryEmbedder, model: AnswerModel, pool: Any, *, min_similarity: float, top_k: int,
-                 instructions: str = INSTRUCTIONS):
+                 instructions: str = INSTRUCTIONS, reranker: Reranker | None = None, rerank_candidates: int = 0):
         self._embedder = embedder
         self._model = model
         self._pool = pool
         self._min_similarity = min_similarity
         self._top_k = top_k
         self._instructions = instructions
+        self._reranker = reranker
+        self._rerank_candidates = rerank_candidates if reranker else 0
 
     async def answer(self, question: str, *, user_id: int, role: str, department: str | None,
                      budget: TimeBudget) -> QueryAnswer:
@@ -123,28 +128,40 @@ class QueryService:
         if traced.error:
             raise traced.error
         # The question itself stays out of the logs: what people ask is private (see the audit rules)
-        log.info("query user=%s role=%s status=%s chunks=%d top_score=%.3f embed_ms=%.0f search_ms=%.0f model_ms=%.0f "
-                 "tokens_in=%d tokens_out=%d", user_id, role, traced.result.status, min(len(traced.candidates), self._top_k),
-                 traced.top_score, traced.embed_ms, traced.search_ms, traced.model_ms, traced.input_tokens,
-                 traced.output_tokens)
+        log.info("query user=%s role=%s status=%s chunks=%d top_score=%.3f reranked=%s embed_ms=%.0f search_ms=%.0f "
+                 "rerank_ms=%.0f model_ms=%.0f tokens_in=%d tokens_out=%d", user_id, role, traced.result.status,
+                 min(len(traced.candidates), self._top_k), traced.top_score, traced.reranked, traced.embed_ms,
+                 traced.search_ms, traced.rerank_ms, traced.model_ms, traced.input_tokens, traced.output_tokens)
         return traced.result
 
     async def trace(self, question: str, *, role: str, department: str | None, budget: TimeBudget,
                     candidates: int = 0) -> QueryTrace:
         """The query path itself, shared by /query and the evaluation, so the evaluation measures the code that runs.
-        `candidates` searches deeper than top_k without changing what the model sees: the evaluation needs the top 50
-        to tell a chunk ranked too low from one the search never found."""
+        `candidates` searches deeper without changing what the model sees: the evaluation needs the top 50 to tell a
+        chunk ranked too low from one the search never found. With a reranker the search returns rerank_candidates,
+        the reranker orders them, and the prompt gets the first top_k of that order.
+
+        The threshold looks at the best vector similarity, before reranking: it only asks whether a question is far from
+        everything (config.py), and reranker scores are on another scale that would need a threshold of their own."""
         departments = retrieval.visible_departments(role, department)   # before anything costs money or time
 
         started = time.perf_counter()
         vector = await self._embedder.embed_question(question, budget)
         embedded = time.perf_counter()
         async with self._pool.connection(timeout=max(budget.remaining(), 0)) as conn:
-            found = await retrieval.search(conn, vector, departments, self._embedder.model, max(self._top_k, candidates))
+            found = await retrieval.search(conn, vector, departments, self._embedder.model,
+                                           max(self._top_k, candidates, self._rerank_candidates))
         searched = time.perf_counter()
 
-        chunks = found[:self._top_k]
-        top_score = chunks[0].score if chunks else 0.0
+        top_score = found[0].score if found else 0.0
+        ranked, reranked = found, False
+        if self._rerank_candidates and top_score >= self._min_similarity:   # a question refused anyway isn't reranked
+            head, rest = found[:self._rerank_candidates], found[self._rerank_candidates:]
+            head, reranked = await reranking.rerank_or_keep(self._reranker, question, head, budget)
+            ranked = head + rest
+        reranked_at = time.perf_counter()
+
+        chunks = ranked[:self._top_k]
         input_tokens = output_tokens = 0
         result, error, uncited = QueryAnswer(REFUSED, REFUSAL_TEXT, [], departments), None, False
         if top_score >= self._min_similarity:
@@ -164,6 +181,6 @@ class QueryService:
             except InvalidAnswer as invalid:   # returned, not raised, so the evaluation keeps what the search found
                 result, error = None, invalid
         finished = time.perf_counter()
-        return QueryTrace(result, error, uncited, found, top_score, (embedded - started) * 1000,
-                          (searched - embedded) * 1000,
-                          (finished - searched) * 1000, input_tokens, output_tokens)
+        return QueryTrace(result, error, uncited, ranked, reranked, top_score, (embedded - started) * 1000,
+                          (searched - embedded) * 1000, (reranked_at - searched) * 1000, (finished - reranked_at) * 1000,
+                          input_tokens, output_tokens)
