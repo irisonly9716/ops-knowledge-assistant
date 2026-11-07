@@ -1,7 +1,7 @@
 # Evaluation report
 
-**Draft.** Numbers from the `dev` split only: the baseline with vector search alone, and reranking compared against
-it. Hybrid search and the final `test` numbers come later. Every number below comes from a file in
+**Draft.** Numbers from the `dev` split only: the baseline with vector search alone, reranking compared against it,
+and the zero-shot Text-to-SQL baseline. Hybrid search and the final `test` numbers come later. Every number below comes from a file in
 [eval/results/](../eval/results/), and every table can be rebuilt from the `.jsonl` next to it, except the comparison
 of reranking models, which says where it comes from.
 
@@ -246,6 +246,48 @@ with the reranker stopped, the same, the refused connection showing up as the ti
 to give up on one. Not checked: whether TEI keeps computing a request after the client has given up on it. If it does,
 the timeout doesn't take load off an overloaded reranker.
 
+## Text-to-SQL: the zero-shot baseline
+
+```bash
+uv run python -m evaluation.sql_run --split dev --name zero-shot-1   # needs Postgres with the mock data and V9
+```
+
+The 39 questions of `dev` with a gold SQL go to the baseline agent ("Text-to-SQL: the baseline" in
+[llm-service/README.md](../llm-service/README.md)): LangChain's `create_agent` with gpt-6-luna and tools to list the
+tables, see their columns and run a query. Its instructions say who asks, what they may see and today's date; no data
+dictionary, no views, no examples. A question is scored on the rows of the last query that ran. Two runs.
+
+| Questions | n | Execution accuracy, run 1 / 2 | Strict | Gold numbers found |
+|---|---|---|---|---|
+| data: the number is the answer | 27 | 66.7% / 66.7% | 48.1% / 48.1% | 78.0% / 78.0% |
+| both: numbers that support an answer | 12 | 58.3% / 50.0% | 41.7% / 41.7% | 94.4% / 83.4% |
+
+3 of the 39 questions changed between the runs. Why the 9 data questions of run 1 are wrong:
+
+| Why | Questions | What would fix it |
+|---|---|---|
+| ROI computed as (GMV − operating cost) / operating cost, the textbook marketing ROI, instead of profit / operating cost | all 4 ROI questions, in both runs | the data dictionary (profit already nets product cost) and the `roi` column of `campaign_summary` |
+| A follow-up asked without the turn before it | 2 | conversation memory |
+| "The conversion rate of our launch" read as the rate of its last day | 1 | `avg_conversion_rate` in `campaign_summary` |
+| An average with two definitions, one given; the gold is also in percent rounded to two places (8.09, 8.23), which no query returning fractions matches | 1 | a fraction in the gold, a dataset decision |
+| All products sorted, the answer first, instead of the one asked for; the reply was right | 1, run 1 only | nothing: execution accuracy scores the rows, not the reply |
+
+Run 2 got the sorted list right and missed one run 1 got: it found two campaigns running on Black Friday, returned
+both, and picked the right one only in its reply.
+
+- **Strict against lenient.** 18 of the 27 data questions return the gold's numbers, 13 return its names and dates
+  too. The other 5 are queries that return the number without saying which campaign it is from, which answers the
+  question.
+- **Every final query for staff and managers named the asker's department**, 32 of 32 in both runs. The instructions
+  are followed here, but they are not a safeguard: the filter code adds and row-level security are
+  ([permission-model.md](permission-model.md)).
+- **Questions on both documents and data** are an imperfect fit for execution accuracy: their gold is one choice of
+  supporting numbers, and two of their 12 gold queries return `campaign_id`, a number no question asks for. The share
+  of the gold's numbers found is the fairer reading.
+- **Latency and cost.** p50 9.5 s and 7.8 s, p95 34 s and 28 s, one question at a time; 4 model calls a question at the
+  median, 7 at most, because the agent lists the tables and reads their columns before every query. $0.0008 a
+  question, about 7 times a document answer ($0.00012). Far over the 3 s a query has.
+
 ## What these numbers don't show
 
 - **Small samples.** 54 answerable questions, 15 to refuse, 12 keyword questions, 2 out of scope. One question is 2 to
@@ -257,7 +299,8 @@ the timeout doesn't take load off an overloaded reranker.
   word. On a few answers seen so far it is strict: it marked "the warehouse must have enough cold-storage capacity" as
   unsupported by "confirm cold-storage capacity".
 - **`test` hasn't been run.** It reports the final numbers once, after the choices above are made on `dev`.
-- **Questions about numbers** aren't graded until Text-to-SQL exists, and follow-ups until there is conversation memory.
+- **Answers to questions about numbers** aren't graded: Text-to-SQL is scored on its rows, not on the reply. Follow-ups
+  aren't either until there is conversation memory.
 - **Latency** is one query at a time on a development machine, not under load. The reranker's was measured only on
   a CPU, where it can't be used.
 
@@ -272,6 +315,9 @@ the timeout doesn't take load off an overloaded reranker.
 | `dev-prompt-v3-rerun` | now in the code | noise; ran alongside another run |
 | `dev-rerank-1` | now in the code | with reranking |
 | `dev-rerank-2` | now in the code | with reranking; noise; reranked slower than run 1, so its latency isn't used |
+| `dev-sql-zero-shot-1` | the SQL baseline's | Text-to-SQL, zero-shot |
+| `dev-sql-zero-shot-2` | the SQL baseline's | Text-to-SQL, zero-shot; noise |
 
 Each run is a `.jsonl` of what every question went through, an `.md` of its tables with the instructions it used, and a
-spot-check file of 30 graded answers picked at random. The seven runs cost about $1.98, $1.87 of it grading.
+spot-check file of 30 graded answers picked at random, except the SQL runs, which need no grader. The seven document
+runs cost about $1.98, $1.87 of it grading; the two SQL runs $0.06.

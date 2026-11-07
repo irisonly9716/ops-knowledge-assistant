@@ -3,8 +3,9 @@ when asked for, the data dictionary (the comments of migration V9) and the value
 name things by.
 
 Read from the catalog at run time, so a model sees the definitions in the migrations, never a copy that drifts from
-them. ip_address is never shown: it is personal data, and a column a model is never told about doesn't end up in
-its queries.
+them. ip_address is never shown: it is personal data no question needs. Not showing it is no protection, though: a
+SELECT * on the table still returns it. What keeps it out is a role that can read only the views, none of which has
+it.
 """
 from collections.abc import Sequence
 from dataclasses import dataclass

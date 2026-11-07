@@ -44,6 +44,14 @@ QUESTION_TIMEOUT_SECONDS = 120.0
 TAGS = ("direct", "paraphrase", "colloquial", "vague", "keyword", "single_table", "multi_table", "time_range",
         "planning_advice", "multi_turn")
 ANSWERED, NO_QUERY, STOPPED, TIMEOUT, ERROR = "answered", "no query", "stopped", "timeout", "error"
+CELL_CHARS = 160
+
+
+def cell(row) -> str:
+    """A row for a table cell: a query can return whole JSON documents, which would fill the page."""
+    text = "–" if row is None else ", ".join("NULL" if v is None else str(v) for v in row)
+    text = text.replace("|", "/")
+    return text if len(text) <= CELL_CHARS else text[:CELL_CHARS] + " …"
 
 
 def scored(question: Question) -> bool:
@@ -132,7 +140,9 @@ def summarize(records: list[dict], name: str, split: str, mode: str, instruction
         if not r["exact"]:
             final = next((q for q in reversed(r["queries"]) if q["rows"] is not None), None)
             got = final["rows"][0] if final and final["rows"] else None
-            lines.append(f"| `{r['id']}` {r['question']} | {r['status']} | {r['gold_result'][0]} | {got} |")
+            rows = (f"{len(final['rows'])} row{'' if len(final['rows']) == 1 else 's'}" if final else "no rows")
+            lines.append(f"| `{r['id']}` {r['question']} | {r['status']} | {cell(r['gold_result'][0])} | "
+                         f"{cell(got)} ({rows}) |")
     lines.append("")
 
     ran = [r for r in records if r["status"] != ERROR]
