@@ -1,9 +1,9 @@
 # Evaluation report
 
 **Draft.** Numbers from the `dev` split only: the baseline with vector search alone, reranking compared against it,
-and the zero-shot Text-to-SQL baseline. Hybrid search and the final `test` numbers come later. Every number below comes from a file in
-[eval/results/](../eval/results/), and every table can be rebuilt from the `.jsonl` next to it, except the comparison
-of reranking models, which says where it comes from.
+and the zero-shot Text-to-SQL baseline. Hybrid search and the final `test` numbers come later. Every number below
+comes from a file in [eval/results/](../eval/results/), and every table can be rebuilt from the `.jsonl` next to it,
+except the comparison of reranking models, which says where it comes from.
 
 ```bash
 cd llm-service
@@ -238,7 +238,8 @@ same CPU; the evaluation waited up to 120 s for it (`--rerank-timeout`), so ever
 On the development CPU, through TEI, reranking 50 candidates took 42.6 s at p50 and 51.1 s at p95 (the first run; the
 second took 49.9 s at p50, most likely because other work on the machine took CPU from it). The answering model took
 about as long as without reranking: p50 1.3 s against 1.2 s, with the longer prompt. In production the reranker runs
-on a GPU, and that hasn't been measured, so whether reranking fits in the 3 s target isn't known. At the 300 QPS peak it would have to score 15,000 question-chunk pairs a second (300 × 50).
+on a GPU, and that hasn't been measured, so whether reranking fits in the 3 s target isn't known. At the 300 QPS
+peak it would have to score 15,000 question-chunk pairs a second (300 × 50).
 
 Until it is measured, a query waits at most 0.5 s for the reranker (`RERANK_TIMEOUT_SECONDS`) and then goes on in vector
 order with a warning. Checked through the real app on this CPU: the query fell back after the timeout and was answered;
@@ -259,8 +260,8 @@ dictionary, no views, no examples. A question is scored on the rows of the last 
 
 | Questions | n | Execution accuracy, run 1 / 2 | Strict | Gold numbers found |
 |---|---|---|---|---|
-| data: the number is the answer | 27 | 66.7% / 66.7% | 48.1% / 48.1% | 78.0% / 78.0% |
-| both: numbers that support an answer | 12 | 58.3% / 50.0% | 41.7% / 41.7% | 94.4% / 83.4% |
+| data: the number is the answer | 27 | 66.7% / 70.4% | 55.6% / 55.6% | 80.0% / 80.0% |
+| both: numbers that support an answer | 12 | 58.3% / 58.3% | 50.0% / 50.0% | 73.3% / 84.2% |
 
 3 of the 39 questions changed between the runs. Why the 9 data questions of run 1 are wrong:
 
@@ -269,24 +270,27 @@ dictionary, no views, no examples. A question is scored on the rows of the last 
 | ROI computed as (GMV − operating cost) / operating cost, the textbook marketing ROI, instead of profit / operating cost | all 4 ROI questions, in both runs | the data dictionary (profit already nets product cost) and the `roi` column of `campaign_summary` |
 | A follow-up asked without the turn before it | 2 | conversation memory |
 | "The conversion rate of our launch" read as the rate of its last day | 1 | `avg_conversion_rate` in `campaign_summary` |
-| An average with two definitions, one given; the gold is also in percent rounded to two places (8.09, 8.23), which no query returning fractions matches | 1 | a fraction in the gold, a dataset decision |
-| All products sorted, the answer first, instead of the one asked for; the reply was right | 1, run 1 only | nothing: execution accuracy scores the rows, not the reply |
+| An average with two definitions, one given | 1 | the data dictionary or examples; the dataset asks for both |
+| All products sorted, the answer first, instead of the one asked for | 1, run 1 only | nothing: execution accuracy scores the rows, not the reply |
 
-Run 2 got the sorted list right and missed one run 1 got: it found two campaigns running on Black Friday, returned
-both, and picked the right one only in its reply.
+Run 2 got the sorted list right and missed nothing run 1 got among the data questions.
 
-- **Strict against lenient.** 18 of the 27 data questions return the gold's numbers, 13 return its names and dates
-  too. The other 5 are queries that return the number without saying which campaign it is from, which answers the
-  question.
-- **Every final query for staff and managers named the asker's department**, 32 of 32 in both runs. The instructions
-  are followed here, but they are not a safeguard: the filter code adds and row-level security are
-  ([permission-model.md](permission-model.md)).
+- **Three gold answers were corrected before these runs**, through the review page, which runs the corrected SQL and
+  stores what the database returns. One average was in percent rounded to two places (8.09, 8.23), which no query
+  returning the stored rates could match; two queries on both documents and data returned `campaign_id`, a number no
+  question asks for and the scorer then required. Two earlier runs on the old gold scored the data questions 66.7%
+  both times; these runs replace them.
+- **Strict against lenient.** 18 and 19 of the 27 data questions return the gold's numbers, 15 return its names and
+  dates too. The others return the number without saying which campaign it is from, which answers the question.
+- **Every final query for staff and managers named the asker's department**: 31 of 31 and 32 of 32 (one question of
+  run 1 was stopped at the limit of model calls before a final query). The instructions are followed here, but they
+  are not a safeguard: the filter code adds and row-level security are ([permission-model.md](permission-model.md)).
 - **Questions on both documents and data** are an imperfect fit for execution accuracy: their gold is one choice of
-  supporting numbers, and two of their 12 gold queries return `campaign_id`, a number no question asks for. The share
-  of the gold's numbers found is the fairer reading.
-- **Latency and cost.** p50 9.5 s and 7.8 s, p95 34 s and 28 s, one question at a time; 4 model calls a question at the
-  median, 7 at most, because the agent lists the tables and reads their columns before every query. $0.0008 a
-  question, about 7 times a document answer ($0.00012). Far over the 3 s a query has.
+  supporting numbers, so the share of the gold's numbers found is the fairer reading. One of the two corrected ones is
+  still wrong in both runs, for the ROI.
+- **Latency and cost.** p50 8.9 s and 8.4 s, p95 28 s and 34 s, one question at a time; 4 model calls a question at the
+  median, 8 at most, because the agent lists the tables and reads their columns before every query. About $0.001 a
+  question, about 6 times a document answer with reranking ($0.00016). Far over the 3 s a query has.
 
 ## What these numbers don't show
 
@@ -320,4 +324,4 @@ both, and picked the right one only in its reply.
 
 Each run is a `.jsonl` of what every question went through, an `.md` of its tables with the instructions it used, and a
 spot-check file of 30 graded answers picked at random, except the SQL runs, which need no grader. The seven document
-runs cost about $1.98, $1.87 of it grading; the two SQL runs $0.06.
+runs cost about $1.98, $1.87 of it grading; the two SQL runs $0.08, and the two they replace $0.06.
