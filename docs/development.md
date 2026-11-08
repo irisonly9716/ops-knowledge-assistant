@@ -26,6 +26,10 @@ uv run python -m scripts.init_topics
 #    and checks that the campaignId exists (400 otherwise).
 uv run python -m scripts.generate_mock_data
 
+# 3b. The example questions of the Text-to-SQL pipeline, with their embeddings (needs OPENAI_API_KEY; tens of short
+#     questions, a tiny fraction of a cent). Run it again after editing app/sql_agent/examples.yaml
+uv run python -m scripts.load_sql_examples
+
 # 4. Backend (new terminal, from the repo root)
 cd backend-service
 ./mvnw spring-boot:run                # Windows: .\mvnw.cmd spring-boot:run

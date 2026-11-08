@@ -50,7 +50,7 @@ On top of that, conversations have **multi-turn memory**, and **department-level
                           │         llm-service          │  Python (FastAPI)
                           │  - Kafka consumer (ingest)   │
                           │  - RAG: chunk/embed/retrieve │
-                          │  - Text-to-SQL agent         │
+                          │  - Text-to-SQL pipeline      │
                           │  - query router + memory     │
                           └──────┬────────────┬──────────┘
                                  │            │
@@ -132,7 +132,7 @@ backend /query ──forwards──▶ llm-service /query
 **Access control designed into the schema**
 - Every document and data row carries a `department`; company-wide SOPs use an `ALL` marker.
 - Vector search filters by department, which has a known pitfall: an approximate HNSW index combined with a `WHERE` filter can silently return fewer rows than requested. Retrieval accounts for this by using pgvector's iterative index scan or an exact scan.
-- Text-to-SQL is restricted to `SELECT` statements, and a department filter is injected for non-admin users.
+- Text-to-SQL runs only a single `SELECT` that passes parser checks with allow-lists of views and functions, and for staff and managers every view the query reads is replaced by one holding only their department's rows.
 
 ### Testing approach
 - Web-layer slice tests with Kafka and the repositories mocked, so that broker failures, timeouts and interrupts can be triggered on demand and each failure path has a regression test.

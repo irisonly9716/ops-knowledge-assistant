@@ -1,7 +1,7 @@
 # Evaluation report
 
 **Draft.** Numbers from the `dev` split only: the baseline with vector search alone, reranking compared against it,
-and the zero-shot Text-to-SQL baseline. Hybrid search and the final `test` numbers come later. Every number below
+the zero-shot Text-to-SQL baseline and the Text-to-SQL pipeline. Hybrid search and the final `test` numbers come later. Every number below
 comes from a file in [eval/results/](../eval/results/), and every table can be rebuilt from the `.jsonl` next to it,
 except the comparison of reranking models, which says where it comes from.
 
@@ -29,8 +29,8 @@ time. Three things make it more than a replay of `/query`:
 | | Questions in dev | Used for |
 |---|---|---|
 | Documents, to answer | 54 | retrieval, answers, threshold |
-| Documents and data, to answer | 12 | retrieval only: their answer points include numbers from SQL |
-| Data, to answer | 27 | nothing yet: Text-to-SQL isn't built |
+| Documents and data, to answer | 12 | retrieval, and Text-to-SQL for their numbers; answers aren't graded |
+| Data, to answer | 27 | Text-to-SQL: the rows of the query that ran |
 | To refuse (7 near misses, 6 unauthorized, 2 out of scope) | 15 | threshold, and that nothing hidden is retrieved |
 
 Retrieval is scored by section: a label names a section, a section can be several chunks, and it counts as found at the
@@ -292,6 +292,67 @@ Run 2 got the sorted list right and missed nothing run 1 got among the data ques
   median, 8 at most, because the agent lists the tables and reads their columns before every query. About $0.001 a
   question, about 6 times a document answer with reranking ($0.00016). Far over the 3 s a query has.
 
+## Text-to-SQL: the fixed pipeline
+
+```bash
+uv run python -m evaluation.sql_run --split dev --name pipeline-1 --pipeline --dictionary --views --examples 3 --retries 2
+```
+
+The same 39 questions through the pipeline of the query path ("Text-to-SQL: the pipeline" in
+[llm-service/README.md](../llm-service/README.md)). Its prompt has the views with the data dictionary, the names in the
+data and the 3 closest of 28 example questions. It writes one query, which is checked and run in the asker's department;
+a failed query is written again at most twice with the error, and the result is then explained. gpt-6-luna writes and
+explains, within the query path's budget of 12 s a question. Two runs.
+
+| Questions | n | Execution accuracy, run 1 / 2 | Strict | Gold numbers found |
+|---|---|---|---|---|
+| data: the number is the answer | 27 | 85.2% / 85.2% | 63.0% / 66.7% | 90.4% / 90.4% |
+| both: numbers that support an answer | 12 | 66.7% / 66.7% | 66.7% / 66.7% | 89.4% / 91.5% |
+
+The agent scored 66.7% and 70.4% on the data questions. The same questions are wrong in both pipeline runs. Why the 4
+data questions are wrong:
+
+| Why | Questions | What would fix it |
+|---|---|---|
+| A follow-up asked without the turn before it | 2 | conversation memory |
+| "Last Black Friday's grocery live" read as the holiday's date, 2025-11-28; the campaign of that name started on 2025-11-12 | 1 | an example that finds a named campaign by its latest start; both runs of the earlier prompt layout below got it right |
+| An average with two definitions, one given | 1 | the example that gives both isn't followed; the agent missed it too |
+
+- **All 4 ROI questions are right in both runs**, where the agent got all 4 wrong in both: the `roi` column of
+  `campaign_summary` and its comment leave nothing to work out.
+- **The department filter the code adds was in every query that ran** for staff and managers: 32 of 32 in both runs,
+  whatever the model wrote.
+- **Correcting itself.** 3 queries failed in the two runs: a column name two joined views share, a stray `**` that
+  sqlglot accepted and Postgres refused, and a reply that didn't parse. Each was written again once and then ran. One
+  of the three matched the gold; the other two are questions on both documents and data whose second query returned
+  other supporting numbers.
+- **Latency and cost.** p50 2.4 s in both runs, p95 5.2 s and 3.9 s, one question at a time and without the backend.
+  At the median, writing takes 1.1 s, explaining 1.0 s, the embedding 0.2 s, reading the names and examples 0.05 s,
+  and running the query 5 ms. 2 model calls at the median, 3 at most. About $0.0003 a question, under a third of
+  the agent's. The p50 is inside the 3 s a query has before routing adds its share; the p95 isn't.
+
+### What the prompt's wording did
+
+Three earlier runs, kept in [eval/results/](../eval/results/), each led to a change:
+
+- **A broad way out.** The rule "if the data can't answer the question at all, reply NOT_IN_DATA" refused 14 of 39
+  questions (`dev-sql-pipeline-broad-refusal`): 10 of the 12 on both documents and data, which ask what to change and
+  so seemed beyond the data, and 4 data questions. Asked again with the same wording, two of those data questions got a
+  query every time, 4 times out of 4: the model takes the way out at random. Narrowed to "only when nothing listed holds what the question is about", with questions asking why or what to
+  change told to get the numbers about what they name, the four runs since refused 5 questions in all, 3 of them a
+  follow-up that can't be answered without the turn before it.
+- **The question last.** With the examples written as "Question: … Query: …" and the prompt ending with "Question:"
+  and the question, one reply carried the pattern on: "Query:", its query, then two made-up examples, which didn't
+  parse (`dev-sql-pipeline-earlier-layout-2`). The examples are now labelled as examples, and the prompt ends with
+  "Write the query for this question:". The two runs on the old layout scored 88.9% and 85.2% on the data questions.
+- **Errors fed back as they are.** sqlglot underlines the place of a parse error with terminal escape codes, and they
+  went to the model with the error. Only the description, line and column are sent now.
+
+The comparison with the agent changes several things at once: the dictionary, the views, the examples, the retries
+and fixed steps instead of an agent. `sql_run` switches each on its own (`--dictionary`, `--views`, `--examples`,
+`--retries`) for the comparison that adds one at a time. The examples were written looking at dev's mistakes, though
+none repeats a dev or test question (a test checks), so dev flatters them; `test` will say how much.
+
 ## What these numbers don't show
 
 - **Small samples.** 54 answerable questions, 15 to refuse, 12 keyword questions, 2 out of scope. One question is 2 to
@@ -321,7 +382,13 @@ Run 2 got the sorted list right and missed nothing run 1 got among the data ques
 | `dev-rerank-2` | now in the code | with reranking; noise; reranked slower than run 1, so its latency isn't used |
 | `dev-sql-zero-shot-1` | the SQL baseline's | Text-to-SQL, zero-shot |
 | `dev-sql-zero-shot-2` | the SQL baseline's | Text-to-SQL, zero-shot; noise |
+| `dev-sql-pipeline-broad-refusal` | the pipeline's, broad NOT_IN_DATA rule | rejected |
+| `dev-sql-pipeline-earlier-layout-1` | the pipeline's, question last | rejected; see "What the prompt's wording did" |
+| `dev-sql-pipeline-earlier-layout-2` | the pipeline's, question last | rejected; the reply that went on with the pattern |
+| `dev-sql-pipeline-1` | now in the code | Text-to-SQL pipeline |
+| `dev-sql-pipeline-2` | now in the code | Text-to-SQL pipeline; noise |
 
 Each run is a `.jsonl` of what every question went through, an `.md` of its tables with the instructions it used, and a
 spot-check file of 30 graded answers picked at random, except the SQL runs, which need no grader. The seven document
-runs cost about $1.98, $1.87 of it grading; the two SQL runs $0.08, and the two they replace $0.06.
+runs cost about $1.98, $1.87 of it grading; the two SQL baseline runs $0.08, and the two they replace $0.06; the five
+pipeline runs $0.05.

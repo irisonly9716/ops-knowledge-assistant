@@ -231,12 +231,15 @@ backend /query
       ├── documents → vector search (filter: department IN (user's department, 'ALL')), top 50
       │               → reranker (a cross-encoder in its own service) → top 5
       │
-      ├── data → Text-to-SQL
-      │             - data dictionary + metric views in the prompt
-      │             - generate SQL; sqlglot checks the syntax tree: one SELECT, allow-listed views and functions
-      │             - execute as a read-only role that can only read the views, in a read-only transaction
-      │               with row-level security for the user's department, a statement timeout and a row limit
-      │             - result
+      ├── data → Text-to-SQL, a fixed pipeline
+      │             - data dictionary + metric views + the names in the data + the 3 closest example questions
+      │               in the prompt
+      │             - generate SQL; sqlglot checks the syntax tree: one SELECT, allow-listed views and functions;
+      │               every view it reads becomes a subquery holding only the user's department's rows
+      │             - execute in a read-only transaction with a statement timeout and a row limit; later as a
+      │               read-only role that can only read the views, with row-level security on the tables
+      │             - on an error, show the model the error and generate again (2 retries at most)
+      │             - result, explained in a few sentences
       │
       │ 5. retrieved chunks + SQL result + question + conversation history → LLM → answer, which opens
       │    by naming the campaign it is based on, so a wrong reading is easy to spot
@@ -255,8 +258,9 @@ TTL is only a safety net.
 
 **What exists today:** the backend's `/query`, the internal token, the search with its department filter and the
 reranker, and steps 1 and 5 for documents, with citations and refusals. For Text-to-SQL, the data dictionary, the
-metric views and a baseline agent measured on the evaluation dataset; none of it is reachable from `/query`.
-Rewriting, cache, routing and the Text-to-SQL pipeline are still to come. Details
+metric views, the fixed pipeline with its checks and department filter, and a baseline agent, both measured on the
+evaluation dataset; none of it is reachable from `/query` until routing exists. Rewriting, cache, routing, the
+read-only role and row-level security are still to come. Details
 and measurements: "The query path" in [llm-service/README.md](../llm-service/README.md). How well it answers, measured on the evaluation
 dataset, and why the refusal threshold and the answer instructions are what they are:
 [eval-report.md](eval-report.md).
@@ -288,6 +292,17 @@ Design decisions so far:
   Uvicorn's workers need no load balancer, at the price of an uneven share of the work, so each process gets 300 model
   call slots rather than an exact 225, and 5 database connections because all their pools share the 100 Postgres allows.
   Numbers: "The query path" in [llm-service/README.md](../llm-service/README.md).
+- **Text-to-SQL is a fixed pipeline, not an agent.** The baseline agent spent 4 model calls a question finding a schema
+  the code already knows, p50 about 9 s on dev. The pipeline puts the five views with their comments (about 1,050
+  tokens), the names in the data and the 3 closest example questions into one prompt: 2 model calls, writing and
+  explaining, p50 2.4 s. There is no step that picks tables: it would cost a model call to save fewer tokens than it
+  spends.
+- **The department filter on generated SQL is code, not an instruction.** sqlglot replaces every view a query reads with
+  a subquery holding only the asker's department's rows. The department isn't in the SQL text: the subquery reads the
+  setting `app.department`, which the code sets with a bound parameter in the same transaction, and a query can't set
+  it itself because the function allow-list has neither `set_config` nor `current_setting`. What runs is regenerated
+  from the checked tree, never the model's text, so what was checked is what runs: 167 queries regenerated this way
+  returned the same rows as their originals.
 
 ## Ports (local development)
 
