@@ -7,7 +7,7 @@ import psycopg
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
-from postgres_helpers import postgres_available, throwaway_database
+from postgres_helpers import postgres_available, seed_two_departments, throwaway_database
 
 from app import db
 from app.config import settings
@@ -26,22 +26,7 @@ GMV_SQL = "SELECT total_gmv FROM campaign_summary WHERE campaign_name = 'Beauty 
 def database():
     with throwaway_database() as name:
         with db.connect(name) as conn:
-            conn.execute("INSERT INTO departments (name) VALUES ('Beauty'), ('Fresh Grocery')")
-            conn.execute("INSERT INTO hosts (name, department_id, category) VALUES ('Tommy Walter', 1, 'Beauty'), "
-                         "('Ana Ruiz', 2, 'Fresh Grocery')")
-            conn.execute("""INSERT INTO campaigns (name, department_id, host_id, start_date, end_date, status,
-                                                   planned_operating_cost, actual_operating_cost) VALUES
-                            ('Beauty Summer Sale', 1, 1, '2026-06-12', '2026-07-21', 'finished', 90.00, 100.00),
-                            ('Beauty Fan Day', 1, 1, '2026-10-10', '2026-10-30', 'running', 80.00, NULL),
-                            ('Grocery Harvest Sale', 2, 2, '2026-09-01', '2026-09-20', 'finished', 50.00, 60.00)""")
-            conn.execute("""INSERT INTO campaign_metrics (campaign_id, date, gmv, conversion_rate) VALUES
-                            (1, '2026-06-12', 1000.50, 0.1000), (1, '2026-06-13', 2000.00, 0.2000),
-                            (2, '2026-10-10', 300.00, 0.0500)""")
-            conn.execute("""INSERT INTO campaign_products (campaign_id, product_name, units_sold, profit) VALUES
-                            (1, 'Serum', 10, 30.00), (1, 'Lipstick', 20, 40.00), (1, 'Sheet Mask', 30, 50.00),
-                            (3, 'Fresh Cherries', 5, 15.00)""")
-            conn.execute("""INSERT INTO campaign_customer_behavior (campaign_id, customer_ref, region, ip_address)
-                            VALUES (1, 'c-1', 'Midwest', '10.0.0.1'), (3, 'c-2', 'Northeast', '10.0.0.2')""")
+            seed_two_departments(conn)
         yield name
 
 

@@ -20,7 +20,7 @@ An assistant for live-commerce operations staff. One entry point answers SOP and
 
 **Principle:** the project analyzes content and results with AI; it does not recompute analytics. Clean numbers go in SQL columns, narrative (SOPs, plans, reviews) goes through RAG, and data other teams already computed is uploaded, not calculated here.
 
-**Status:** upload, approval, ingestion, reranking and document answers through `/query` are implemented. For Text-to-SQL, the data dictionary, the metric views (V9) and a baseline agent for the evaluation exist, not reachable from `/query`; the pipeline, routing, cache and memory are not built yet (`app/router` and `app/memory` are empty packages).
+**Status:** upload, approval, ingestion, reranking and document answers through `/query` are implemented. For Text-to-SQL, the data dictionary, the metric views (V9), the fixed pipeline with its parser checks and department filter, and a baseline agent for the evaluation exist, not reachable from `/query`; routing, the read-only role, row-level security, cache and memory are not built yet (`app/router` and `app/memory` are empty packages).
 
 **Language:** documents and questions are in English. There is no cross-language retrieval.
 
@@ -58,10 +58,11 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Parsing | markdown-it-py · python-docx · pdfplumber · pyyaml | 4.2.0 · 1.2.0 · 0.11.10 · 6.0.3 |
 | Chunking | langchain-text-splitters · tiktoken | 1.1.3 · 0.14.0 |
 | Agents | langchain (brings LangGraph) · langchain-openai; not langchain-community, unmaintained since May 2026 | 1.4.9 · 1.7.4 |
+| SQL checks | sqlglot (parses generated SQL for the checks and the department filter) | 30.24.0 |
 | Tests and mock data | pytest · httpx · faker · JUnit and Mockito via Boot | 9.1.1 · 0.28.1 · 33.1.0 |
 
 - Reranker: `bge-reranker-v2-m3` (revision pinned) in Text Embeddings Inference `cpu-1.9.4`, a service of its own reached over HTTP; a GPU image of the same server in production.
-- Planned, not installed: sqlglot, and pandas with openpyxl (#9). Upgrade a pinned version only when it blocks something.
+- Planned, not installed: pandas with openpyxl (#9). Upgrade a pinned version only when it blocks something.
 - Never upgrade a major version inside a feature change.
 - Your training data may be older than these versions. Spring Boot 4 uses Jackson 3 (`tools.jackson.*`; annotations stay in `com.fasterxml.jackson.annotation`), `@MockitoBean`, and `@WebMvcTest` in `org.springframework.boot.webmvc.test.autoconfigure`. Check the docs for the installed version.
 
@@ -72,9 +73,9 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Start Postgres, Flyway, Redis, Kafka | `docker compose up -d` (repo root) |
 | Apply migrations | `docker compose run --rm flyway migrate` |
 | Python setup | `cd llm-service` · `uv venv` · `uv pip install -r requirements.txt` |
-| Create topics · mock data | `uv run python -m scripts.init_topics` · `uv run python -m scripts.generate_mock_data` |
+| Create topics · mock data · SQL examples | `uv run python -m scripts.init_topics` · `uv run python -m scripts.generate_mock_data` · `uv run python -m scripts.load_sql_examples` (after editing `app/sql_agent/examples.yaml`) |
 | Evaluation corpus: what's in it · load it · the questions | `uv run python -m scripts.generate_corpus --report` · `uv run python -m scripts.ingest_corpus` (needs the backend, Kafka and the consumer) · `uv run python -m scripts.generate_questions --report` · review: `uv run python -m evaluation.review` |
-| Evaluation run (needs Postgres with the corpus; about $0.27 on `dev`, almost all grading) | `uv run python -m evaluation.run --split dev --name <name>` · SQL: `uv run python -m evaluation.sql_run --split dev --name <name>` · results in `eval/results/`, what they mean in `docs/eval-report.md` |
+| Evaluation run (needs Postgres with the corpus; about $0.27 on `dev`, almost all grading) | `uv run python -m evaluation.run --split dev --name <name>` · SQL: `uv run python -m evaluation.sql_run --split dev --name <name>` (the agent; `--pipeline --dictionary --views --examples 3 --retries 2` for the query path's pipeline, about $0.01) · results in `eval/results/`, what they mean in `docs/eval-report.md` |
 | Reranker (optional, about 5 GB of memory; queries keep the vector order without it) | `docker compose --profile rerank up -d reranker` (:8082) |
 | Run backend (:8081) | `cd backend-service` · `.\mvnw.cmd spring-boot:run` |
 | Run consumer · LLM API (:8000) | `uv run python -m app.consumers.upload_consumer` · `uv run python -m app.server --reload` (not plain `uvicorn`: async psycopg needs the event loop it chooses) |
@@ -96,7 +97,7 @@ backend-service/       Spring Boot: REST API, permissions, approval, outbox rela
 llm-service/app/       Python: ingestion and the query path
   consumers/           consume loop, handlers (documents), data_tables (CSV), storage, events
   rag/                 parsing/, chunking, document_fields, embeddings, store, retrieval, reranking, query_models, answering
-  sql_agent/           schema (what a model is shown of the database), execute (one read-only SELECT)
+  sql_agent/           schema (what a model is shown of the database), guard (the parser checks and the department filter), execute (one read-only SELECT), examples, pipeline
   server.py            starts the API; query_api.py: POST /query, for the backend only
   time_budget.py       one time budget per message or query
 llm-service/evaluation/   the dataset's format, how a label finds today's chunks, the runs and their grader, the SQL baseline agent; not part of the service
@@ -190,7 +191,7 @@ A new document for one's own department takes effect at once. Replacing anything
 - Never read, print or commit `.env` or secrets such as `OPENAI_API_KEY`. `.env.example` has placeholders only, and secrets never go into images.
 - `X-User-Id` is simulated identity: anyone can forge it (#5). State that accurately; the authorization rules are real, the authentication isn't yet.
 - Client file names are hostile: `UploadStorage.sanitizeFilename` and `resolve_upload_path` defend against path traversal. Keep both.
-- Generated SQL gets the planned layers: `SELECT` only, parser checks, a read-only role and row-level security. No single layer is enough.
+- Generated SQL gets several layers; no single one is enough. Implemented: parser checks with allow-lists (`guard.py`), the department filter added to every view a query reads, and a read-only transaction with time and row limits. Planned: a read-only role that can read only the views, and row-level security.
 
 ## Changelog
 
@@ -205,3 +206,4 @@ A new document for one's own department takes effect at once. Replacing anything
 - v9 · 2026-11-06 · Arianna · The evaluation run and where its results go.
 - v10 · 2026-11-06 · Arianna · The reranker: bge-reranker-v2-m3 in its own TEI service.
 - v11 · 2026-11-07 · Arianna · LangChain for the SQL baseline; upgrade pins only when blocked.
+- v12 · 2026-11-07 · Arianna · sqlglot and the fixed Text-to-SQL pipeline, its checks and department filter.

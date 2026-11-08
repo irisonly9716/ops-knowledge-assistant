@@ -97,6 +97,16 @@ class Settings(BaseSettings):
     # statements running at once. At 20 each, 8 processes took 99 connections and Postgres started refusing them
     query_pool_size: int = 5
 
+    # ---- Text-to-SQL ----
+    # The model that writes SQL, set apart from the one that answers and explains: which one is decided by the
+    # evaluation's accuracy, latency and cost
+    sql_model: str = "gpt-6-luna"
+    # Example questions shown with a question (app/sql_agent/examples.yaml); 0 shows none
+    sql_examples: int = 3
+    # How many times a query is written again after it fails, with the error shown to the model. Each is a model call
+    # inside the query's time budget
+    sql_retries: int = 2
+
     llm_service_host: str = "127.0.0.1"
     llm_service_port: int = 8000
     # Processes of the API. One reaches about 100 QPS, and 4 met the 300 QPS peak

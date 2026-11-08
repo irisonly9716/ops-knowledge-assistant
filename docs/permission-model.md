@@ -78,13 +78,25 @@ manager's request can only go to the `executive`, who sees every department.
 
 ## 2. Filtering data (Text-to-SQL)
 
-- Every business table (`campaigns` / `hosts` / `campaign_metrics` via a join) has `department_id`
-- After the LLM generates SQL, code **enforces the filter before execution** instead of trusting the LLM:
-  - `role in (staff, manager)` → `WHERE department_id = :current_dept` (or `AND` into an existing WHERE)
+- Every business table (`campaigns` / `hosts` / `campaign_metrics` via a join) has `department_id`, and every
+  metric view a generated query may read has the department's name
+- After the LLM generates SQL, code **enforces the filter before execution** instead of trusting the LLM
+  (`app/sql_agent/guard.py`, implemented):
+  - `role in (staff, manager)` → every view the query reads, wherever it appears (joins, subqueries, `WITH`,
+    `UNION`), is replaced by `(SELECT * FROM view WHERE department = current_setting('app.department'))` under
+    the name the query uses for it. Adding a `WHERE` to the outer query instead would miss a view read in a subquery
+  - the department is set for the transaction with `set_config('app.department', %s, true)`, a bound parameter, and
+    never written into the SQL text. A query can't change it: the function allow-list has neither `set_config` nor
+    `current_setting`. Without the setting a filtered query reads no department: an error, or no rows on a pooled
+    connection that had it before
   - `role in (executive, admin)` → no filter
-- The SQL safety limits stay: only `SELECT`; `DROP` / `DELETE` / `UPDATE` / `INSERT` are rejected
-- Implementation: parse the AST with an SQL parser (such as `sqlglot`) to check for a pure SELECT and
-  inject the department predicate; sturdier than string concatenation
+- The checks before that, by parsing the query with `sqlglot` (allow-lists, because a list of dangerous things is never
+  complete): one `SELECT`; only the five metric views, never a table, a system catalog or a schema-qualified name; a `WITH`
+  query can't take a view's name or make a real table look like one of its own; only allow-listed functions (`pg_sleep`,
+  `dblink`, `lo_import` and the like are refused) and casts to plain types (not `regclass` or `oid`); no writing, also
+  inside `WITH`, no `SELECT INTO`, no `FOR UPDATE`. What runs is regenerated from the checked tree
+- Planned, not built: a read-only role that can read only the views, and row-level security on the tables reading the
+  same `app.department`, so a query that gets past the checks still sees one department
 
 ## 3. Filtering documents (vector search)
 

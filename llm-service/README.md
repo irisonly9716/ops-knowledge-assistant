@@ -1,7 +1,7 @@
 # llm-service
 
-Python / FastAPI. Document ingestion and retrieval-based answers now; Text-to-SQL, query routing and conversation
-memory later.
+Python / FastAPI. Document ingestion and retrieval-based answers now; the Text-to-SQL pipeline is built but not yet
+reachable from `/query`; query routing and conversation memory later.
 
 ## Running it locally
 
@@ -60,12 +60,17 @@ app/
 │   ├── retrieval.py         who may see what, and the search itself
 │   ├── query_models.py      the async model calls of a query, with retries inside the budget
 │   └── answering.py         a question to an answer: threshold, prompt, citation check, refusal
-├── sql_agent/     Text-to-SQL. Now: schema.py (what a model is shown: tables, data dictionary, names in the data)
-│                  and execute.py (one SELECT, read-only, time and row limits); the pipeline itself is to come
+├── sql_agent/     Text-to-SQL
+│   ├── schema.py            what a model is shown: views or tables, the data dictionary, the names in the data
+│   ├── guard.py             the checks a generated query passes (sqlglot, allow-lists) and the department filter
+│   ├── execute.py           one SELECT, read-only, with the asker's department set, time and row limits
+│   ├── examples.py          the example questions closest to a question; examples.yaml holds them
+│   └── pipeline.py          a question to an answer: examples, write, check, run, retry with the error, explain
 ├── router/        query routing + combined answers
 └── memory/        Redis cache + conversation memory
 evaluation/        the evaluation dataset's format (dataset.py), the review page (review.py), the runs (run.py for
-                   documents, sql_run.py with the baseline agent in sql_agent.py for SQL); not part of the service
+                   documents, sql_run.py for SQL: the pipeline, or the baseline agent in sql_agent.py); not part of
+                   the service
 tests/             pytest; test_events (contract / cross-language drift) test_storage (path traversal)
                    test_upload_consumer (every branch of the consume loop) test_health
                    test_embeddings (fake OpenAI client) test_parsing (all three formats parse the same)
@@ -82,6 +87,8 @@ tests/             pytest; test_events (contract / cross-language drift) test_st
                    test_review (the review page's API: what can change, what is checked, what is exported)
                    test_sql_agent (real Postgres: the metric views, what a model is shown, running a generated
                    query, the baseline agent with a fake model, what a run scores)
+                   test_sql_pipeline (the checks and their attacks; real Postgres: the department filter, the
+                   examples, the pipeline with fake models, what a pipeline run scores)
 tests/fixtures/documents/   docx / PDF fixtures, generated from Markdown by scripts/make_sample_documents.py
 ```
 
@@ -378,6 +385,36 @@ uv run python -m evaluation.run --split dev --name baseline   # one evaluation r
 Recall@50, MRR by kind of question), graded answers, the refusal threshold sweep, latency and cost to
 `eval/results/`. Answers are graded by `evaluation/judge.py` the way RAGAS does it, without RAGAS, which can't be
 installed next to openai 3.29. Results and what they mean: [docs/eval-report.md](../docs/eval-report.md).
+
+## Text-to-SQL: the pipeline
+
+```bash
+uv run python -m scripts.load_sql_examples   # the example questions, with their embeddings; after editing examples.yaml
+uv run python -m evaluation.sql_run --split dev --name pipeline --pipeline --dictionary --views --examples 3 --retries 2
+```
+
+`app/sql_agent/pipeline.py` answers a question about the campaign data in fixed steps, built for the query path but not
+reachable from `/query` until routing exists:
+
+1. **Context.** The five metric views with their comments, the names in the data (the asker's department's only) and
+   the 3 example questions closest to the question, among the asker's department's and those for every department. The
+   views' description is read once per process; the names and examples on every question, while one connection is held.
+2. **Write.** One model call (`SQL_MODEL`, apart from the model that explains) writes one query, or the fixed word
+   `NOT_IN_DATA` when nothing listed holds what the question is about. A question asking why or what to change still
+   gets a query: the numbers about what it names. The prompt ends with the question to write the query for: ending it
+   with "Question: ..." after the examples, the model once replied with its query and two more made-up examples.
+3. **Check** (`guard.py`): one SELECT, only the views, allow-listed functions and plain casts, and for staff and
+   managers every view becomes a subquery holding only their department's rows. What runs is regenerated from the
+   checked tree. Why each rule: "Filtering data" in [docs/permission-model.md](../docs/permission-model.md).
+4. **Run** in a read-only transaction with the department set, at most 5 s (or what is left of the budget) and 200 rows.
+5. **Retry.** A query that is refused or fails in the database goes back to the model with every failure so far, at
+   most `SQL_RETRIES` (2) times. Only errors in the query itself: the database unreachable is not the query's fault.
+6. **Explain.** A second model call words the result in a few sentences; the asker also gets the query and its rows,
+   which are what the answer rests on. A result with no rows gets a fixed sentence and no model, so it reads the same
+   whether another department has such data or nothing does.
+
+The query path's budget bounds it all: 1 embedding, at most 3 queries written and run, 1 explanation. On dev: 2 model
+calls a question, p50 2.4 s, about $0.0003 a question (numbers: [docs/eval-report.md](../docs/eval-report.md)).
 
 ## Text-to-SQL: the baseline
 

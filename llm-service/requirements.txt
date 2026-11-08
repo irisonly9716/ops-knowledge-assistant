@@ -36,13 +36,16 @@ tiktoken==0.14.0   # token counts with the embedding model's tokenizer; download
 langchain==1.4.9
 langchain-openai==1.7.4
 
+# ---- Text-to-SQL checks ----
+# Parses a generated query so it can be checked (one SELECT, only the metric views, only allowed functions) and given
+# the department filter (app/sql_agent/guard.py). No dependencies of its own; 0.8 MB download, 3.3 MB installed. It
+# releases about weekly: this was the newest release more than two weeks old
+sqlglot==30.24.0
+
 # ---- uncomment when the feature needs it (versions from when this list was started: take the current one) ----
 # vector store (psycopg is installed above; this is pgvector's Python adapter)
 # pgvector==0.3.6
 # sqlalchemy==2.0.36
-#
-# Text-to-SQL safety checks
-# sqlglot==26.0.1
 #
 # Redis cache / conversation memory
 # redis==5.2.1

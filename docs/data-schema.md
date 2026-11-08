@@ -3,7 +3,7 @@
 > The actual DDL lives in the Flyway migrations under [db/migration/](../db/migration/) (V1 pgvector, V2 base
 > schema, V3 uploads / roles / chunk department, V4 the `document_catalog` view, V5 its `catalog_entry()` function,
 > V6 the `outbox` table, V7 `documents.version` and `uploads.category`, V8 the delivery and republish counts on
-> `uploads`, V9 the data dictionary and the metric views), applied in
+> `uploads`, V9 the data dictionary and the metric views, V10 `sql_examples`), applied in
 > version order (this document explains them; the SQL files are authoritative for column types).
 > The data is mock data generated with Python + Faker (see `llm-service/scripts/generate_mock_data.py`).
 
@@ -173,7 +173,25 @@ from the catalog at run time, so a model sees the definitions in the migrations,
   whoever queries the view (PostgreSQL 15 and later).
 - **No view has `ip_address`**, and the schema a model is shown leaves it out of the table too: personal data
   no question needs.
-- Campaign and department are carried as names (`department = 'Beauty'`), the way questions name them.
+- Campaign and department are carried as names (`department = 'Beauty'`), the way questions name them. Every view
+  has `department`, which is what the department filter on generated SQL keys on
+  ([permission-model.md](permission-model.md)).
+
+### sql_examples (V10)
+
+Example questions with the SQL that answers them. For each question the Text-to-SQL pipeline shows the model the 3
+closest, by the cosine similarity of the questions' embeddings. They are kept in
+`llm-service/app/sql_agent/examples.yaml`, reviewed like code, and loaded with `scripts.load_sql_examples`, which checks
+every query first and replaces the table in one transaction: the file is the source.
+
+| Column | Meaning |
+|---|---|
+| `department` | a department name, or `ALL` as for documents: a search keeps to the asker's department and `ALL` |
+| `question`, `sql` | the example; the SQL reads only the metric views and has no department filter, which code adds |
+| `embedding`, `embedding_model` | of the question; only examples embedded by the searching model are compared |
+
+- No vector index: with tens of rows an exact scan is faster than an index and never misses one.
+- The examples for `ALL` name no real department, campaign or product (a test checks), because everyone is shown them.
 
 ## Document tables (SOP / campaign plan / post-campaign review)
 
