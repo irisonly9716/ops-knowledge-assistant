@@ -1,0 +1,256 @@
+# Example questions with the SQL that answers them. For each question the Text-to-SQL pipeline shows the model the few
+# closest ones (app/sql_agent/examples.py). Load changes with `uv run python -m scripts.load_sql_examples`.
+#
+# Rules, checked by tests/test_sql_pipeline.py:
+#   - Only the metric views, and every query passes the checks of app/sql_agent/guard.py.
+#   - No department filter: the code adds it. A department appears only as a column to group or show.
+#   - No real department, campaign or product name: every asker is shown these, whatever their department. The names
+#     here are made up.
+#   - Dates as literals worked out from today's date, which the prompt gives: in the evaluation "today" is not the
+#     database's CURRENT_DATE.
+# department: ALL unless given, as for documents.
+
+- question: How much GMV did the Spring Kickoff Live bring in?
+  sql: |
+    -- Several campaigns can share a name: the latest one, with its start date to show which
+    SELECT campaign_name, start_date, total_gmv
+    FROM campaign_summary
+    WHERE campaign_name = 'Spring Kickoff Live'
+    ORDER BY start_date DESC
+    LIMIT 1
+
+- question: What was the conversion rate of our most recent Valentine's livestream?
+  sql: |
+    -- avg_conversion_rate is a fraction: keep it as stored, don't multiply by 100 or round
+    SELECT campaign_name, start_date, end_date, avg_conversion_rate
+    FROM campaign_summary
+    WHERE campaign_name ILIKE '%valentine%'
+    ORDER BY start_date DESC
+    LIMIT 1
+
+- question: Which finished campaign had the lowest ROI, and what was it?
+  sql: |
+    -- ROI is profit over actual operating cost, already in the view; NULL until a campaign is finished
+    SELECT campaign_name, start_date, roi
+    FROM campaign_summary
+    WHERE status = 'finished'
+    ORDER BY roi ASC NULLS LAST
+    LIMIT 1
+
+- question: Which three campaigns earned the best return on their operating spend?
+  sql: |
+    -- Descending order puts NULLs first in PostgreSQL: campaigns without an ROI yet would top the list
+    SELECT campaign_name, start_date, roi
+    FROM campaign_summary
+    ORDER BY roi DESC NULLS LAST
+    LIMIT 3
+
+- question: What was the ROI and the actual operating cost of the Mid-Year Mega Sale?
+  sql: |
+    SELECT campaign_name, start_date, roi, actual_operating_cost
+    FROM campaign_summary
+    WHERE campaign_name = 'Mid-Year Mega Sale'
+    ORDER BY start_date DESC
+    LIMIT 1
+
+- question: What was the ROI of the campaign that started in April 2026?
+  sql: |
+    SELECT campaign_name, start_date, roi
+    FROM campaign_summary
+    WHERE start_date >= DATE '2026-04-01' AND start_date < DATE '2026-05-01'
+
+- question: How many people were watching at the same time at the busiest moment of the Lunar New Year Sale?
+  sql: |
+    SELECT campaign_name, start_date, peak_concurrent_viewers
+    FROM campaign_summary
+    WHERE campaign_name = 'Lunar New Year Sale'
+    ORDER BY start_date DESC
+    LIMIT 1
+
+- question: Who hosted the Midnight Deals Live, and what was its total GMV?
+  sql: |
+    SELECT campaign_name, start_date, host_name, total_gmv
+    FROM campaign_summary
+    WHERE campaign_name = 'Midnight Deals Live'
+    ORDER BY start_date DESC
+    LIMIT 1
+
+- question: Which of our campaigns had the highest GMV, and who hosted it?
+  sql: |
+    SELECT campaign_name, start_date, host_name, total_gmv
+    FROM campaign_summary
+    ORDER BY total_gmv DESC NULLS LAST
+    LIMIT 1
+
+- question: Which host ran the campaign that started on March 3, 2026, and what was its average conversion rate?
+  sql: |
+    SELECT campaign_name, start_date, host_name, avg_conversion_rate
+    FROM campaign_summary
+    WHERE start_date = DATE '2026-03-03'
+
+- question: Which campaigns this year had the biggest live audience, and who hosted them?
+  sql: |
+    -- asked on 2026-05-20: this year is 2026
+    SELECT campaign_name, start_date, host_name, peak_concurrent_viewers
+    FROM campaign_summary
+    WHERE start_date >= DATE '2026-01-01' AND start_date < DATE '2027-01-01'
+    ORDER BY peak_concurrent_viewers DESC NULLS LAST
+    LIMIT 1
+
+- question: Which product sold the most units in the Spring Kickoff Live?
+  sql: |
+    SELECT product_name, units_sold
+    FROM campaign_product_sales
+    WHERE campaign_name = 'Spring Kickoff Live'
+      AND campaign_start_date = (SELECT max(campaign_start_date) FROM campaign_product_sales
+                                 WHERE campaign_name = 'Spring Kickoff Live')
+    ORDER BY units_sold DESC
+    LIMIT 1
+
+- question: Which product brought in the most sales in the 2026 Mid-Year Mega Sale, and what were its units sold and return rate?
+  sql: |
+    SELECT product_name, sales_amount, units_sold, return_rate
+    FROM campaign_product_sales
+    WHERE campaign_name = 'Mid-Year Mega Sale'
+      AND campaign_start_date >= DATE '2026-01-01' AND campaign_start_date < DATE '2027-01-01'
+    ORDER BY sales_amount DESC
+    LIMIT 1
+
+- question: In the campaign with the most viewers at once, how many units did its best-selling product sell?
+  sql: |
+    WITH busiest AS (
+        SELECT campaign_id, campaign_name, start_date, peak_concurrent_viewers
+        FROM campaign_summary
+        ORDER BY peak_concurrent_viewers DESC NULLS LAST
+        LIMIT 1
+    )
+    SELECT b.campaign_name, b.start_date, b.peak_concurrent_viewers, p.product_name, p.units_sold
+    FROM busiest b
+    JOIN campaign_product_sales p ON p.campaign_id = b.campaign_id
+    ORDER BY p.units_sold DESC
+    LIMIT 1
+
+- question: Which products in the Lunar New Year Sale had a return rate above 10%?
+  sql: |
+    -- Rates are stored as fractions: 10% is 0.10
+    SELECT product_name, return_rate, units_sold
+    FROM campaign_product_sales
+    WHERE campaign_name = 'Lunar New Year Sale'
+      AND return_rate > 0.10
+    ORDER BY return_rate DESC
+
+- question: Which region spent the most in the Midnight Deals Live, and how much?
+  sql: |
+    -- campaign_customers is a sample of the customers: its totals are not the campaign's sales
+    SELECT region, sum(purchase_amount) AS sampled_purchase_amount
+    FROM campaign_customers
+    WHERE campaign_name = 'Midnight Deals Live'
+    GROUP BY region
+    ORDER BY sampled_purchase_amount DESC
+    LIMIT 1
+
+- question: How many customers bought in more than one of our campaigns?
+  sql: |
+    SELECT count(*) AS repeat_customers
+    FROM (
+        SELECT customer_ref
+        FROM campaign_customers
+        GROUP BY customer_ref
+        HAVING count(DISTINCT campaign_id) > 1
+    ) repeat
+
+- question: Which products did the sampled customers of the Valentine's livestream buy most often?
+  sql: |
+    -- products_purchased is a JSON array of product names
+    SELECT p.product_name, count(*) AS customers
+    FROM campaign_customers c
+    CROSS JOIN jsonb_array_elements_text(c.products_purchased) AS p(product_name)
+    WHERE c.campaign_name ILIKE '%valentine%'
+    GROUP BY p.product_name
+    ORDER BY customers DESC
+
+- question: What was the total GMV of the campaigns that started in March 2026?
+  sql: |
+    SELECT sum(total_gmv) AS total_gmv, count(*) AS campaigns
+    FROM campaign_summary
+    WHERE start_date >= DATE '2026-03-01' AND start_date < DATE '2026-04-01'
+
+- question: Which department started the most campaigns in Q2 2026, and how many?
+  sql: |
+    SELECT department, count(*) AS campaigns
+    FROM campaign_summary
+    WHERE start_date >= DATE '2026-04-01' AND start_date < DATE '2026-07-01'
+    GROUP BY department
+    ORDER BY campaigns DESC
+    LIMIT 1
+
+- question: What was the average conversion rate of the campaigns that started in Q1 2026?
+  sql: |
+    -- Two averages answer this, and they differ: each campaign counting the same, or each day counting the same
+    -- (longer campaigns weigh more). Give both
+    SELECT
+        (SELECT avg(avg_conversion_rate) FROM campaign_summary
+         WHERE start_date >= DATE '2026-01-01' AND start_date < DATE '2026-04-01') AS average_of_campaign_averages,
+        (SELECT avg(conversion_rate) FROM campaign_daily_metrics
+         WHERE campaign_start_date >= DATE '2026-01-01' AND campaign_start_date < DATE '2026-04-01') AS average_over_all_days
+
+- question: Which finished campaign that started in May 2026 had the best ROI?
+  sql: |
+    SELECT department, campaign_name, start_date, roi
+    FROM campaign_summary
+    WHERE status = 'finished'
+      AND start_date >= DATE '2026-05-01' AND start_date < DATE '2026-06-01'
+    ORDER BY roi DESC NULLS LAST
+    LIMIT 1
+
+- question: What was the biggest live audience among campaigns that started in the last three full months?
+  sql: |
+    -- asked on 2026-05-20: the last three full months are February, March and April
+    SELECT campaign_name, start_date, peak_concurrent_viewers
+    FROM campaign_summary
+    WHERE start_date >= DATE '2026-02-01' AND start_date < DATE '2026-05-01'
+    ORDER BY peak_concurrent_viewers DESC NULLS LAST
+    LIMIT 1
+
+- question: How did GMV move day by day during the Spring Kickoff Live?
+  sql: |
+    SELECT date, gmv, dau, conversion_rate
+    FROM campaign_daily_metrics
+    WHERE campaign_name = 'Spring Kickoff Live'
+      AND campaign_start_date = (SELECT max(campaign_start_date) FROM campaign_daily_metrics
+                                 WHERE campaign_name = 'Spring Kickoff Live')
+    ORDER BY date
+
+- question: Which campaigns went over their operating budget, and by how much?
+  sql: |
+    SELECT campaign_name, start_date, planned_operating_cost, actual_operating_cost,
+           actual_operating_cost - planned_operating_cost AS over_budget
+    FROM campaign_summary
+    WHERE actual_operating_cost > planned_operating_cost
+    ORDER BY over_budget DESC
+
+- question: How did the Mid-Year Mega Sale do against its plan, and what should we change next time?
+  sql: |
+    -- A question that also needs the review documents: the numbers that support an answer
+    SELECT campaign_name, start_date, planned_operating_cost, actual_operating_cost, total_gmv,
+           avg_conversion_rate, peak_concurrent_viewers, roi
+    FROM campaign_summary
+    WHERE campaign_name = 'Mid-Year Mega Sale'
+    ORDER BY start_date DESC
+    LIMIT 1
+
+- question: How did the product mix and returns shape the results of the Lunar New Year Sale?
+  sql: |
+    SELECT product_name, units_sold, sales_amount, profit, return_rate, sell_through_rate
+    FROM campaign_product_sales
+    WHERE campaign_name = 'Lunar New Year Sale'
+      AND campaign_start_date = (SELECT max(campaign_start_date) FROM campaign_product_sales
+                                 WHERE campaign_name = 'Lunar New Year Sale')
+    ORDER BY sales_amount DESC
+
+- question: Which host has the most followers?
+  sql: |
+    SELECT host_name, fans_count
+    FROM host_profiles
+    ORDER BY fans_count DESC NULLS LAST
+    LIMIT 1
