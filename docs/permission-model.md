@@ -64,6 +64,8 @@ manager's request can only go to the `executive`, who sees every department.
 - "The approver is not the uploader" is enforced by a CHECK constraint on `uploads`; "the approver is the
   uploader's superior" needs a cross-table comparison, is checked in application code and covered by
   privilege-escalation tests.
+- Every cell of the table above is a case of `PermissionMatrixTest` (backend), through the HTTP endpoints: each role
+  against each action, approving one's own request and another department's included.
 - Known trade-off: there is only one `executive`, so every manager's request queues up for the CEO alone.
   A real company would usually delegate to vice presidents.
 
@@ -126,6 +128,22 @@ The database holds the department too (migration V11), so a query that gets past
   runs `SET`, before the query, and the query can't; whoever holds `sql_reader`'s password can choose any department,
   like any database password. One login per department would close that, at the price of a pool per department in
   every process against the 100 connections Postgres allows
+- **Each layer was tried alone** (`llm-service/tests/test_sql_leaks.py`), against 19 queries written to get another
+  department's data: filtering by another department's name, `OR 1 = 1`, `UNION`, `WITH`, subqueries, `LATERAL`, quoted
+  and schema-qualified names, a table, the statistics catalog, `set_config`, a function running a query, a second
+  statement, `ip_address`. Through the whole pipeline, staff and managers got none of another department's rows, and
+  executives and admins were refused the same queries the checks refuse.
+  The code alone (row-level security letting every row through) stopped all 19. The database alone (the query as
+  written, as `sql_reader`) stopped 18: a second statement can `SET` another department, because `sql_reader` has to
+  be able to set its own. Two checks in the code keep a query to one statement: `guard.py` parses exactly one and
+  regenerates the query from it, and `run_select` refuses a semicolon
+- **A question about another department alone is refused** before any query, by the query writer's instructions
+  (`NOT_IN_DATA`). Answered on the views, which hold only the asker's rows, it returned the asker's own numbers, and the
+  explanation could name them after the other department: not a leak, but misleading. A comparison with other
+  departments still gets the asker's own numbers. The layers above, not this rule, keep the data apart
+- **The statistics catalog** is a known way around row-level security: the planner samples a column's values into
+  `pg_stats`. Postgres shows a column's statistics only to a role that may read the table and isn't held by
+  row-level security on it, so `sql_reader` sees none of the business tables'
 
 ## 3. Filtering documents (vector search)
 

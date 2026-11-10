@@ -402,8 +402,9 @@ reachable from `/query` until routing exists:
    views' description is read once per process; the names and examples on every question, while one connection is held.
    These reads are fixed SQL with bound parameters and run as `ops`, like the rest of the query path.
 2. **Write.** One model call (`SQL_MODEL`, apart from the model that explains) writes one query, or the fixed word
-   `NOT_IN_DATA` when nothing listed holds what the question is about. A question asking why or what to change still
-   gets a query: the numbers about what it names. The prompt ends with the question to write the query for: ending it
+   `NOT_IN_DATA` when nothing listed holds what the question is about, or, for staff and managers, when it asks only
+   about another department. A question comparing theirs with others gets a query for their own numbers; one asking
+   why or what to change still gets a query: the numbers about what it names. The prompt ends with the question to write the query for: ending it
    with "Question: ..." after the examples, the model once replied with its query and two more made-up examples.
 3. **Check** (`guard.py`): one SELECT, only the views, allow-listed functions and plain casts, and for staff and
    managers every view becomes a subquery holding only their department's rows. The outer query gets `LIMIT 201`
@@ -420,6 +421,26 @@ reachable from `/query` until routing exists:
 
 The query path's budget bounds it all: 1 embedding, at most 3 queries written and run, 1 explanation. On dev: 2 model
 calls a question, p50 2.4 s, about $0.0003 a question (numbers: [docs/eval-report.md](../docs/eval-report.md)).
+
+## Text-to-SQL: the ablation and the leak check
+
+```bash
+uv run python -m evaluation.sql_ablation --split dev   # the table, from the runs below; no model calls
+uv run python -m evaluation.sql_leak --name 1          # eval/unauthorized-sql.jsonl, about $0.006
+```
+
+`evaluation/sql_ablation.py` reads what each part of the pipeline is worth from `sql_run` result files, two runs of each
+configuration: adding one part at a time (zero-shot on the tables, the data dictionary, the views, 3 examples, 2
+retries), and taking one part out of the full pipeline. Its docstring lists each configuration's flags. A step is
+credited with a question only when both runs agree on both sides of it.
+
+`evaluation/sql_leak.py` asks 20 questions written to get another department's data, as staff and managers, through the
+query path's pipeline as `sql_reader`, and 3 control questions as an executive or admin. `--questions dev` asks the
+10 of `eval/unauthorized-sql-dev.jsonl` instead, the ones rules are worked out on. It also counts the questions about
+another department alone that got the asker's own rows, which an explanation can put under the other department's
+name. A leak is a value only another
+department has (a campaign, host or product name, or an amount of $1,000 or more) in the rows or the answer. The
+controls have to show other departments, so the check is known to find them. Nothing is tuned on these questions.
 
 ## Text-to-SQL: the baseline
 
@@ -467,3 +488,6 @@ One test is skipped on Windows (symlinks need administrator rights); that is exp
 logins of its own in the `sql_reader` and `sql_views` roles, so it never uses or changes `sql_reader`'s password. One
 of its tests runs only once `SQL_READER_PASSWORD` is set: that applying the migrations to another database left
 `sql_reader`'s login alone, since roles are shared by every database.
+`test_sql_leaks.py` tries 19 queries written to get another department's data against the whole pipeline, as each of
+the four roles, and against each layer alone: the code's checks and filter, then the database's role and row-level
+security. Why each layer stops what it stops: "Filtering data" in [docs/permission-model.md](../docs/permission-model.md).

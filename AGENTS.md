@@ -75,7 +75,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Python setup | `cd llm-service` · `uv venv` · `uv pip install -r requirements.txt` |
 | Create topics · mock data · SQL examples · the SQL reader's login | `uv run python -m scripts.init_topics` · `uv run python -m scripts.generate_mock_data` · `uv run python -m scripts.load_sql_examples` (after editing `app/sql_agent/examples.yaml`) · `uv run python -m scripts.enable_sql_reader` (after the migrations, with `SQL_READER_PASSWORD` in `.env`) |
 | Evaluation corpus: what's in it · load it · the questions | `uv run python -m scripts.generate_corpus --report` · `uv run python -m scripts.ingest_corpus` (needs the backend, Kafka and the consumer) · `uv run python -m scripts.generate_questions --report` · review: `uv run python -m evaluation.review` |
-| Evaluation run (needs Postgres with the corpus; about $0.27 on `dev`, almost all grading) | `uv run python -m evaluation.run --split dev --name <name>` · SQL: `uv run python -m evaluation.sql_run --split dev --name <name>` (the agent; `--pipeline --dictionary --views --examples 3 --retries 2` for the query path's pipeline, about $0.01) · results in `eval/results/`, what they mean in `docs/eval-report.md` |
+| Evaluation run (needs Postgres with the corpus; about $0.27 on `dev`, almost all grading) | `uv run python -m evaluation.run --split dev --name <name>` · SQL: `uv run python -m evaluation.sql_run --split dev --name <name>` (the agent; `--pipeline --dictionary --views --examples 3 --retries 2` for the query path's pipeline, about $0.01) · SQL ablation table from its runs: `uv run python -m evaluation.sql_ablation --split dev` · leak check: `uv run python -m evaluation.sql_leak --name <name>` · results in `eval/results/`, what they mean in `docs/eval-report.md` |
 | Reranker (optional, about 5 GB of memory; queries keep the vector order without it) | `docker compose --profile rerank up -d reranker` (:8082) |
 | Run backend (:8081) | `cd backend-service` · `.\mvnw.cmd spring-boot:run` |
 | Run consumer · LLM API (:8000) | `uv run python -m app.consumers.upload_consumer` · `uv run python -m app.server --reload` (not plain `uvicorn`: async psycopg needs the event loop it chooses) |
@@ -209,3 +209,4 @@ A new document for one's own department takes effect at once. Replacing anything
 - v11 · 2026-11-07 · Arianna · LangChain for the SQL baseline; upgrade pins only when blocked.
 - v12 · 2026-11-07 · Arianna · sqlglot and the fixed Text-to-SQL pipeline, its checks and department filter.
 - v13 · 2026-11-09 · Arianna · The role generated SQL runs as, row-level security, the row limit; `sql.Literal` for `SET`.
+- v14 · 2026-11-10 · Arianna · The SQL ablation and leak check commands.
