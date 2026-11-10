@@ -36,6 +36,12 @@ campaign's department, name and start date, and a section by its heading path. C
 corpus is ingested again or the chunking changes, and labels that stored them would all point at the wrong text.
 `evaluation.dataset.resolve()` finds today's chunks of a section.
 
+`unauthorized-sql.jsonl` is not part of the dataset: 23 questions written by hand that try to get another department's
+data through Text-to-SQL, plus controls from an executive and an admin (`evaluation/sql_leak.py`). Each says who asks,
+how it tries (`tries`), and what it asks for (`asks_for`: another department, every department, data no view has, or
+the asker's own department). It is a check every question has to pass, not a score, so nothing is tuned on it.
+`unauthorized-sql-dev.jsonl` holds 10 more in the same format, the ones rules are worked out on.
+
 ## dev and test
 
 About 40% of the questions are in `dev` and 60% in `test`, decided by a hash, so a question never changes side
