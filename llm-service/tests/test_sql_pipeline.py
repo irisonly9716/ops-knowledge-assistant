@@ -6,7 +6,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from postgres_helpers import postgres_available, seed_two_departments, throwaway_database
+from postgres_helpers import login_in, postgres_available, seed_two_departments, throwaway_database
 from sqlglot import exp
 
 from app import db
@@ -120,7 +120,32 @@ def test_the_gold_queries_of_dev_and_the_examples_pass():
 def test_what_runs_is_regenerated_from_the_checked_tree_without_comments():
     ran = guard.checked("SELECT campaign_name -- ; DROP TABLE campaigns\nFROM campaign_summary", VIEWS,
                         one_department=False)
-    assert ran == "SELECT campaign_name FROM campaign_summary"
+    assert ran == "SELECT campaign_name FROM campaign_summary LIMIT 201"
+
+
+def limited(sql: str) -> str:
+    return guard.checked(sql, VIEWS, one_department=False)
+
+
+def test_a_query_returns_one_row_more_than_is_kept_at_most_and_a_smaller_limit_stays():
+    base = "SELECT campaign_name FROM campaign_summary"
+    assert guard.ROW_LIMIT == 201
+    assert limited(base) == f"{base} LIMIT 201"
+    assert limited(f"{base} LIMIT 5") == f"{base} LIMIT 5"
+    assert limited(f"{base} LIMIT 1000 OFFSET 3") == f"{base} LIMIT 201 OFFSET 3"
+    assert limited(f"{base} LIMIT ALL") == f"{base} LIMIT 201"
+    assert limited(f"{base} FETCH FIRST 300 ROWS ONLY") == f"{base} FETCH FIRST 201 ROWS ONLY"
+    # Not a number: capped, so it still means what it said
+    assert limited(f"{base} LIMIT (SELECT count(*) FROM host_profiles)") == (
+        f"{base} LIMIT LEAST((SELECT COUNT(*) FROM host_profiles), 201)")
+    assert "WITH TIES is not allowed" in rejected(f"{base} ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES")
+
+
+def test_only_the_outer_query_is_limited():
+    union = limited("SELECT campaign_name FROM campaign_summary UNION SELECT host_name FROM host_profiles")
+    assert union.endswith("SELECT host_name FROM host_profiles LIMIT 201") and union.count("LIMIT") == 1
+    inner = "WITH x AS (SELECT campaign_name FROM campaign_summary LIMIT 999) SELECT * FROM x"
+    assert limited(inner) == f"{inner} LIMIT 201"
 
 
 def test_every_view_read_becomes_its_one_department_subquery_under_the_same_name():
@@ -182,9 +207,26 @@ def database():
 
 @pytest.fixture
 async def pool(database):
+    """As the owner: the tests of the code's department filter alone run here, without row-level security."""
     async with db.query_pool(database) as opened:
         await opened.wait()
         yield opened
+
+
+@pytest.fixture(scope="module")
+def reader_login(database):
+    with login_in("sql_reader") as login:
+        yield login
+
+
+@pytest.fixture
+async def pools(pool, database, reader_login):
+    """The pipeline's two: pool for its own reads, and for the model's queries a login in sql_reader, under row-level
+    security as well as the code's filter."""
+    user, password = reader_login
+    async with db.sql_pool(database, user=user, password=password) as reader:
+        await reader.wait()
+        yield pool, reader
 
 
 def unit(i: int) -> list[float]:
@@ -194,7 +236,7 @@ def unit(i: int) -> list[float]:
 async def run_as(pool, sql: str, department: str | None, relations=VIEWS):
     async with pool.connection() as conn:
         return await run_select(conn, guard.checked(sql, relations, one_department=department is not None),
-                                department=department)
+                                department=department, every_department=department is None)
 
 
 @needs_postgres
@@ -240,6 +282,15 @@ async def test_the_tables_for_the_evaluation_are_filtered_the_same_way_and_hide_
     assert (await run_as(pool, "SELECT sum(units_sold) FROM campaign_products", "Beauty", tables)).rows == (("60",),)
     with pytest.raises(psycopg.errors.UndefinedColumn):
         await run_as(pool, "SELECT ip_address FROM campaign_customer_behavior", "Beauty", tables)
+
+
+@needs_postgres
+@pytest.mark.anyio
+async def test_a_huge_result_stops_in_the_database_and_still_reads_as_cut_off(pool):
+    ran = guard.checked("SELECT g FROM generate_series(1, 2000000) AS g", VIEWS, one_department=False)
+    async with pool.connection() as conn:
+        result = await run_select(conn, ran)
+    assert ran.endswith("LIMIT 201") and len(result.rows) == 200 and result.truncated
 
 
 @needs_postgres
@@ -297,8 +348,9 @@ class FakeModel:
 GMV = "SELECT campaign_name, total_gmv FROM campaign_summary WHERE campaign_name = 'Beauty Summer Sale'"
 
 
-def service(pool, writer, explainer, *, examples_shown=0, retries=2, embedder=None) -> SqlService:
-    return SqlService(embedder or FakeEmbedder(unit(1)), writer, explainer, pool,
+def service(pools, writer, explainer, *, examples_shown=0, retries=2, embedder=None) -> SqlService:
+    pool, reader = pools
+    return SqlService(embedder or FakeEmbedder(unit(1)), writer, explainer, pool, reader,
                       SqlOptions(examples=examples_shown, retries=retries))
 
 
@@ -310,9 +362,9 @@ async def ask(sql_service: SqlService, question="How much did the summer sale br
 
 @needs_postgres
 @pytest.mark.anyio
-async def test_the_pipeline_writes_a_query_runs_it_in_the_askers_department_and_explains_it(pool):
+async def test_the_pipeline_writes_a_query_runs_it_in_the_askers_department_and_explains_it(pools):
     writer, explainer = FakeModel(GMV), FakeModel("The summer sale brought in $3,000.50.")
-    traced = await ask(service(pool, writer, explainer, examples_shown=3))
+    traced = await ask(service(pools, writer, explainer, examples_shown=3))
     answer = traced.answer
     assert (answer.status, answer.text, answer.department) == ("answered", "The summer sale brought in $3,000.50.",
                                                                "Beauty")
@@ -332,11 +384,11 @@ async def test_the_pipeline_writes_a_query_runs_it_in_the_askers_department_and_
 
 @needs_postgres
 @pytest.mark.anyio
-async def test_a_failed_query_is_shown_to_the_model_and_written_again(pool):
+async def test_a_failed_query_is_shown_to_the_model_and_written_again(pools):
     writer = FakeModel("SELECT gmv_total FROM campaign_summary",
                        "SELECT set_config('app.department', 'Fresh Grocery', true)",
                        GMV)
-    traced = await ask(service(pool, writer, FakeModel("$3,000.50.")))
+    traced = await ask(service(pools, writer, FakeModel("$3,000.50.")))
     assert traced.answer.status == "answered" and traced.answer.result.rows[0][1] == "3000.50"
     assert [a.error.split(":")[0] if a.error else None for a in traced.attempts] == [
         "UndefinedColumn", "SqlRejected", None]
@@ -349,27 +401,27 @@ async def test_a_failed_query_is_shown_to_the_model_and_written_again(pool):
 
 @needs_postgres
 @pytest.mark.anyio
-async def test_it_gives_up_after_its_retries_without_explaining(pool):
+async def test_it_gives_up_after_its_retries_without_explaining(pools):
     writer, explainer = FakeModel("SELECT nope FROM campaign_summary", "SELECT nope FROM campaign_summary"), FakeModel()
-    traced = await ask(service(pool, writer, explainer, retries=1))
+    traced = await ask(service(pools, writer, explainer, retries=1))
     assert (traced.answer.status, traced.answer.text) == ("failed", pipeline.FAILED_TEXT)
     assert len(traced.attempts) == 2 and explainer.prompts == []
 
 
 @needs_postgres
 @pytest.mark.anyio
-async def test_a_question_the_data_cant_answer_is_refused_without_running_anything(pool):
-    traced = await ask(service(pool, FakeModel("NOT_IN_DATA"), FakeModel()), question="Who will win the election?")
+async def test_a_question_the_data_cant_answer_is_refused_without_running_anything(pools):
+    traced = await ask(service(pools, FakeModel("NOT_IN_DATA"), FakeModel()), question="Who will win the election?")
     assert (traced.answer.status, traced.answer.text, traced.attempts) == ("refused", pipeline.REFUSAL_TEXT, ())
 
 
 @needs_postgres
 @pytest.mark.anyio
-async def test_another_departments_data_gets_the_fixed_sentence_without_a_model(pool):
+async def test_another_departments_data_gets_the_fixed_sentence_without_a_model(pools):
     """The same sentence whether the other department has such data or not, and no model to word it differently."""
     explainer = FakeModel()
     other = "SELECT total_gmv FROM campaign_summary WHERE campaign_name = 'Grocery Harvest Sale'"
-    traced = await ask(service(pool, FakeModel(other), explainer), question="What did Grocery Harvest Sale make?")
+    traced = await ask(service(pools, FakeModel(other), explainer), question="What did Grocery Harvest Sale make?")
     assert (traced.answer.status, traced.answer.text, traced.answer.result.rows) == (
         "answered", pipeline.NO_ROWS_TEXT, ())
     assert explainer.prompts == []
@@ -377,24 +429,24 @@ async def test_another_departments_data_gets_the_fixed_sentence_without_a_model(
 
 @needs_postgres
 @pytest.mark.anyio
-async def test_an_explanation_cut_off_is_an_error_not_an_answer(pool):
-    traced = await ask(service(pool, FakeModel(GMV), FakeModel(ModelAnswer("The summer sale", False, 100, 800))))
+async def test_an_explanation_cut_off_is_an_error_not_an_answer(pools):
+    traced = await ask(service(pools, FakeModel(GMV), FakeModel(ModelAnswer("The summer sale", False, 100, 800))))
     assert traced.answer is None and isinstance(traced.error, InvalidAnswer)
     with pytest.raises(InvalidAnswer):
-        await service(pool, FakeModel(GMV), FakeModel(ModelAnswer("", True, 1, 0))).answer(
+        await service(pools, FakeModel(GMV), FakeModel(ModelAnswer("", True, 1, 0))).answer(
             "How much?", user_id=1, role="staff", department="Beauty", budget=TimeBudget(10))
 
 
 @needs_postgres
 @pytest.mark.anyio
-async def test_no_query_runs_once_the_budget_is_spent(pool):
+async def test_no_query_runs_once_the_budget_is_spent(pools):
     class SlowWriter(FakeModel):
         async def answer(self, instructions, prompt, budget):
             now[0] += 20   # the model call used up the 10 s
             return await super().answer(instructions, prompt, budget)
 
     now = [0.0]
-    sql_service = service(pool, SlowWriter(GMV), FakeModel())
+    sql_service = service(pools, SlowWriter(GMV), FakeModel())
     with pytest.raises(TimeoutError, match="before the query could run"):
         await sql_service.trace("How much?", role="staff", department="Beauty", today=TODAY,
                                 budget=TimeBudget(10, clock=lambda: now[0]))
@@ -402,19 +454,33 @@ async def test_no_query_runs_once_the_budget_is_spent(pool):
 
 @needs_postgres
 @pytest.mark.anyio
-async def test_without_examples_nothing_is_embedded_and_an_executive_sees_every_department(pool):
+async def test_without_examples_nothing_is_embedded_and_an_executive_sees_every_department(pools):
     embedder = FakeEmbedder(unit(0))
     writer = FakeModel("SELECT department, count(*) FROM campaign_summary GROUP BY 1 ORDER BY 1")
-    traced = await ask(service(pool, writer, FakeModel("Two departments."), embedder=embedder),
+    traced = await ask(service(pools, writer, FakeModel("Two departments."), embedder=embedder),
                        role="executive", department=None)
     assert traced.answer.result.rows == (("Beauty", "2"), ("Fresh Grocery", "1")) and traced.answer.department is None
     assert embedder.calls == 0 and "Examples" not in writer.prompts[0][1]
     assert "may see every department" in writer.prompts[0][0]
 
 
+@needs_postgres
+@pytest.mark.anyio
+async def test_the_models_query_runs_as_the_reader_and_the_pipelines_own_reads_as_the_owner(pools):
+    """Offered the tables, as an evaluation run can be: their descriptions and names are read on the owner's pool, but
+    the model's query runs on the reader's, which may read no table."""
+    pool, reader = pools
+    writer = FakeModel("SELECT count(*) FROM campaigns")
+    sql_service = SqlService(None, writer, FakeModel(), pool, reader,
+                             SqlOptions(examples=0, retries=0, relations=sql_run.TABLES_IN_ONE_DEPARTMENT))
+    traced = await ask(sql_service)
+    assert "TABLE campaigns" in writer.prompts[0][1] and "campaign names: Beauty Fan Day" in writer.prompts[0][1]
+    assert traced.answer.status == "failed" and traced.attempts[0].error.startswith("InsufficientPrivilege")
+
+
 def test_examples_without_an_embedder_are_refused_at_once():
     with pytest.raises(ValueError):
-        SqlService(None, FakeModel(), FakeModel(), None, SqlOptions(examples=3, retries=2))
+        SqlService(None, FakeModel(), FakeModel(), None, None, SqlOptions(examples=3, retries=2))
 
 
 def test_the_query_path_runs_the_settings():
@@ -435,14 +501,14 @@ def data_question(gold_result, *, role="staff", department="Beauty") -> Question
 
 @needs_postgres
 @pytest.mark.anyio
-async def test_a_pipeline_run_is_scored_on_the_query_that_ran_and_reports_its_corrections(pool):
+async def test_a_pipeline_run_is_scored_on_the_query_that_ran_and_reports_its_corrections(pools):
     corrected = await sql_run.ask_pipeline(
-        service(pool, FakeModel("SELECT nope FROM campaign_summary", GMV), FakeModel("$3,000.50.")),
+        service(pools, FakeModel("SELECT nope FROM campaign_summary", GMV), FakeModel("$3,000.50.")),
         data_question((("3000.50",),)))
     assert (corrected["status"], corrected["exact"], corrected["department_filtered"]) == ("answered", True, True)
     assert [q["error"] is None for q in corrected["queries"]] == [False, True]
     assert corrected["queries"][1]["rows"] == [["Beauty Summer Sale", "3000.50"]] and corrected["model_calls"] == 3
-    failed = await sql_run.ask_pipeline(service(pool, FakeModel("SELECT 1 FROM nowhere"), FakeModel(), retries=0),
+    failed = await sql_run.ask_pipeline(service(pools, FakeModel("SELECT 1 FROM nowhere"), FakeModel(), retries=0),
                                         data_question((("3000.50",),)))
     assert (failed["status"], failed["exact"], failed["final_sql"]) == ("failed", False, None)
     report = sql_run.summarize([corrected, failed | {"id": "q-failed"}], "test", "dev", "Fixed pipeline.", "rules",

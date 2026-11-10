@@ -32,10 +32,12 @@ def database():
 
 @pytest.fixture
 async def conn(database):
-    """A plain connection, not read-only by itself, so a test shows what run_select adds."""
+    """A plain connection, not read-only by itself, so a test shows what run_select adds. Set to see every department,
+    as an executive does: the views apply row-level security to the tables' owner too (migration V11)."""
     conninfo = psycopg.conninfo.make_conninfo(host=settings.postgres_host, port=settings.postgres_port, dbname=database,
                                               user=settings.postgres_user, password=settings.postgres_password)
     async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as opened:
+        await opened.execute("SET app.all_departments = 'on'")
         yield opened
 
 
@@ -51,12 +53,6 @@ async def fetch(conn, sql):
 
 
 # ---- the views
-
-
-@pytest.mark.anyio
-async def test_every_metric_view_reads_its_tables_as_whoever_queries_it(conn):
-    rows = dict(await fetch(conn, "SELECT relname, reloptions FROM pg_class WHERE relkind = 'v'"))
-    assert all("security_invoker=true" in (rows[view] or []) for view in schema.METRIC_VIEWS)
 
 
 @pytest.mark.anyio

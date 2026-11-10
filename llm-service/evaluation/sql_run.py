@@ -285,7 +285,7 @@ def attempts_section(records: list[dict]) -> list[str]:
     return lines + [""]
 
 
-def pipeline_service(client, pool, args: argparse.Namespace) -> SqlService:
+def pipeline_service(client, pool, reader_pool, args: argparse.Namespace) -> SqlService:
     limit = ModelCallLimit(settings.model_max_concurrent_calls, settings.model_slot_wait_seconds)
     embedder = OpenAIQueryEmbedder(client, settings.embedding_model, limit, settings.query_embedding_timeout_seconds)
     writer = OpenAIAnswerModel(client, settings.sql_model, limit, settings.query_model_timeout_seconds,
@@ -294,7 +294,7 @@ def pipeline_service(client, pool, args: argparse.Namespace) -> SqlService:
                                   settings.answer_max_output_tokens)
     options = SqlOptions(examples=args.examples, retries=args.retries, dictionary=args.dictionary,
                          relations=guard.METRIC_VIEWS if args.views else TABLES_IN_ONE_DEPARTMENT)
-    return SqlService(embedder if args.examples else None, writer, explainer, pool, options)
+    return SqlService(embedder if args.examples else None, writer, explainer, pool, reader_pool, options)
 
 
 async def main_async(args: argparse.Namespace) -> None:
@@ -309,9 +309,13 @@ async def main_async(args: argparse.Namespace) -> None:
     mode = " + ".join(["zero-shot"] + (["data dictionary"] if args.dictionary else []) + (["views"] if args.views else [])
                       + ([f"{args.examples} examples"] if args.pipeline and args.examples else [])
                       + ([f"{args.retries} retries"] if args.pipeline and args.retries else []))
+    # As on the query path, the views are read as sql_reader. The reader can't read the tables, so a run offering them
+    # stays on the owner's connections, kept to a department by the code alone
+    as_reader = args.pipeline and args.views
+    runs_as = db.SQL_READER if as_reader else "the tables' owner"
     if args.pipeline:
         setup = (f"Fixed pipeline ({mode}), writing with {settings.sql_model} and explaining with "
-                 f"{settings.chat_model}, {settings.query_budget_seconds:g} s a question.")
+                 f"{settings.chat_model}, {settings.query_budget_seconds:g} s a question, queries run as {runs_as}.")
         instructions = pipeline.instructions("staff", "Beauty", AS_OF)
     else:
         setup = (f"LangChain agent ({mode}), {settings.chat_model}, at most {sql_agent.MAX_MODEL_CALLS} model calls "
@@ -320,12 +324,15 @@ async def main_async(args: argparse.Namespace) -> None:
 
     started = time.perf_counter()
     pool = db.query_pool()
+    reader_pool = db.sql_pool() if as_reader else pool
     await pool.open()
     client = openai_client_from_settings() if args.pipeline else None
     records = []
     try:
+        if reader_pool is not pool:
+            await reader_pool.open()
         if args.pipeline:
-            service = pipeline_service(client, pool, args)
+            service = pipeline_service(client, pool, reader_pool, args)
             ask = lambda question: ask_pipeline(service, question)
         else:
             model = ChatOpenAI(model=settings.chat_model, api_key=settings.openai_api_key,
@@ -338,6 +345,8 @@ async def main_async(args: argparse.Namespace) -> None:
         print()
     finally:
         await pool.close()
+        if reader_pool is not pool:
+            await reader_pool.close()
         if client:
             await client.close()
 
