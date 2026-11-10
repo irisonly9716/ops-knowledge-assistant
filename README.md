@@ -132,7 +132,7 @@ backend /query ──forwards──▶ llm-service /query
 **Access control designed into the schema**
 - Every document and data row carries a `department`; company-wide SOPs use an `ALL` marker.
 - Vector search filters by department, which has a known pitfall: an approximate HNSW index combined with a `WHERE` filter can silently return fewer rows than requested. Retrieval accounts for this by using pgvector's iterative index scan or an exact scan.
-- Text-to-SQL runs only a single `SELECT` that passes parser checks with allow-lists of views and functions, and for staff and managers every view the query reads is replaced by one holding only their department's rows.
+- Text-to-SQL runs only a single `SELECT` that passes parser checks with allow-lists of views and functions, and for staff and managers every view the query reads is replaced by one holding only their department's rows. The query runs as a database role that can read only those views, under row-level security on the tables behind them, so the database keeps the department too.
 
 ### Testing approach
 - Web-layer slice tests with Kafka and the repositories mocked, so that broker failures, timeouts and interrupts can be triggered on demand and each failure path has a regression test.

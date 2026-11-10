@@ -20,7 +20,7 @@ An assistant for live-commerce operations staff. One entry point answers SOP and
 
 **Principle:** the project analyzes content and results with AI; it does not recompute analytics. Clean numbers go in SQL columns, narrative (SOPs, plans, reviews) goes through RAG, and data other teams already computed is uploaded, not calculated here.
 
-**Status:** upload, approval, ingestion, reranking and document answers through `/query` are implemented. For Text-to-SQL, the data dictionary, the metric views (V9), the fixed pipeline with its parser checks and department filter, and a baseline agent for the evaluation exist, not reachable from `/query`; routing, the read-only role, row-level security, cache and memory are not built yet (`app/router` and `app/memory` are empty packages).
+**Status:** upload, approval, ingestion, reranking and document answers through `/query` are implemented. For Text-to-SQL, the data dictionary, the metric views (V9), the fixed pipeline with its parser checks and department filter, run as a read-only role under row-level security (V11), and a baseline agent for the evaluation exist, not reachable from `/query`; routing, cache and memory are not built yet (`app/router` and `app/memory` are empty packages).
 
 **Language:** documents and questions are in English. There is no cross-language retrieval.
 
@@ -73,7 +73,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Start Postgres, Flyway, Redis, Kafka | `docker compose up -d` (repo root) |
 | Apply migrations | `docker compose run --rm flyway migrate` |
 | Python setup | `cd llm-service` · `uv venv` · `uv pip install -r requirements.txt` |
-| Create topics · mock data · SQL examples | `uv run python -m scripts.init_topics` · `uv run python -m scripts.generate_mock_data` · `uv run python -m scripts.load_sql_examples` (after editing `app/sql_agent/examples.yaml`) |
+| Create topics · mock data · SQL examples · the SQL reader's login | `uv run python -m scripts.init_topics` · `uv run python -m scripts.generate_mock_data` · `uv run python -m scripts.load_sql_examples` (after editing `app/sql_agent/examples.yaml`) · `uv run python -m scripts.enable_sql_reader` (after the migrations, with `SQL_READER_PASSWORD` in `.env`) |
 | Evaluation corpus: what's in it · load it · the questions | `uv run python -m scripts.generate_corpus --report` · `uv run python -m scripts.ingest_corpus` (needs the backend, Kafka and the consumer) · `uv run python -m scripts.generate_questions --report` · review: `uv run python -m evaluation.review` |
 | Evaluation run (needs Postgres with the corpus; about $0.27 on `dev`, almost all grading) | `uv run python -m evaluation.run --split dev --name <name>` · SQL: `uv run python -m evaluation.sql_run --split dev --name <name>` (the agent; `--pipeline --dictionary --views --examples 3 --retries 2` for the query path's pipeline, about $0.01) · results in `eval/results/`, what they mean in `docs/eval-report.md` |
 | Reranker (optional, about 5 GB of memory; queries keep the vector order without it) | `docker compose --profile rerank up -d reranker` (:8082) |
@@ -84,6 +84,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 
 - `generate_mock_data` empties uploads, documents and chunks through foreign keys. After `docker compose down -v`, rerun topics and mock data.
 - A database authentication error usually means the wrong port: check `POSTGRES_PORT` first, because a native Postgres may hold 5432.
+- As `ops`, the metric views return no rows until the transaction sets `app.department` or `app.all_departments = 'on'`: they read their tables under row-level security (V11). The tables themselves show `ops` every row.
 - In Git Bash, put `MSYS_NO_PATHCONV=1` before `docker exec ... /opt/...`. Never choose "Reset to factory defaults" in Docker Desktop: it wipes the volumes.
 
 ### Architecture
@@ -97,7 +98,7 @@ backend-service/       Spring Boot: REST API, permissions, approval, outbox rela
 llm-service/app/       Python: ingestion and the query path
   consumers/           consume loop, handlers (documents), data_tables (CSV), storage, events
   rag/                 parsing/, chunking, document_fields, embeddings, store, retrieval, reranking, query_models, answering
-  sql_agent/           schema (what a model is shown of the database), guard (the parser checks and the department filter), execute (one read-only SELECT), examples, pipeline
+  sql_agent/           schema (what a model is shown of the database), guard (the parser checks, the department filter and the row limit), execute (one read-only SELECT), examples, pipeline
   server.py            starts the API; query_api.py: POST /query, for the backend only
   time_budget.py       one time budget per message or query
 llm-service/evaluation/   the dataset's format, how a label finds today's chunks, the runs and their grader, the SQL baseline agent; not part of the service
@@ -130,7 +131,7 @@ Key patterns:
 - Java: PascalCase classes, camelCase members; a package per domain. Python: snake_case, type hints, frozen dataclasses for records.
 - Database: snake_case, plural tables, `timestamptz` named `created_at` / `updated_at`. JSON on the wire is camelCase; enum values are lowercase.
 - Comments say why, including measurements behind a decision. They describe the system, never the order it was built in or any schedule.
-- SQL parameters only, never concatenated values. A table name may come only from an enum or a constant, never from a request or a message.
+- SQL parameters only, never concatenated values. `SET` and `ALTER ROLE` take no parameters: compose their values with psycopg's `sql.Literal`. A table name may come only from an enum or a constant, never from a request or a message.
 
 ### Testing strategy
 
@@ -191,7 +192,7 @@ A new document for one's own department takes effect at once. Replacing anything
 - Never read, print or commit `.env` or secrets such as `OPENAI_API_KEY`. `.env.example` has placeholders only, and secrets never go into images.
 - `X-User-Id` is simulated identity: anyone can forge it (#5). State that accurately; the authorization rules are real, the authentication isn't yet.
 - Client file names are hostile: `UploadStorage.sanitizeFilename` and `resolve_upload_path` defend against path traversal. Keep both.
-- Generated SQL gets several layers; no single one is enough. Implemented: parser checks with allow-lists (`guard.py`), the department filter added to every view a query reads, and a read-only transaction with time and row limits. Planned: a read-only role that can read only the views, and row-level security.
+- Generated SQL gets several layers; no single one is enough: parser checks with allow-lists (`guard.py`), the department filter added to every view a query reads, a read-only transaction with time and row limits, the role `sql_reader` that can read only the views, and row-level security on the tables behind them, with `set_config` revoked so a query can't change its department (V11). The fixed reads of the pipeline (catalog, names, examples) run as `ops`; only the model's query runs as `sql_reader`.
 
 ## Changelog
 
@@ -207,3 +208,4 @@ A new document for one's own department takes effect at once. Replacing anything
 - v10 · 2026-11-06 · Arianna · The reranker: bge-reranker-v2-m3 in its own TEI service.
 - v11 · 2026-11-07 · Arianna · LangChain for the SQL baseline; upgrade pins only when blocked.
 - v12 · 2026-11-07 · Arianna · sqlglot and the fixed Text-to-SQL pipeline, its checks and department filter.
+- v13 · 2026-11-09 · Arianna · The role generated SQL runs as, row-level security, the row limit; `sql.Literal` for `SET`.

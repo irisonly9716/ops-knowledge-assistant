@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import psycopg
+from psycopg.sql import SQL, Identifier, Literal
 
 from app import db
 
@@ -42,6 +43,29 @@ def throwaway_database() -> Iterator[str]:
     finally:
         with db.connect() as admin:
             admin.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
+
+
+@contextmanager
+def login_in(group: str) -> Iterator[tuple[str, str]]:
+    """A login of its own in a group role of migration V11 (sql_reader or sql_views), dropped at the end, so tests never
+    use or change sql_reader's own password. Roles belong to the cluster, hence the unique name; the group exists once
+    a throwaway database has had its migrations. A member gets the group's privileges, not its settings: run_select
+    sets the read-only transaction and the time limit itself."""
+    name, password = f"oka_test_{group}_{uuid.uuid4().hex[:8]}", uuid.uuid4().hex
+    with db.connect() as admin:
+        admin.execute(SQL("CREATE ROLE {} LOGIN PASSWORD {} IN ROLE {}").format(Identifier(name), Literal(password),
+                                                                               Identifier(group)))
+    try:
+        yield name, password
+    finally:
+        with db.connect() as admin:
+            admin.execute(SQL("DROP ROLE {}").format(Identifier(name)))
+
+
+def connect_as(dbname: str, login: tuple[str, str]) -> psycopg.Connection:
+    user, password = login
+    return psycopg.connect(host=db.settings.postgres_host, port=db.settings.postgres_port, dbname=dbname, user=user,
+                           password=password, autocommit=True, connect_timeout=db.CONNECT_TIMEOUT_SECONDS)
 
 
 def seed_two_departments(conn: psycopg.Connection) -> None:

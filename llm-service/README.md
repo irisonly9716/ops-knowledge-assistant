@@ -42,7 +42,7 @@ app/
 ├── main.py        the FastAPI app: startup checks, error shape, /health
 ├── query_api.py   POST /query: internal token, request and response format, time limit, failures to status codes
 ├── config.py      environment variables (the repository-root .env)
-├── db.py          Postgres: sync connections for ingestion, the async read-only pool for queries
+├── db.py          Postgres: sync connections for ingestion, async read-only pools for queries and for generated SQL
 ├── time_budget.py one time budget per message or query, shared by all its layers
 ├── consumers/     Kafka consumer (the document pipeline), a separate worker process
 │   ├── upload_consumer.py   consume loop: manual commits + retries + dead-letter topic + graceful shutdown; entry point main()
@@ -62,7 +62,7 @@ app/
 │   └── answering.py         a question to an answer: threshold, prompt, citation check, refusal
 ├── sql_agent/     Text-to-SQL
 │   ├── schema.py            what a model is shown: views or tables, the data dictionary, the names in the data
-│   ├── guard.py             the checks a generated query passes (sqlglot, allow-lists) and the department filter
+│   ├── guard.py             the checks a generated query passes (sqlglot, allow-lists), the department filter, the row limit
 │   ├── execute.py           one SELECT, read-only, with the asker's department set, time and row limits
 │   ├── examples.py          the example questions closest to a question; examples.yaml holds them
 │   └── pipeline.py          a question to an answer: examples, write, check, run, retry with the error, explain
@@ -390,6 +390,7 @@ installed next to openai 3.29. Results and what they mean: [docs/eval-report.md]
 
 ```bash
 uv run python -m scripts.load_sql_examples   # the example questions, with their embeddings; after editing examples.yaml
+uv run python -m scripts.enable_sql_reader   # once: sql_reader's login, with SQL_READER_PASSWORD in .env
 uv run python -m evaluation.sql_run --split dev --name pipeline --pipeline --dictionary --views --examples 3 --retries 2
 ```
 
@@ -399,14 +400,18 @@ reachable from `/query` until routing exists:
 1. **Context.** The five metric views with their comments, the names in the data (the asker's department's only) and
    the 3 example questions closest to the question, among the asker's department's and those for every department. The
    views' description is read once per process; the names and examples on every question, while one connection is held.
+   These reads are fixed SQL with bound parameters and run as `ops`, like the rest of the query path.
 2. **Write.** One model call (`SQL_MODEL`, apart from the model that explains) writes one query, or the fixed word
    `NOT_IN_DATA` when nothing listed holds what the question is about. A question asking why or what to change still
    gets a query: the numbers about what it names. The prompt ends with the question to write the query for: ending it
    with "Question: ..." after the examples, the model once replied with its query and two more made-up examples.
 3. **Check** (`guard.py`): one SELECT, only the views, allow-listed functions and plain casts, and for staff and
-   managers every view becomes a subquery holding only their department's rows. What runs is regenerated from the
-   checked tree. Why each rule: "Filtering data" in [docs/permission-model.md](../docs/permission-model.md).
-4. **Run** in a read-only transaction with the department set, at most 5 s (or what is left of the budget) and 200 rows.
+   managers every view becomes a subquery holding only their department's rows. The outer query gets `LIMIT 201`
+   unless its own is smaller. What runs is regenerated from the checked tree. Why each rule: "Filtering data" in
+   [docs/permission-model.md](../docs/permission-model.md).
+4. **Run** as `sql_reader` (`db.sql_pool`), which can read only the views, under row-level security, in a read-only
+   transaction that sets the department (`app.department`, or `app.all_departments` for executives and admins), at
+   most 5 s (or what is left of the budget) and 200 rows kept.
 5. **Retry.** A query that is refused or fails in the database goes back to the model with every failure so far, at
    most `SQL_RETRIES` (2) times. Only errors in the query itself: the database unreachable is not the query's fault.
 6. **Explain.** A second model call words the result in a few sentences; the asker also gets the query and its rows,
@@ -435,7 +440,8 @@ addresses included. Measured: `langchain` and `langchain-openai` add 7 packages 
 - **Bounded**: at most 8 model calls of 30 s each with no retries, 5 s and 200 rows a query, 120 s a question.
 - **Read-only**: queries run on the query path's read-only connections, and `execute.run_select` opens a read-only
   transaction of its own. That is one layer of the several generated SQL gets; nothing here is reachable from
-  `/query`.
+  `/query`. It runs as the tables' owner and sees every department (`app.all_departments`): it is scored on naming
+  the asker's department itself, and the views apply row-level security to the owner too.
 - **Scored on the last query that ran** (`evaluation/metrics.py`): the same number of rows as the gold result, each
   holding its gold row's numbers within 0.5%, or all its values when it has none. A gold result often carries the
   campaign's name and dates next to the number asked for, and a query that returns only the number answers the
@@ -457,3 +463,7 @@ skipped when Postgres isn't running.
 and asserts that the `DocType` / `TableType` / `ContentKind` / `Source` enums match the corresponding CHECK
 constraints. If someone changes the SQL and forgets the Python, the test fails.
 One test is skipped on Windows (symlinks need administrator rights); that is expected.
+`test_sql_security.py` checks the database layer under generated SQL (migration V11) on a throwaway database, as
+logins of its own in the `sql_reader` and `sql_views` roles, so it never uses or changes `sql_reader`'s password. One
+of its tests runs only once `SQL_READER_PASSWORD` is set: that applying the migrations to another database left
+`sql_reader`'s login alone, since roles are shared by every database.

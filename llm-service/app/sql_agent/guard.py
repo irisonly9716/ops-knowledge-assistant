@@ -11,17 +11,20 @@ can't differ (on the development data, 167 queries regenerated this way returned
 
 For staff and managers every relation the query reads is replaced by a subquery holding only their department's rows,
 whatever the query says. The department is not in the SQL text: the subquery reads it from the setting app.department,
-which the code sets with a bound parameter in the same transaction (execute.run_select). A query can't change that
-setting itself, because set_config and current_setting aren't on the function allow-list. Without the setting a
-filtered query reads no department: on a connection that never had it, current_setting is an error; on one that did,
-it stays defined there, empty, and matches no rows.
+which the code sets in the same transaction (execute.run_select), and which row-level security reads too (migration
+V11). A query can't change that setting itself, because set_config and current_setting aren't on the function
+allow-list, and the database refuses set_config to the role queries run as. Without the setting a filtered query reads
+no department: on a connection that never had it, current_setting is an error; on one that did, it stays defined
+there, empty, and matches no rows.
+
+Every query returns at most ROW_LIMIT rows: the outer query gets a LIMIT, or keeps its own if that is smaller.
 """
 from collections.abc import Mapping
 
 import sqlglot
 from sqlglot import exp
 
-from app.sql_agent.execute import SqlRejected
+from app.sql_agent.execute import MAX_ROWS, SqlRejected
 
 # A relation and the subquery that keeps one department's rows of it. Every metric view has the department's name
 DEPARTMENT = "current_setting('app.department')"
@@ -56,6 +59,10 @@ ALLOWED_TYPES = frozenset({
 })
 # Anywhere in the tree: writing (also inside WITH), SELECT INTO, FOR UPDATE, and parameters nobody would bind
 _FORBIDDEN = (exp.DML, exp.DDL, exp.Command, exp.Into, exp.Lock, exp.Placeholder, exp.Parameter)
+# One more than run_select keeps, so it can still tell a result was cut off. In the query, so Postgres stops there:
+# psycopg receives a whole result before handing over any of it, and a query returning 2 million rows took 2.0 s and
+# 156 MB more memory to keep 200 of them, against 0.2 s and none with this limit
+ROW_LIMIT = MAX_ROWS + 1
 
 
 def checked(sql: str, relations: Mapping[str, str], *, one_department: bool) -> str:
@@ -96,6 +103,7 @@ def checked(sql: str, relations: Mapping[str, str], *, one_department: bool) -> 
 
     if one_department:
         tree = tree.transform(lambda node: _one_department(node, relations))
+    _limit_rows(tree, ROW_LIMIT)
     return tree.sql(dialect="postgres", comments=False)
 
 
@@ -127,6 +135,30 @@ def _visible_ctes(table: exp.Table) -> set[str]:
             names |= {_name(cte.args["alias"].this) for cte in node.args["with_"].expressions}
         child, node = node, node.parent
     return names
+
+
+def _limit_rows(tree: exp.Query, most: int) -> None:
+    """The outer query returns at most `most` rows. A limit the query has keeps its meaning: a smaller number stays, one
+    that isn't a number is capped with LEAST. Limits inside it are left alone: only the outer one decides how many rows
+    come back."""
+    limit = tree.args.get("limit")
+    if isinstance(limit, exp.Fetch):
+        options = limit.args.get("limit_options")
+        if options is not None and options.args.get("with_ties"):
+            # Ties can return any number of rows past the count, and LIMIT has no such form
+            raise SqlRejected("FETCH ... WITH TIES is not allowed: use LIMIT")
+        if limit.args.get("count") is not None:
+            limit.set("count", _at_most(limit.args["count"], most))
+    elif limit is None or (isinstance(limit.expression, exp.Var) and limit.expression.name.upper() == "ALL"):
+        tree.set("limit", exp.Limit(expression=exp.Literal.number(most)))
+    else:
+        limit.set("expression", _at_most(limit.expression, most))
+
+
+def _at_most(count: exp.Expression, most: int) -> exp.Expression:
+    if isinstance(count, exp.Literal) and count.is_int:
+        return exp.Literal.number(min(int(count.name), most))
+    return exp.Least(this=count.copy(), expressions=[exp.Literal.number(most)])
 
 
 def _one_department(node: exp.Expression, relations: Mapping[str, str]) -> exp.Expression:

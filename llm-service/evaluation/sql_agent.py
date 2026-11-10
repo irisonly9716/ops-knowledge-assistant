@@ -116,8 +116,10 @@ def make_tools(pool: AsyncConnectionPool, run: AgentRun, *, role: str, departmen
         executed = Executed(sql)
         run.queries.append(executed)
         try:
+            # The baseline sees every department and is scored on naming the asker's itself. The views apply
+            # row-level security to whoever reads them (migration V11), the tables' owner too, so that takes asking
             async with pool.connection() as conn:
-                executed.result = await run_select(conn, sql)
+                executed.result = await run_select(conn, sql, every_department=True)
         except (SqlRejected, psycopg.Error) as error:
             executed.error = f"{type(error).__name__}: {error}"[:500]
         executed.ms = (time.perf_counter() - started) * 1000

@@ -15,6 +15,10 @@ has such data or nothing does.
 
 The database connection is held for the reads before the model writes and for running a query, never while waiting for
 a model (AGENTS.md). The views' descriptions are read once per process: they change only with a migration.
+
+Two pools. The model's queries run on reader_pool, as sql_reader (migration V11): it can read the views and nothing
+else, under row-level security. The reads written here, with bound parameters, run on pool, as the rest of the query
+path does: the catalog, the names in the data and the example questions, which are in tables the reader can't read.
 """
 import logging
 import re
@@ -169,13 +173,14 @@ def written_query(reply: str) -> str:
 
 class SqlService:
     def __init__(self, embedder: QueryEmbedder | None, writer: AnswerModel, explainer: AnswerModel, pool: Any,
-                 options: SqlOptions):
+                 reader_pool: Any, options: SqlOptions):
         if options.examples and embedder is None:
             raise ValueError("examples need an embedder to find the closest ones")
         self._embedder = embedder
         self._writer = writer
         self._explainer = explainer
         self._pool = pool
+        self._reader_pool = reader_pool
         self._options = options
         self._described: str | None = None
 
@@ -263,9 +268,11 @@ class SqlService:
                         explainer_tokens)
 
     async def _run(self, sql: str, department: str | None, budget: TimeBudget) -> QueryResult:
+        """department: the asker's one department, or None for an asker who may see them all (visible_department has
+        already refused anyone else)."""
         remaining_ms = int(budget.remaining() * 1000)
         if remaining_ms <= 0:
             raise TimeoutError("the time budget ran out before the query could run")
-        async with self._pool.connection(timeout=budget.remaining()) as conn:
-            return await run_select(conn, sql, department=department,
+        async with self._reader_pool.connection(timeout=budget.remaining()) as conn:
+            return await run_select(conn, sql, department=department, every_department=department is None,
                                     timeout_ms=min(STATEMENT_TIMEOUT_MS, remaining_ms))

@@ -20,6 +20,8 @@ def main() -> None:
             sql = guard.checked(example.sql, guard.METRIC_VIEWS, one_department=False)
             with conn.transaction():
                 conn.execute("SET TRANSACTION READ ONLY")
+                # Every department's rows: the views apply row-level security to the tables' owner too (V11)
+                conn.execute("SET LOCAL app.all_departments = 'on'")
                 conn.execute(sql).fetchall()
         embedder = openai_embedder_from_settings()
         batch = embed_in_batches(embedder, [example.question for example in loaded])

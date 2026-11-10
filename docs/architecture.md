@@ -236,8 +236,8 @@ backend /query
       │               in the prompt
       │             - generate SQL; sqlglot checks the syntax tree: one SELECT, allow-listed views and functions;
       │               every view it reads becomes a subquery holding only the user's department's rows
-      │             - execute in a read-only transaction with a statement timeout and a row limit; later as a
-      │               read-only role that can only read the views, with row-level security on the tables
+      │             - execute as a read-only role that can only read the views, in a read-only transaction
+      │               with a statement timeout and at most 201 rows, under row-level security on the tables
       │             - on an error, show the model the error and generate again (2 retries at most)
       │             - result, explained in a few sentences
       │
@@ -259,8 +259,8 @@ TTL is only a safety net.
 **What exists today:** the backend's `/query`, the internal token, the search with its department filter and the
 reranker, and steps 1 and 5 for documents, with citations and refusals. For Text-to-SQL, the data dictionary, the
 metric views, the fixed pipeline with its checks and department filter, and a baseline agent, both measured on the
-evaluation dataset; none of it is reachable from `/query` until routing exists. Rewriting, cache, routing, the
-read-only role and row-level security are still to come. Details
+evaluation dataset, with the read-only role and row-level security under it; none of it is reachable from `/query`
+until routing exists. Rewriting, cache and routing are still to come. Details
 and measurements: "The query path" in [llm-service/README.md](../llm-service/README.md). How well it answers, measured on the evaluation
 dataset, and why the refusal threshold and the answer instructions are what they are:
 [eval-report.md](eval-report.md).
@@ -299,10 +299,21 @@ Design decisions so far:
   spends.
 - **The department filter on generated SQL is code, not an instruction.** sqlglot replaces every view a query reads with
   a subquery holding only the asker's department's rows. The department isn't in the SQL text: the subquery reads the
-  setting `app.department`, which the code sets with a bound parameter in the same transaction, and a query can't set
-  it itself because the function allow-list has neither `set_config` nor `current_setting`. What runs is regenerated
+  setting `app.department`, which the code sets with `SET LOCAL` in the same transaction, and a query can't set it
+  itself because the function allow-list has neither `set_config` nor `current_setting`. What runs is regenerated
   from the checked tree, never the model's text, so what was checked is what runs: 167 queries regenerated this way
   returned the same rows as their originals.
+- **The database keeps the department too.** The model's query runs as `sql_reader`, which can read the five views and
+  nothing else, and row-level security on the tables behind them reads the same setting, so either layer holds if the
+  other has a bug. The views belong to a role of their own that is subject to row-level security: owned by `ops` they
+  would bypass it, and read as the asker (`security_invoker`) they need the asker to read the tables. `set_config` is
+  revoked, because a `SELECT` can call it and change the department halfway through the query; `SET LOCAL` is a
+  statement and can't be part of one. Reading every campaign's summary took 2.6 ms under row-level security against
+  1.6 ms without it (1.0 ms for one department), on a copy of the development data: next to model calls of a second
+  or more, it doesn't show.
+- **Generated SQL returns at most 201 rows**, by a `LIMIT` on the outer query, so Postgres stops there: psycopg
+  receives a whole result before handing over any of it, and 2 million rows took 2.0 s and 156 MB more memory to keep
+  200 of them, against 0.2 s with the limit.
 
 ## Ports (local development)
 

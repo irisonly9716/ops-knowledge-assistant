@@ -106,6 +106,12 @@ class Settings(BaseSettings):
     # How many times a query is written again after it fails, with the error shown to the model. Each is a model call
     # inside the query's time budget
     sql_retries: int = 2
+    # The password of sql_reader, the role generated SQL runs as (migration V11). The migration creates the role
+    # without a login; scripts.enable_sql_reader sets this password. No default, as for Postgres
+    sql_reader_password: str = ""
+    # Per process, for generated queries only: the other reads of a data question use query_pool_size. A connection is
+    # held while one query runs, 5 s at most
+    sql_pool_size: int = 5
 
     llm_service_host: str = "127.0.0.1"
     llm_service_port: int = 8000

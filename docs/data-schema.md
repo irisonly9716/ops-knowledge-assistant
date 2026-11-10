@@ -168,9 +168,8 @@ from the catalog at run time, so a model sees the definitions in the migrations,
 - **`avg_conversion_rate` is the mean of the daily rates**, each day counting the same. Averaging several
   campaigns' values weighs each campaign the same; averaging their daily rows weighs longer campaigns more.
   The column comment says so, because a question can mean either.
-- **`security_invoker = true` on every view.** A view normally reads its tables as its owner, and the owner
-  isn't subject to row-level security, so a view would bypass it. With this option the tables are read as
-  whoever queries the view (PostgreSQL 15 and later).
+- **The views read their tables as `sql_views`**, under row-level security (V11, below). V9 created them with
+  `security_invoker`, which reads the tables as whoever queries the view; V11 turned it off.
 - **No view has `ip_address`**, and the schema a model is shown leaves it out of the table too: personal data
   no question needs.
 - Campaign and department are carried as names (`department = 'Beauty'`), the way questions name them. Every view
@@ -192,6 +191,27 @@ every query first and replaces the table in one transaction: the file is the sou
 
 - No vector index: with tens of rows an exact scan is faster than an index and never misses one.
 - The examples for `ALL` name no real department, campaign or product (a test checks), because everyone is shown them.
+
+### The role generated SQL runs as, and row-level security (V11)
+
+| Role | Logs in | May read | Row-level security |
+|---|---|---|---|
+| `sql_reader` | yes, once `scripts.enable_sql_reader` set its password | the five metric views | applies |
+| `sql_views` | no | the six tables behind the views, without `ip_address`; owns the views | applies |
+| `ops` | yes | everything; owns the tables | not on its own tables, but through the views it does |
+
+- The six tables (`departments`, `hosts`, `campaigns`, `campaign_metrics`, `campaign_products`,
+  `campaign_customer_behavior`) have one `SELECT` policy each, `asker_can_see`. Only `departments` compares names with
+  the transaction's `app.department` (or lets every row through when `app.all_departments` is `'on'`); `hosts` and
+  `campaigns` keep the rows of the departments left, the other three those of the campaigns left. A table added under
+  `campaigns` needs the same one-line policy, not the department rule again.
+- A view owned by `ops` would bypass the policies, so the views belong to `sql_views`, which owns no table. A new view
+  needs `ALTER VIEW ... OWNER TO sql_views` and `GRANT SELECT ... TO sql_reader`; `CREATE OR REPLACE VIEW` keeps the
+  owner.
+- `set_config(text, text, boolean)` is revoked from `PUBLIC` in this database: `ops` keeps it as a superuser.
+- Roles belong to the whole Postgres cluster, not to one database, so the migration creates them only when missing and
+  never sets `sql_reader`'s login: the tests apply every migration to databases of their own.
+- Why each of these: "Filtering data" in [permission-model.md](permission-model.md).
 
 ## Document tables (SOP / campaign plan / post-campaign review)
 
