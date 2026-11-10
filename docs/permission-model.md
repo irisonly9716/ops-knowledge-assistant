@@ -73,8 +73,9 @@ manager's request can only go to the `executive`, who sees every department.
   is designed but not implemented. The accurate statement is: the authorization rules are real and
   enforced by the database; authentication is simulated.
 - Separation of duties governs actions taken through the system. A developer connected directly to the
-  database can still change anything; a real environment constrains that with separate database accounts
-  (migration, application and read-only accounts) plus operation auditing.
+  database can still change anything. Generated SQL already runs as an account of its own (`sql_reader`, below);
+  migrations, the backend and the consumers still share `ops`, which a real environment would split, with
+  operation auditing.
 
 ## 2. Filtering data (Text-to-SQL)
 
@@ -85,18 +86,46 @@ manager's request can only go to the `executive`, who sees every department.
   - `role in (staff, manager)` → every view the query reads, wherever it appears (joins, subqueries, `WITH`,
     `UNION`), is replaced by `(SELECT * FROM view WHERE department = current_setting('app.department'))` under
     the name the query uses for it. Adding a `WHERE` to the outer query instead would miss a view read in a subquery
-  - the department is set for the transaction with `set_config('app.department', %s, true)`, a bound parameter, and
-    never written into the SQL text. A query can't change it: the function allow-list has neither `set_config` nor
-    `current_setting`. Without the setting a filtered query reads no department: an error, or no rows on a pooled
-    connection that had it before
-  - `role in (executive, admin)` → no filter
+  - the department is set for the transaction with `SET LOCAL app.department = ...`, never written into the query.
+    A query can't change it: the function allow-list has neither `set_config` nor `current_setting`, and the database
+    refuses `set_config` (below). Without the setting a filtered query reads no department: an error, or no rows on a
+    pooled connection that had it before
+  - `role in (executive, admin)` → no filter in the query; the transaction sets `app.all_departments = 'on'` for the
+    database layer below
 - The checks before that, by parsing the query with `sqlglot` (allow-lists, because a list of dangerous things is never
   complete): one `SELECT`; only the five metric views, never a table, a system catalog or a schema-qualified name; a `WITH`
   query can't take a view's name or make a real table look like one of its own; only allow-listed functions (`pg_sleep`,
   `dblink`, `lo_import` and the like are refused) and casts to plain types (not `regclass` or `oid`); no writing, also
   inside `WITH`, no `SELECT INTO`, no `FOR UPDATE`. What runs is regenerated from the checked tree
-- Planned, not built: a read-only role that can read only the views, and row-level security on the tables reading the
-  same `app.department`, so a query that gets past the checks still sees one department
+- At most 201 rows: the outer query gets `LIMIT 201` unless its own limit is smaller (one more than the 200 kept, so a
+  result still reads as cut off). In the query, so Postgres stops there: psycopg receives a whole result before handing
+  over any of it, and 2 million rows took 2.0 s and 156 MB to keep 200, against 0.2 s with the limit
+
+The database holds the department too (migration V11), so a query that gets past the checks still sees one department:
+
+- **The model's query runs as `sql_reader`**: not a superuser, no `BYPASSRLS`, owns nothing, and may `SELECT` the five
+  views and nothing else, so no table and no `ip_address`. Read-only and 5 s by default, which the code sets anyway.
+  Only the model's query: the pipeline's own reads (the catalog, the names in the data, the examples) are fixed SQL with
+  bound parameters and run as `ops`, like the rest of the query path
+- **Row-level security on the six tables behind the views** reads the same settings. `departments` keeps the asker's
+  department, or every one when `app.all_departments` is `'on'`; `hosts` and `campaigns` keep the rows of the
+  departments left, the detail tables those of the campaigns left, so the department rule is written once. Nothing set,
+  or a setting an earlier transaction left empty on a pooled connection: no rows
+- **The views belong to `sql_views`** (no login, no `BYPASSRLS`, owns no table) and read their tables as it. A view
+  normally reads its tables as its owner: owned by `ops` it would bypass row-level security; with V9's
+  `security_invoker` it read them as whoever queried it, and a role granted only the views was refused the tables.
+  The policies read the settings of the asker's transaction, whichever role reads the tables
+- **`set_config` is revoked.** It is a function, so a `SELECT` can call it: `SELECT set_config('app.department',
+  'Fresh Grocery', true), (SELECT count(*) FROM campaign_summary)` returned another department's rows, measured before
+  revoking. `SET LOCAL` still sets it: a statement can never be part of a `SELECT`. `SET` takes no bound parameter, so
+  the department is composed into it with psycopg's `sql.Literal`, which quotes it the way Postgres reads it
+- **Each layer covers the other**: if the query filter misses a view, row-level security keeps the department; if a
+  policy is wrong, the filter does. `ops` owns the tables, so it reads them unfiltered (the backend, the consumers);
+  through the views it is filtered like everyone
+- The database believes the setting of the connection: every asker shares one login through the pool. Only the code
+  runs `SET`, before the query, and the query can't; whoever holds `sql_reader`'s password can choose any department,
+  like any database password. One login per department would close that, at the price of a pool per department in
+  every process against the 100 connections Postgres allows
 
 ## 3. Filtering documents (vector search)
 

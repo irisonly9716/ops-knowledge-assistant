@@ -330,6 +330,12 @@ data questions are wrong:
   At the median, writing takes 1.1 s, explaining 1.0 s, the embedding 0.2 s, reading the names and examples 0.05 s,
   and running the query 5 ms. 2 model calls at the median, 3 at most. About $0.0003 a question, under a third of
   the agent's. The p50 is inside the 3 s a query has before routing adds its share; the p95 isn't.
+- **Run as `sql_reader`** (`dev-sql-pipeline-reader`), once the queries ran as the read-only role under row-level
+  security with at most 201 rows ([permission-model.md](permission-model.md)): the data questions scored 85.2% again,
+  the same 4 wrong. No query failed, so the role refused nothing a question needed; the department filter was in 32 of
+  32, and no result came near the row limit. One more question on both documents and data was wrong (58.3%): the
+  model left the profit margin out of a query that was otherwise the earlier runs' own, a choice of columns, not the
+  database. p50 3.2 s: writing and explaining took 0.2 to 0.3 s longer each, running a query 6 ms against 5.
 
 ### What the prompt's wording did
 

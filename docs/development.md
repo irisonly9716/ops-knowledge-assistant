@@ -30,6 +30,10 @@ uv run python -m scripts.generate_mock_data
 #     questions, a tiny fraction of a cent). Run it again after editing app/sql_agent/examples.yaml
 uv run python -m scripts.load_sql_examples
 
+# 3c. The login of sql_reader, the role generated SQL runs as. Set SQL_READER_PASSWORD in .env first; run it again
+#     after changing the password. Needed by the Text-to-SQL pipeline on the views (evaluation.sql_run --pipeline --views)
+uv run python -m scripts.enable_sql_reader
+
 # 4. Backend (new terminal, from the repo root)
 cd backend-service
 ./mvnw spring-boot:run                # Windows: .\mvnw.cmd spring-boot:run
