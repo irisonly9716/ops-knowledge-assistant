@@ -372,6 +372,8 @@ async def test_the_pipeline_writes_a_query_runs_it_in_the_askers_department_and_
     rules, prompt = writer.prompts[0]
     assert "a staff in the Beauty department" in rules and "Today is 2026-10-15" in rules
     assert "already holds only Beauty's rows, so don't filter by department" in rules
+    assert "NOT_IN_DATA when the question asks only about another department" in rules
+    assert "comparing Beauty with other departments still gets a query for Beauty's own numbers" in rules
     assert "VIEW campaign_summary" in prompt and "ROI" in prompt            # the views with their dictionary
     assert "campaign names: Beauty Fan Day, Beauty Summer Sale" in prompt and "Grocery" not in prompt.split(
         "Examples")[0]
@@ -379,6 +381,7 @@ async def test_the_pipeline_writes_a_query_runs_it_in_the_askers_department_and_
     assert prompt.endswith("Write the query for this question:\nHow much did the summer sale bring in?")
     explained = explainer.prompts[0][1]
     assert "Beauty Summer Sale | 3000.50" in explained and "only the Beauty department" in explainer.prompts[0][0]
+    assert "name its numbers as Beauty's, never as another department's" in explainer.prompts[0][0]
     assert [e.question for e in traced.examples] == ["q beauty", "q all"] and len(traced.attempts) == 1
 
 
@@ -462,6 +465,7 @@ async def test_without_examples_nothing_is_embedded_and_an_executive_sees_every_
     assert traced.answer.result.rows == (("Beauty", "2"), ("Fresh Grocery", "1")) and traced.answer.department is None
     assert embedder.calls == 0 and "Examples" not in writer.prompts[0][1]
     assert "may see every department" in writer.prompts[0][0]
+    assert "another department" not in writer.prompts[0][0]   # nothing to refuse for an executive
 
 
 @needs_postgres

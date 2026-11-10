@@ -102,10 +102,16 @@ class SqlTrace:
 
 
 def instructions(role: str, department: str | None, today: date) -> str:
+    """For staff and managers, a question about another department alone is refused here: run on the views, which hold
+    only the asker's rows, its query returned the asker's own numbers, and the explanation put them under the other
+    department's name (4 of 4 such questions on eval/unauthorized-sql-dev.jsonl did so)."""
     asker = schema.visible_department(role, department)
     who = (f"The question comes from a {role} in the {asker} department, who may only see that department's data. "
            f"Everything listed below already holds only {asker}'s rows, so don't filter by department for that."
            if asker else f"The question comes from an {role}, who may see every department's data.")
+    other = (f"\n- Another department's data isn't listed here either: reply with exactly {NOT_IN_DATA} when the question "
+             f"asks only about another department. A question comparing {asker} with other departments still gets a "
+             f"query for {asker}'s own numbers." if asker else "")
     return f"""You write one PostgreSQL query that answers a question about a live-commerce company's livestream campaigns.
 
 {who} Today is {today.isoformat()}.
@@ -122,7 +128,7 @@ Rules:
 names, such as a campaign's results against its plan or its products' sales and returns. The reasons and advice come \
 from documents elsewhere.
 - Reply with exactly {NOT_IN_DATA} only when nothing listed below holds what the question is about, such as the weather \
-or salaries. A question about a campaign, product, host, region or number listed here always gets a query."""
+or salaries. A question about a campaign, product, host, region or number listed here always gets a query.{other}"""
 
 
 def build_prompt(question: str, described: str, values: str, examples: Sequence[sql_examples.Example],
@@ -143,8 +149,9 @@ def build_prompt(question: str, described: str, values: str, examples: Sequence[
 
 
 def explain_instructions(department: str | None) -> str:
-    scope = (f"- The result covers only the {department} department's data. If the question asks about other "
-             "departments, say that their data isn't available to you.\n" if department else "")
+    scope = (f"- The result covers only the {department} department's data: name its numbers as {department}'s, never "
+             "as another department's. If the question asks about other departments, say that their data isn't "
+             "available to you.\n" if department else "")
     return f"""You explain the result of a database query to an employee of a live-commerce company, in a few sentences at most.
 
 Rules:
