@@ -7,11 +7,13 @@ from types import SimpleNamespace
 import httpx
 import openai
 import pytest
+from pydantic import BaseModel
 
 from app.config import settings
 from app.rag import query_models
 from app.rag.embeddings import EMBEDDING_DIMENSIONS
-from app.rag.query_models import ModelBusy, ModelCallLimit, OpenAIAnswerModel, OpenAIQueryEmbedder
+from app.rag.query_models import (ModelBusy, ModelCallLimit, OpenAIAnswerModel, OpenAIQueryEmbedder,
+                                  OpenAIStructuredModel)
 from app.time_budget import TimeBudget
 
 
@@ -149,6 +151,38 @@ async def test_embedding_a_question_retries_inside_the_budget_too():
     await embedder.embed_question("Why?", TimeBudget(10))
     assert len(api.calls) == 2
     assert len(sleeps) == 1
+
+
+class FakeParseApi(FakeApi):
+    async def parse(self, **kwargs):
+        return await self.create(**kwargs)
+
+
+class Shape(BaseModel):
+    route: str
+
+
+def structured_model(api):
+    return OpenAIStructuredModel(SimpleNamespace(responses=api), "gpt-test", ModelCallLimit(50, 1.0), 10.0, 200)
+
+
+@pytest.mark.anyio
+async def test_a_structured_request_asks_for_the_shape_without_reasoning_or_storing():
+    parsed = Shape(route="data")
+    api = FakeParseApi(SimpleNamespace(output_parsed=parsed, status="completed",
+                                       usage=SimpleNamespace(input_tokens=300, output_tokens=20)))
+    answer = await structured_model(api).ask("instructions", "the question", Shape, TimeBudget(10))
+    sent = api.calls[0]
+    assert sent["text_format"] is Shape and sent["input"] == "the question" and sent["instructions"] == "instructions"
+    assert sent["reasoning"] == {"effort": "none"} and sent["store"] is False and sent["max_output_tokens"] == 200
+    assert (answer.value, answer.input_tokens, answer.output_tokens) == (parsed, 300, 20)
+
+
+@pytest.mark.anyio
+async def test_a_structured_reply_that_did_not_complete_has_no_value():
+    api = FakeParseApi(SimpleNamespace(output_parsed=Shape(route="da"), status="incomplete",
+                                       usage=SimpleNamespace(input_tokens=300, output_tokens=200)))
+    assert (await structured_model(api).ask("i", "q", Shape, TimeBudget(10))).value is None
 
 
 def test_the_sdks_own_retries_are_off(monkeypatch):

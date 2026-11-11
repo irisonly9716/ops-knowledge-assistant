@@ -20,7 +20,7 @@ An assistant for live-commerce operations staff. One entry point answers SOP and
 
 **Principle:** the project analyzes content and results with AI; it does not recompute analytics. Clean numbers go in SQL columns, narrative (SOPs, plans, reviews) goes through RAG, and data other teams already computed is uploaded, not calculated here.
 
-**Status:** upload, approval, ingestion, reranking and document answers through `/query` are implemented. For Text-to-SQL, the data dictionary, the metric views (V9), the fixed pipeline with its parser checks and department filter, run as a read-only role under row-level security (V11), and a baseline agent for the evaluation exist, not reachable from `/query`; routing, cache and memory are not built yet (`app/router` and `app/memory` are empty packages).
+**Status:** upload, approval, ingestion, reranking and document answers through `/query` are implemented. For Text-to-SQL, the data dictionary, the metric views (V9), the fixed pipeline with its parser checks and department filter, run as a read-only role under row-level security (V11), and a baseline agent for the evaluation exist, not reachable from `/query`. The router (`app/router`: documents, data, both or none, by a model with structured output) is built and measured but not wired in yet; cache and memory are not built (`app/memory` is an empty package).
 
 **Language:** documents and questions are in English. There is no cross-language retrieval.
 
@@ -75,7 +75,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Python setup | `cd llm-service` · `uv venv` · `uv pip install -r requirements.txt` |
 | Create topics · mock data · SQL examples · the SQL reader's login | `uv run python -m scripts.init_topics` · `uv run python -m scripts.generate_mock_data` · `uv run python -m scripts.load_sql_examples` (after editing `app/sql_agent/examples.yaml`) · `uv run python -m scripts.enable_sql_reader` (after the migrations, with `SQL_READER_PASSWORD` in `.env`) |
 | Evaluation corpus: what's in it · load it · the questions | `uv run python -m scripts.generate_corpus --report` · `uv run python -m scripts.ingest_corpus` (needs the backend, Kafka and the consumer) · `uv run python -m scripts.generate_questions --report` · review: `uv run python -m evaluation.review` |
-| Evaluation run (needs Postgres with the corpus; about $0.27 on `dev`, almost all grading) | `uv run python -m evaluation.run --split dev --name <name>` · SQL: `uv run python -m evaluation.sql_run --split dev --name <name>` (the agent; `--pipeline --dictionary --views --examples 3 --retries 2` for the query path's pipeline, about $0.01) · SQL ablation table from its runs: `uv run python -m evaluation.sql_ablation --split dev` · leak check: `uv run python -m evaluation.sql_leak --name <name>` · results in `eval/results/`, what they mean in `docs/eval-report.md` |
+| Evaluation run (needs Postgres with the corpus; about $0.27 on `dev`, almost all grading) | `uv run python -m evaluation.run --split dev --name <name>` · SQL: `uv run python -m evaluation.sql_run --split dev --name <name>` (the agent; `--pipeline --dictionary --views --examples 3 --retries 2` for the query path's pipeline, about $0.01) · SQL ablation table from its runs: `uv run python -m evaluation.sql_ablation --split dev` · leak check: `uv run python -m evaluation.sql_leak --name <name>` · routing: `uv run python -m evaluation.route_run --split dev --name <name>` · results in `eval/results/`, what they mean in `docs/eval-report.md` |
 | Reranker (optional, about 5 GB of memory; queries keep the vector order without it) | `docker compose --profile rerank up -d reranker` (:8082) |
 | Run backend (:8081) | `cd backend-service` · `.\mvnw.cmd spring-boot:run` |
 | Run consumer · LLM API (:8000) | `uv run python -m app.consumers.upload_consumer` · `uv run python -m app.server --reload` (not plain `uvicorn`: async psycopg needs the event loop it chooses) |
@@ -99,6 +99,7 @@ llm-service/app/       Python: ingestion and the query path
   consumers/           consume loop, handlers (documents), data_tables (CSV), storage, events
   rag/                 parsing/, chunking, document_fields, embeddings, store, retrieval, reranking, query_models, answering
   sql_agent/           schema (what a model is shown of the database), guard (the parser checks, the department filter and the row limit), execute (one read-only SELECT), examples, pipeline
+  router/              routing: which paths a question takes, with the keyword rule as fallback
   server.py            starts the API; query_api.py: POST /query, for the backend only
   time_budget.py       one time budget per message or query
 llm-service/evaluation/   the dataset's format, how a label finds today's chunks, the runs and their grader, the SQL baseline agent; not part of the service
@@ -210,3 +211,4 @@ A new document for one's own department takes effect at once. Replacing anything
 - v12 · 2026-11-07 · Arianna · sqlglot and the fixed Text-to-SQL pipeline, its checks and department filter.
 - v13 · 2026-11-09 · Arianna · The role generated SQL runs as, row-level security, the row limit; `sql.Literal` for `SET`.
 - v14 · 2026-11-10 · Arianna · The SQL ablation and leak check commands.
+- v15 · 2026-11-11 · Arianna · The router and its evaluation.

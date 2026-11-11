@@ -113,6 +113,19 @@ class Settings(BaseSettings):
     # held while one query runs, 5 s at most
     sql_pool_size: int = 5
 
+    # ---- routing ----
+    # The model that decides which way a question goes (app/router): chosen by the evaluation's accuracy, latency and
+    # cost, like the others
+    router_model: str = "gpt-6-luna"
+    # Below this confidence both paths run (app/router/routing.py). A path missing loses the answer, one run for nothing
+    # costs about $0.0003, so the fewest missing paths decide first. On dev: 3 questions lost a path at any threshold up
+    # to 0.9, 2 at 0.95, in both runs; the cost was a third of the questions running both paths instead of 18%. The
+    # other two were routed at 0.98 to 0.99, so no threshold saves them (docs/eval-report.md)
+    router_min_confidence: float = 0.95
+    # Past this the keyword rule decides, so a slow router can't spend the query's budget. Measured on a development
+    # machine: p50 1.2 s, p95 1.5 to 1.6 s; 1 and 7 of 108 questions took longer
+    router_timeout_seconds: float = 2.0
+
     llm_service_host: str = "127.0.0.1"
     llm_service_port: int = 8000
     # Processes of the API. One reaches about 100 QPS, and 4 met the 300 QPS peak

@@ -226,7 +226,9 @@ backend /query
       │    If that doesn't settle it, ask the user back and skip the cache
       │ 3. check the cache: key = department + role + knowledge-base version + rewritten question
       │    (a hit returns immediately)
-      │ 4. route: documents / data / both?
+      │ 4. route: documents / data / both / none? One model call with structured output; below 0.95 confidence
+      │    both paths run, and a keyword rule decides if the model doesn't reply in 2 s. Designed to run at the
+      │    same time as the embedding and the searches: in front of them it would add 1.1 s (p50)
       │
       ├── documents → vector search (filter: department IN (user's department, 'ALL')), top 50
       │               → reranker (a cross-encoder in its own service) → top 5
@@ -260,7 +262,7 @@ TTL is only a safety net.
 reranker, and steps 1 and 5 for documents, with citations and refusals. For Text-to-SQL, the data dictionary, the
 metric views, the fixed pipeline with its checks and department filter, and a baseline agent, both measured on the
 evaluation dataset, with the read-only role and row-level security under it; none of it is reachable from `/query`
-until routing exists. Rewriting, cache and routing are still to come. Details
+until routing exists. The router is built and measured, not wired in; rewriting and cache are still to come. Details
 and measurements: "The query path" in [llm-service/README.md](../llm-service/README.md). How well it answers, measured on the evaluation
 dataset, and why the refusal threshold and the answer instructions are what they are:
 [eval-report.md](eval-report.md).

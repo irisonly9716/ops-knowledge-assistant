@@ -470,6 +470,56 @@ through the query path's pipeline as `sql_reader`, twice, with 3 controls from a
 - The same kinds of attack, written as queries and run against each layer alone, are in
   `llm-service/tests/test_sql_leaks.py` ("Filtering data" in [permission-model.md](permission-model.md)).
 
+## Routing: documents, data, both or neither
+
+```bash
+uv run python -m evaluation.route_run --split dev --name 3   # $0.007 a run
+```
+
+Every question of `dev` says which route it needs: 66 documents, 28 data, 12 both, 2 none. Four ways of routing were
+run on the same 108 questions: a keyword rule, a vote of the 5 nearest questions by embedding (leaving out a
+question's own group, whose paraphrases would give its route away), the model with structured output (`app/router`),
+and a cascade that asks the model only when the 5 nearest questions all agree. Two mistakes are counted apart,
+because they don't cost the same: a path missing loses the answer or half of it; a path extra costs a search and a
+model call. 6 questions are follow-ups, asked without the turns before them, and are left out of these numbers.
+
+| Without the follow-ups (102), run 1 / 2 | Accuracy | A path missing | A path extra | Model calls |
+|---|---|---|---|---|
+| keyword rule | 78.4% | 14 | 17 | 0 |
+| the 5 nearest questions | 69.6% | 19 | 23 | 0 |
+| the model | 84.3% / 83.3% | 3 / 3 | 18 / 18 | 102 |
+| the model, both paths below 0.95 (the query path's setting) | | 2 / 2 | 33 / 34 | 102 |
+| cascade: the 5 nearest when they all agree | 83.3% / 82.4% | 3 / 3 | 18 / 18 | 75 |
+
+- **The model, on every route**: all 28 data questions and all 12 on both right. Its mistakes are on documents
+  questions: 13 sent to both (a path extra) and 3 to data (a path missing).
+- **What the instructions had to say.** The first wording lost a path on 7 and 6 questions in two runs, all of them
+  documents questions sent to data. Three asked how results compared with their targets: the database has what
+  happened, but the targets are only in the campaign plans. One sentence saying so moved all three to both, in both
+  runs, and nothing else got worse.
+- **What is left is mostly the labels.** Of the 3 questions that still lose a path, two (a product's sales and
+  returns, the product with the strongest margin) are answered by the data alone; they are labelled documents because
+  they were written from a review. The third asks whether profit already nets the product cost, which the review
+  answers. The labels stay as reviewed: changing them after seeing the model's routes would grade the model on its
+  own answers.
+- **The threshold: 0.95.** Below it both paths run. The model's confidence means something: right on about 60% of its
+  routes between 0.7 and 0.9, and 87% from 0.9 up. But the routes that lose a path come at 0.86 to 0.99, so a
+  threshold saves little: up to 0.9 it saved no question in either run, at 0.95 the definition question in both.
+  The fewest missing paths decide first, so 0.95, at the price of a third of the questions running both paths instead
+  of 18%, about $0.0003 for each extra path.
+- **The cascade** gave the model's accuracy with a quarter fewer model calls, but the 29 questions it answered without
+  the model were nearly all easy documents questions, and it needs the labelled questions kept for the query path.
+  Not used.
+- **The keyword rule** is the fallback when the model doesn't reply within 2 s: 1 question in each run (7 in the run
+  before, a slow hour of the API).
+- **Latency: p50 1.1 s, p95 1.6 to 1.7 s a question**, on a development machine; 442 input and 41 output tokens,
+  $0.000065 a question. The network is at most 0.2 s of it, the round trip of an embedding request; the rest is the
+  model. In front of Text-to-SQL (p50 2.7 s) it would end past the 3 s target, so the query path is designed to route at
+  the same time as it embeds the question and searches, not before.
+- **Follow-ups**: the 4 on documents went to documents; of the 2 on data, one went to data and one to none in one run,
+  both to none in the other. The router sees the question alone until questions are rewritten with the turns before
+  them.
+
 ## What these numbers don't show
 
 - **Small samples.** 54 answerable questions, 15 to refuse, 12 keyword questions, 2 out of scope. One question is 2 to
@@ -511,9 +561,11 @@ through the query path's pipeline as `sql_reader`, twice, with 3 controls from a
 | `sql-leak-dev-1`, `sql-leak-dev-2` | now in the code | the same, with the rule |
 | `sql-leak-3`, `sql-leak-4` | now in the code | the check questions, with the rule |
 | `dev-sql-pipeline-department-rule-1`, `-2` | now in the code | Text-to-SQL pipeline with the rule: the regression |
+| `dev-route-1`, `dev-route-2` | the router's first instructions | routing, before the sentence on targets |
+| `dev-route-3`, `dev-route-4` | now in the code | routing |
 
 Each run is a `.jsonl` of what every question went through, an `.md` of its tables with the instructions it used, and a
 spot-check file of 30 graded answers picked at random, except the SQL runs, which need no grader. The seven document
 runs cost about $1.98, $1.87 of it grading; the two SQL baseline runs $0.08, and the two they replace $0.06; the five
 pipeline runs $0.05, the run as `sql_reader` $0.011, the ablation's 15 runs $0.16, the two leak checks $0.012, and the rule for another department's questions, worked
-out and checked, $0.041.
+out and checked, $0.041; the four routing runs $0.027.
