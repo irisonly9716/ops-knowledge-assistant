@@ -1,5 +1,6 @@
-"""The two model calls of a query: embedding the question and writing the answer. Both are async, so a waiting
-query costs the event loop nothing; a sync SDK call here would stop every other query in this process.
+"""The model calls of a query: embedding the question, writing the answer, and replies of a fixed shape such as the
+route a question takes. All async, so a waiting query costs the event loop nothing; a sync SDK call here would stop
+every other query in this process.
 
 Ingestion keeps the sync client in embeddings.py: a consumer handles one message at a time. Which failures are
 worth retrying, and how long to wait, is shared with it (embeddings.retry_wait). As there, the SDK's own retries
@@ -14,6 +15,7 @@ from typing import Any, Protocol
 
 import httpx
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient
+from pydantic import BaseModel
 
 from app.config import settings
 from app.rag.embeddings import EMBEDDING_DIMENSIONS, retry_wait
@@ -30,6 +32,13 @@ class ModelAnswer:
     output_tokens: int
 
 
+@dataclass(frozen=True)
+class StructuredAnswer:
+    value: Any | None    # an instance of the shape asked for; None when the reply didn't complete or wasn't one
+    input_tokens: int
+    output_tokens: int
+
+
 class QueryEmbedder(Protocol):
     model: str
 
@@ -38,6 +47,11 @@ class QueryEmbedder(Protocol):
 
 class AnswerModel(Protocol):
     async def answer(self, instructions: str, prompt: str, budget: TimeBudget) -> ModelAnswer: ...
+
+
+class StructuredModel(Protocol):
+    async def ask(self, instructions: str, prompt: str, shape: type[BaseModel],
+                  budget: TimeBudget) -> StructuredAnswer: ...
 
 
 class ModelBusy(Exception):
@@ -128,6 +142,32 @@ class OpenAIAnswerModel:
         response = await _with_retries(send, self._limit, budget, self._request_timeout, self._sleep)
         return ModelAnswer(text=response.output_text, complete=response.status == "completed",
                            input_tokens=response.usage.input_tokens, output_tokens=response.usage.output_tokens)
+
+
+class OpenAIStructuredModel:
+    """A reply that code reads, in the shape of a Pydantic model (structured output). The provider holds the reply to
+    the shape's JSON schema, so a field can't be missing or a value outside an enum; what is left to check here is
+    whether the reply completed. Free text would need parsing, and a model replying "Route: Data." instead of "data"
+    would break it."""
+
+    def __init__(self, client: AsyncOpenAI, model: str, limit: ModelCallLimit, request_timeout: float,
+                 max_output_tokens: int, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep):
+        self._client = client
+        self._model = model
+        self._limit = limit
+        self._request_timeout = request_timeout
+        self._max_output_tokens = max_output_tokens
+        self._sleep = sleep
+
+    async def ask(self, instructions: str, prompt: str, shape: type[BaseModel], budget: TimeBudget) -> StructuredAnswer:
+        async def send(timeout: float) -> Any:
+            return await self._client.responses.parse(
+                model=self._model, instructions=instructions, input=prompt, text_format=shape,
+                max_output_tokens=self._max_output_tokens, reasoning={"effort": "none"}, store=False, timeout=timeout,
+            )
+        response = await _with_retries(send, self._limit, budget, self._request_timeout, self._sleep)
+        value = response.output_parsed if response.status == "completed" else None
+        return StructuredAnswer(value, response.usage.input_tokens, response.usage.output_tokens)
 
 
 def openai_client_from_settings() -> AsyncOpenAI:
