@@ -66,7 +66,7 @@ app/
 │   ├── execute.py           one SELECT, read-only, with the asker's department set, time and row limits
 │   ├── examples.py          the example questions closest to a question; examples.yaml holds them
 │   └── pipeline.py          a question to an answer: examples, write, check, run, retry with the error, explain
-├── router/        query routing + combined answers
+├── router/        routing.py: which paths a question takes
 └── memory/        Redis cache + conversation memory
 evaluation/        the evaluation dataset's format (dataset.py), the review page (review.py), the runs (run.py for
                    documents, sql_run.py for SQL: the pipeline, or the baseline agent in sql_agent.py); not part of
@@ -421,6 +421,25 @@ reachable from `/query` until routing exists:
 
 The query path's budget bounds it all: 1 embedding, at most 3 queries written and run, 1 explanation. On dev: 2 model
 calls a question, p50 2.4 s, about $0.0003 a question (numbers: [docs/eval-report.md](../docs/eval-report.md)).
+
+## Routing
+
+```bash
+uv run python -m evaluation.route_run --split dev --name 1   # every way of routing on dev, about $0.007
+```
+
+`app/router/routing.py` decides which paths a question takes, not wired into `/query` yet. One model call
+(`ROUTER_MODEL`, no reasoning) with a reply of a fixed shape, a Pydantic model the provider holds the reply to
+(structured output): the route (documents, data, both or none), how sure, and why. Both paths run below
+`ROUTER_MIN_CONFIDENCE` (0.95); `none` still runs the document path, whose threshold and model decide whether to refuse,
+so the router never refuses on its own. If the model doesn't reply within `ROUTER_TIMEOUT_SECONDS` (2 s), fails or
+replies out of shape, a keyword rule decides. The router sees the question alone: which source answers it doesn't
+depend on who asks. The structured call (`OpenAIStructuredModel` in `app/rag/query_models.py`) is shared, for
+anything else code has to read from a model.
+
+`evaluation/route_run.py` runs the keyword rule, a vote of the 5 nearest questions by embedding, the model and a
+cascade on the same questions, and counts a path missing apart from a path extra. Results: "Routing" in
+[docs/eval-report.md](../docs/eval-report.md).
 
 ## Text-to-SQL: the ablation and the leak check
 
