@@ -122,20 +122,26 @@ class OpenAIQueryEmbedder:
 
 
 class OpenAIAnswerModel:
+    """reasoning_effort: "none" unless a setting says otherwise. Answering from given excerpts or rows needs no
+    reasoning, and reasoning is slower; whether advice from documents and data together gains from it is for the
+    evaluation to show, which is why that one is a setting (config.py)."""
+
     def __init__(self, client: AsyncOpenAI, model: str, limit: ModelCallLimit, request_timeout: float,
-                 max_output_tokens: int, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep):
+                 max_output_tokens: int, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep, *,
+                 reasoning_effort: str = "none"):
         self._client = client
         self._model = model
         self._limit = limit
         self._request_timeout = request_timeout
         self._max_output_tokens = max_output_tokens
         self._sleep = sleep
+        self._reasoning_effort = reasoning_effort
 
     async def answer(self, instructions: str, prompt: str, budget: TimeBudget) -> ModelAnswer:
         async def send(timeout: float) -> Any:
             return await self._client.responses.create(
                 model=self._model, instructions=instructions, input=prompt, max_output_tokens=self._max_output_tokens,
-                reasoning={"effort": "none"},   # answering from given excerpts needs no reasoning, and it is slower
+                reasoning={"effort": self._reasoning_effort},
                 store=False,                    # internal documents don't stay with the provider as saved responses
                 timeout=timeout,
             )

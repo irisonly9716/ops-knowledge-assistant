@@ -20,7 +20,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic.alias_generators import to_camel
 
 from app.config import settings
-from app.rag.answering import InvalidAnswer, QueryAnswer, QueryService
+from app.query_flow import FlowAnswer, QueryFlow
+from app.rag.answering import InvalidAnswer
 from app.rag.query_models import ModelBusy
 from app.rag.retrieval import ROLES_LIMITED_TO_A_DEPARTMENT
 from app.time_budget import TimeBudget
@@ -68,19 +69,33 @@ class CitationResponse(_CamelModel):
     score: float
 
 
+class DataResponse(_CamelModel):
+    """The query an answer rests on and every row it returned, values as text so numbers stay exact."""
+    sql: str
+    columns: list[str]
+    rows: list[list[str | None]]
+    truncated: bool   # the query returned more rows than are kept
+
+
 class QueryResponse(_CamelModel):
-    status: Literal["answered", "refused"]
+    status: Literal["answered", "refused", "failed"]   # failed: no query that answers it could be written
     answer: str
     citations: list[CitationResponse]
     searched_departments: list[str] | None   # null: all departments
+    paths: list[Literal["documents", "data"]]
+    data: DataResponse | None
 
     @classmethod
-    def of(cls, result: QueryAnswer) -> "QueryResponse":
+    def of(cls, result: FlowAnswer) -> "QueryResponse":
+        rows = result.result
+        data = (DataResponse(sql=result.sql, columns=list(rows.columns), rows=[list(row) for row in rows.rows],
+                             truncated=rows.truncated) if rows is not None else None)
         return cls(status=result.status, answer=result.text, searched_departments=result.searched_departments,
                    citations=[CitationResponse(number=c.number, doc_id=c.chunk.doc_id, doc_type=c.chunk.doc_type,
                                                title=c.chunk.title, department=c.chunk.department,
                                                heading_path=list(c.chunk.heading_path), score=round(c.chunk.score, 4))
-                              for c in result.citations])
+                              for c in result.citations],
+                   paths=list(result.paths), data=data)
 
 
 def require_backend(x_internal_token: str | None = Header(default=None)) -> None:
@@ -90,16 +105,16 @@ def require_backend(x_internal_token: str | None = Header(default=None)) -> None
         raise HTTPException(401, "this endpoint only accepts calls from the backend")
 
 
-def query_service(request: Request) -> QueryService:
-    return request.app.state.query_service
+def query_flow(request: Request) -> QueryFlow:
+    return request.app.state.query_flow
 
 
 @router.post("/query", dependencies=[Depends(require_backend)], response_model=QueryResponse, response_model_by_alias=True)
-async def query(body: QueryRequest, service: QueryService = Depends(query_service)) -> QueryResponse:
+async def query(body: QueryRequest, flow: QueryFlow = Depends(query_flow)) -> QueryResponse:
     budget_seconds = settings.query_budget_seconds
     try:
         async with asyncio.timeout(budget_seconds):
-            result = await service.answer(body.question, user_id=body.user_id, role=body.role,
+            result = await flow.answer(body.question, user_id=body.user_id, role=body.role,
                                           department=body.department, budget=TimeBudget(budget_seconds))
     except (TimeoutError, APITimeoutError) as e:
         log.warning("query user=%s ran out of time: %s", body.user_id, type(e).__name__)
@@ -120,5 +135,5 @@ async def query(body: QueryRequest, service: QueryService = Depends(query_servic
         raise HTTPException(502, "the model call failed") from e
     except psycopg.Error as e:   # includes the pool's timeout
         log.warning("query user=%s database error: %s", body.user_id, type(e).__name__)
-        raise HTTPException(503, "the document search is unavailable") from e
+        raise HTTPException(503, "the documents and data are unavailable") from e
     return QueryResponse.of(result)

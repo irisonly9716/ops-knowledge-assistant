@@ -125,6 +125,10 @@ class Settings(BaseSettings):
     # Past this the keyword rule decides, so a slow router can't spend the query's budget. Measured on a development
     # machine: p50 1.2 s, p95 1.5 to 1.6 s; 1 and 7 of 108 questions took longer
     router_timeout_seconds: float = 2.0
+    # How hard the model reasons before answering from documents and data together (app/query_flow.py): none, low,
+    # medium or high. None, as every other answer, until the evaluation grades these answers: planning advice is where
+    # reasoning could pay, and it is slower and costs output tokens
+    compose_reasoning_effort: str = "none"
 
     llm_service_host: str = "127.0.0.1"
     llm_service_port: int = 8000

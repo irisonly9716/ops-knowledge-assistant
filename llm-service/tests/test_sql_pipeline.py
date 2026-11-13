@@ -1,5 +1,6 @@
 """The fixed Text-to-SQL pipeline: the checks every generated query passes, the department filter, the example
 questions, and the pipeline itself with fake models against a throwaway database."""
+import asyncio
 import re
 from datetime import date
 from pathlib import Path
@@ -404,11 +405,88 @@ async def test_a_failed_query_is_shown_to_the_model_and_written_again(pools):
 
 @needs_postgres
 @pytest.mark.anyio
+async def test_a_query_the_checks_pass_but_the_runner_refuses_is_written_again_too(pools):
+    """A semicolon inside a string passes the parser's checks; run_select refuses every semicolon, so a second
+    statement can't hide in one. That refusal is the query's fault, so it goes back to the model like any other."""
+    writer = FakeModel("SELECT total_gmv FROM campaign_summary WHERE campaign_name = 'Sale; 2026'", GMV)
+    traced = await ask(service(pools, writer, FakeModel("$3,000.50.")))
+    assert traced.answer.status == "answered"
+    assert traced.attempts[0].ran and traced.attempts[0].error.startswith("SqlRejected: only a single SELECT")
+
+
+@needs_postgres
+@pytest.mark.anyio
 async def test_it_gives_up_after_its_retries_without_explaining(pools):
     writer, explainer = FakeModel("SELECT nope FROM campaign_summary", "SELECT nope FROM campaign_summary"), FakeModel()
     traced = await ask(service(pools, writer, explainer, retries=1))
     assert (traced.answer.status, traced.answer.text) == ("failed", pipeline.FAILED_TEXT)
     assert len(traced.attempts) == 2 and explainer.prompts == []
+
+
+@needs_postgres
+@pytest.mark.anyio
+@pytest.mark.parametrize("retries", [0, 2, 8])
+async def test_the_longest_run_fits_the_graphs_step_limit_however_many_retries(pools, retries):
+    """Every query runs and fails, the most steps a run can take: the graph gives up, LangGraph doesn't stop it first."""
+    writer = FakeModel(*["SELECT nope FROM campaign_summary"] * (1 + retries))
+    traced = await ask(service(pools, writer, FakeModel(), retries=retries), budget=60.0)
+    assert traced.answer.status == "failed" and len(traced.attempts) == 1 + retries
+    assert all(a.ran and a.error.startswith("UndefinedColumn") for a in traced.attempts)
+
+
+# ---- cancelled, as the query path does to a path its route rules out
+
+
+@needs_postgres
+@pytest.mark.anyio
+async def test_a_data_graph_cancelled_while_the_model_writes_runs_nothing_and_holds_no_connection(pools):
+    class SlowWriter(FakeModel):
+        async def answer(self, instructions, prompt, budget):
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+            return await super().answer(instructions, prompt, budget)
+
+    cancelled = []
+    pool, reader = pools
+    task = asyncio.create_task(service(pools, SlowWriter(GMV), FakeModel()).query(
+        "How much?", role="staff", department="Beauty", today=TODAY, budget=TimeBudget(10)))
+    await asyncio.sleep(0.3)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled == [True]
+    for opened in (pool, reader):
+        stats = opened.get_stats()
+        assert stats["pool_available"] == stats["pool_size"]
+
+
+@needs_postgres
+@pytest.mark.anyio
+async def test_a_query_cancelled_while_it_runs_stops_on_the_server_and_its_connection_works_again(pools):
+    """psycopg sends the server a cancel request when the task waiting on a statement is cancelled. Without it the
+    statement would go on holding a connection and a database worker for a question nobody waits for."""
+    pool, reader = pools
+
+    async def slow():
+        async with reader.connection() as conn:
+            await run_select(conn, "SELECT pg_sleep(5)", every_department=True)
+
+    task = asyncio.create_task(slow())
+    await asyncio.sleep(0.5)
+    started = asyncio.get_running_loop().time()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert asyncio.get_running_loop().time() - started < 1
+    async with pool.connection() as conn:
+        cursor = await conn.execute("SELECT count(*) FROM pg_stat_activity WHERE query = 'SELECT pg_sleep(5)' "
+                                    "AND state = 'active'")
+        assert (await cursor.fetchone())[0] == 0
+    async with reader.connection() as conn:
+        assert (await run_select(conn, "SELECT 1 AS one", every_department=True)).rows == (("1",),)
 
 
 @needs_postgres
@@ -435,9 +513,8 @@ async def test_another_departments_data_gets_the_fixed_sentence_without_a_model(
 async def test_an_explanation_cut_off_is_an_error_not_an_answer(pools):
     traced = await ask(service(pools, FakeModel(GMV), FakeModel(ModelAnswer("The summer sale", False, 100, 800))))
     assert traced.answer is None and isinstance(traced.error, InvalidAnswer)
-    with pytest.raises(InvalidAnswer):
-        await service(pools, FakeModel(GMV), FakeModel(ModelAnswer("", True, 1, 0))).answer(
-            "How much?", user_id=1, role="staff", department="Beauty", budget=TimeBudget(10))
+    empty = await ask(service(pools, FakeModel(GMV), FakeModel(ModelAnswer("", True, 1, 0))))
+    assert empty.answer is None and isinstance(empty.error, InvalidAnswer)
 
 
 @needs_postgres

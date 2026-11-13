@@ -82,7 +82,11 @@ def setup(monkeypatch):
 
 
 async def ask(service, role="staff", department="Beauty", question="How do I handle a restriction?", budget=None):
-    return await service.answer(question, user_id=2, role=role, department=department, budget=budget or TimeBudget(10))
+    """What the query path shows: an answer that failed validation is raised, and /query turns it into an error."""
+    traced = await service.trace(question, role=role, department=department, budget=budget or TimeBudget(10))
+    if traced.error:
+        raise traced.error
+    return traced.result
 
 
 # ---- answers
@@ -259,8 +263,9 @@ async def test_an_impossible_user_stops_before_anything_costs_money(setup, role,
 
 
 @pytest.mark.anyio
-async def test_the_question_stays_out_of_the_logs(setup, caplog):
-    service, _, _, _, _ = setup([chunk(0.6)])
+async def test_the_question_stays_out_of_what_the_documents_path_logs(setup, caplog):
+    # The query's own line is the query flow's (test_query_flow.py); this path logs a reply that cites nothing
+    service, _, _, _, _ = setup([chunk(0.6)], text="The excerpts don't say.")
     with caplog.at_level("INFO", logger="query"):
         await ask(service, question="my private question")
     assert caplog.records
@@ -282,6 +287,7 @@ async def test_searching_deeper_for_the_evaluation_leaves_the_prompt_at_top_k(se
     traced = await trace(service, candidates=8)
     assert searches[0]["top_k"] == 8
     assert traced.candidates == found
+    assert traced.excerpts == found[:5]   # what the model was given, which an answer from both numbers again
     prompt = model.calls[0][1]
     assert "[5] content 5" in prompt
     assert "content 6" not in prompt
@@ -293,6 +299,7 @@ async def test_the_threshold_looks_at_the_best_chunk_the_prompt_gets(setup):
     traced = await trace(service, candidates=50)
     assert traced.result.status == REFUSED
     assert traced.top_score == THRESHOLD - 0.1
+    assert traced.excerpts == []
     assert model.calls == []
 
 
@@ -312,7 +319,7 @@ async def test_an_invalid_answer_keeps_its_search_in_the_trace_and_answer_still_
 async def test_instructions_given_to_the_service_reach_the_model(setup):
     service, embedder, model, pool, _ = setup([chunk(0.6)])
     other = QueryService(embedder, model, pool, min_similarity=THRESHOLD, top_k=5, instructions="Other rules.")
-    await other.answer("Why?", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10))
+    await ask(other, question="Why?")
     await ask(service)
     assert [instructions for instructions, _ in model.calls] == ["Other rules.", INSTRUCTIONS]
 
@@ -357,7 +364,7 @@ async def test_the_reranker_sees_only_what_the_department_filtered_search_return
     found = [chunk(0.6, 1), chunk(0.5, 2)]
     fake = FakeReranker()
     service, _, searches = with_reranker(setup, found, fake)
-    await service.answer("Why?", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10))
+    await ask(service, question="Why?")
     assert searches[0]["departments"] == ["Beauty", "ALL"]
     assert fake.calls == [["content 1", "content 2"]]
 
@@ -385,7 +392,7 @@ async def test_a_question_below_the_threshold_is_refused_without_reranking(setup
 async def test_a_failed_rerank_still_answers_in_vector_order(setup):
     found = [chunk(0.6, 1), chunk(0.5, 2)]
     service, model, _ = with_reranker(setup, found, FakeReranker(error=TimeoutError()), text="A [1].")
-    result = await service.answer("Why?", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10))
+    result = await ask(service, question="Why?")
     assert result.status == ANSWERED
     assert result.citations[0].chunk.chunk_id == 1
     assert model.calls[0][1].index("content 1") < model.calls[0][1].index("content 2")
@@ -406,11 +413,3 @@ async def test_without_a_reranker_the_search_returns_top_k_and_nothing_is_rerank
     traced = await trace(service)
     assert searches[0]["top_k"] == 5
     assert traced.reranked is False
-
-
-@pytest.mark.anyio
-async def test_the_query_log_says_whether_it_was_reranked(setup, caplog):
-    service, _, _ = with_reranker(setup, [chunk(0.6, 1), chunk(0.5, 2)], FakeReranker())
-    with caplog.at_level("INFO", logger="query"):
-        await service.answer("Why?", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10))
-    assert "reranked=True" in caplog.text and "rerank_ms=" in caplog.text

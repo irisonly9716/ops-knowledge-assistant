@@ -1,8 +1,10 @@
 package com.opsassistant.backend.query;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -49,7 +51,9 @@ class QueryControllerTest {
     private static final String ANSWER = """
             {"status":"answered","answer":"Do this [1].","citations":[{"number":1,"docId":3,"docType":"sop",
              "title":"Account Restriction Handling","department":"ALL","headingPath":["Steps"],"score":0.51}],
-             "searchedDepartments":["Beauty","ALL"]}""";
+             "searchedDepartments":["Beauty","ALL"],"paths":["documents","data"],
+             "data":{"sql":"SELECT campaign_name, total_gmv FROM campaign_summary","columns":["campaign_name","total_gmv"],
+             "rows":[["Beauty Summer Sale","3000.50"],["Beauty Fan Day",null]],"truncated":false}}""";
     private static final HttpServer stub = startStub();
 
     private static volatile int nextStatus;
@@ -153,7 +157,19 @@ class QueryControllerTest {
                 .andExpect(jsonPath("$.citations[0].docId").value(3))
                 .andExpect(jsonPath("$.citations[0].title").value("Account Restriction Handling"))
                 .andExpect(jsonPath("$.citations[0].headingPath[0]").value("Steps"))
-                .andExpect(jsonPath("$.searchedDepartments[0]").value("Beauty"));
+                .andExpect(jsonPath("$.searchedDepartments[0]").value("Beauty"))
+                .andExpect(jsonPath("$.paths[1]").value("data"))
+                .andExpect(jsonPath("$.data.columns[1]").value("total_gmv"))
+                .andExpect(jsonPath("$.data.truncated").value(false));
+    }
+
+    @Test
+    void the_rows_of_a_data_answer_pass_through_as_text_with_their_nulls() throws Exception {
+        // As text, an amount can't turn into 3000.5 on the way, and a missing value stays missing rather than zero
+        mockMvc.perform(ask("2"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString("[\"Beauty Summer Sale\",\"3000.50\"]")))
+                .andExpect(content().string(containsString("[\"Beauty Fan Day\",null]")));
     }
 
     @Test

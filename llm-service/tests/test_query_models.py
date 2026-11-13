@@ -67,6 +67,15 @@ async def test_an_answer_request_says_what_it_should():
 
 
 @pytest.mark.anyio
+async def test_an_answer_model_can_be_set_to_reason():
+    api = FakeApi(response())
+    model = OpenAIAnswerModel(SimpleNamespace(responses=api), "gpt-test", ModelCallLimit(50, 1.0), 10.0, 800,
+                              reasoning_effort="low")
+    await ask(model)
+    assert api.calls[0]["reasoning"] == {"effort": "low"}
+
+
+@pytest.mark.anyio
 async def test_a_reply_that_did_not_complete_says_so():
     assert (await ask(answer_model(FakeApi(response(status="incomplete"))))).complete is False
 

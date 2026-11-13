@@ -28,13 +28,61 @@
           "score": 0.5183
         }
       ],
-      "searchedDepartments": ["Beauty", "ALL"]
+      "searchedDepartments": ["Beauty", "ALL"],
+      "paths": ["documents"],
+      "data": null
     },
     "refused": {
       "status": "refused",
       "answer": "I couldn't find this in the documents you have access to.",
       "citations": [],
-      "searchedDepartments": ["Beauty", "ALL"]
+      "searchedDepartments": ["Beauty", "ALL"],
+      "paths": ["documents"],
+      "data": null
+    },
+    "answeredFromData": {
+      "status": "answered",
+      "answer": "Electronics Black Friday Live, which started on November 16, 2025, brought in $1,043,330.18 in GMV.",
+      "citations": [],
+      "searchedDepartments": ["Consumer Electronics"],
+      "paths": ["data"],
+      "data": {
+        "sql": "SELECT campaign_name, start_date, total_gmv FROM (SELECT * FROM campaign_summary WHERE department = CURRENT_SETTING('app.department')) AS campaign_summary WHERE campaign_name = 'Electronics Black Friday Live' ORDER BY start_date DESC NULLS LAST LIMIT 1",
+        "columns": ["campaign_name", "start_date", "total_gmv"],
+        "rows": [["Electronics Black Friday Live", "2025-11-16", "1043330.18"]],
+        "truncated": false
+      }
+    },
+    "answeredFromBoth": {
+      "status": "answered",
+      "answer": "The launch converted 8.7% of its viewers, below the 10% its plan set [1].",
+      "citations": [
+        {
+          "number": 1,
+          "docId": 41,
+          "docType": "campaign_plan",
+          "title": "Electronics New Product Launch - Campaign plan",
+          "department": "Consumer Electronics",
+          "headingPath": ["Electronics New Product Launch - Campaign plan", "Targets"],
+          "score": 0.6127
+        }
+      ],
+      "searchedDepartments": ["Consumer Electronics", "ALL"],
+      "paths": ["documents", "data"],
+      "data": {
+        "sql": "SELECT campaign_name, start_date, avg_conversion_rate FROM (SELECT * FROM campaign_summary WHERE department = CURRENT_SETTING('app.department')) AS campaign_summary WHERE campaign_name = 'Electronics New Product Launch' LIMIT 201",
+        "columns": ["campaign_name", "start_date", "avg_conversion_rate"],
+        "rows": [["Electronics New Product Launch", "2026-09-29", "0.08736000000000000000"]],
+        "truncated": false
+      }
+    },
+    "failed": {
+      "status": "failed",
+      "answer": "I couldn't write a query that answers this from the campaign data.",
+      "citations": [],
+      "searchedDepartments": ["Consumer Electronics"],
+      "paths": ["data"],
+      "data": null
     }
   }
 }
