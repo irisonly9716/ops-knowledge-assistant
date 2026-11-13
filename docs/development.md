@@ -31,15 +31,16 @@ uv run python -m scripts.generate_mock_data
 uv run python -m scripts.load_sql_examples
 
 # 3c. The login of sql_reader, the role generated SQL runs as. Set SQL_READER_PASSWORD in .env first; run it again
-#     after changing the password. Needed by the Text-to-SQL pipeline on the views (evaluation.sql_run --pipeline --views)
+#     after changing the password. Needed by /query, whose data path runs as it, and by evaluation.sql_run --pipeline --views
 uv run python -m scripts.enable_sql_reader
 
 # 4. Backend (new terminal, from the repo root)
 cd backend-service
 ./mvnw spring-boot:run                # Windows: .\mvnw.cmd spring-boot:run
 
-# 4b. The API for questions (another terminal). Needs OPENAI_API_KEY and INTERNAL_SERVICE_TOKEN in .env;
-#     the backend reads the same token, so restart it if you only just added it. See .env.example for how to make one.
+# 4b. The API for questions (another terminal). Needs OPENAI_API_KEY, INTERNAL_SERVICE_TOKEN and SQL_READER_PASSWORD
+#     in .env (and step 3c run): it refuses to start without them. The backend reads the same token, so restart it if you
+#     only just added it. See .env.example for how to make one.
 cd llm-service
 uv run python -m app.server --reload
 

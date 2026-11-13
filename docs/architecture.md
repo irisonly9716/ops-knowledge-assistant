@@ -227,8 +227,8 @@ backend /query
       │ 3. check the cache: key = department + role + knowledge-base version + rewritten question
       │    (a hit returns immediately)
       │ 4. route: documents / data / both / none? One model call with structured output; below 0.95 confidence
-      │    both paths run, and a keyword rule decides if the model doesn't reply in 2 s. Designed to run at the
-      │    same time as the embedding and the searches: in front of them it would add 1.1 s (p50)
+      │    both paths run, and a keyword rule decides if the model doesn't reply in 2 s. The embedding and both
+      │    paths start at the same time as the router, and the route cancels the path it rules out
       │
       ├── documents → vector search (filter: department IN (user's department, 'ALL')), top 50
       │               → reranker (a cross-encoder in its own service) → top 5
@@ -241,10 +241,11 @@ backend /query
       │             - execute as a read-only role that can only read the views, in a read-only transaction
       │               with a statement timeout and at most 201 rows, under row-level security on the tables
       │             - on an error, show the model the error and generate again (2 retries at most)
-      │             - result, explained in a few sentences
       │
-      │ 5. retrieved chunks + SQL result + question + conversation history → LLM → answer, which opens
-      │    by naming the campaign it is based on, so a wrong reading is easy to spot
+      │ 5. documents → their answer, with citations; data → the rows explained in a few sentences;
+      │    both → one answer written from the chunks and the rows together. Still to come: the conversation
+      │    history in the prompt, and an answer that opens by naming the campaign it is based on, so a wrong
+      │    reading is easy to spot
       │ 6. write the cache + the conversation memory + the audit record
       ▼
    back to the user
@@ -258,16 +259,33 @@ between the two would keep serving old answers. Relative references are made con
 when a new campaign finishes the key changes; a question that still has one after rewriting skips the cache. The
 TTL is only a safety net.
 
-**What exists today:** the backend's `/query`, the internal token, the search with its department filter and the
-reranker, and steps 1 and 5 for documents, with citations and refusals. For Text-to-SQL, the data dictionary, the
-metric views, the fixed pipeline with its checks and department filter, and a baseline agent, both measured on the
-evaluation dataset, with the read-only role and row-level security under it; none of it is reachable from `/query`
-until routing exists. The router is built and measured, not wired in; rewriting and cache are still to come. Details
+**What exists today:** the backend's `/query`, the internal token, and steps 1, 4 and 5 (`app/query_flow.py`): the
+router, the search with its department filter and the reranker, the Text-to-SQL pipeline with its checks, department
+filter, read-only role and row-level security, and one answer from either or both, with citations and refusals. A
+baseline agent for Text-to-SQL is measured on the evaluation dataset. Rewriting (step 2), the cache (3) and step 6 are
+still to come. Details
 and measurements: "The query path" in [llm-service/README.md](../llm-service/README.md). How well it answers, measured on the evaluation
 dataset, and why the refusal threshold and the answer instructions are what they are:
 [eval-report.md](eval-report.md).
 
 Design decisions so far:
+- **Both paths start before the route is known.** Routing is a model call, p50 1.2 s and p95 1.5 to 1.7 s on a
+  development machine, and in front of the paths it would put a question about data at about 3.8 s, estimated from each
+  step's measured time, against the 3 s target. So the embedding, the documents' answer and the data path's first query
+  run while the router decides, and the route cancels the path it rules out. The price is the model calls thrown away:
+  a query being written for a question about documents, and a documents' answer for a question answered from both.
+- **The top is asyncio; each path is a LangGraph state graph.** LangGraph runs a graph in steps, and the branches of a
+  step all wait for the slowest one: measured with sleeps standing in for the calls, a 0.5 s chain of three nodes beside
+  a 1 s router finished at 1.47 s, and as one subgraph node at 0.53 s. And a running branch can't be stopped from inside
+  the graph. So asyncio starts the paths, cancels one and joins the rest, while the paths, whose steps follow each other
+  anyway, are graphs: the data path's retry is a loop with its bound on the graph, drawn in the README. A graph run costs
+  0.35 ms plus 0.33 ms a step of CPU, about 3 ms a question for the two.
+- **Cancelling a path stops its work.** A cancelled model call ends its request, and psycopg cancels a statement running
+  in Postgres when the task waiting on it is cancelled: measured, 5 ms, with nothing left running on the server and the
+  connection working again. Whatever happens, every task a question started is cancelled and waited for before it
+  returns, so nothing holds a model call slot or a connection for a question nobody waits for.
+- **One answer from both, in one call.** With excerpts and rows, one model call writes the answer from the two together.
+  Answering from each and merging would be a model call more, about a second, and the merge could drop citations.
 - **The reranker is a service of its own.** bge-reranker-v2-m3 needs a GPU: on a 6-core CPU it took about 40 s for 50
   candidates. In llm-service each of the 4 workers would load it (1.9 GB each) and its computing would stop the event
   loop. In Text Embeddings Inference it is one model on one GPU, scaled apart from llm-service, which sends it one HTTP
@@ -293,7 +311,9 @@ Design decisions so far:
   limit is one CPU core. Production runs `python -m app.server --workers 4`, which met the 300 QPS peak; 500 QPS took 8.
   Uvicorn's workers need no load balancer, at the price of an uneven share of the work, so each process gets 300 model
   call slots rather than an exact 225, and 5 database connections because all their pools share the 100 Postgres allows.
-  Numbers: "The query path" in [llm-service/README.md](../llm-service/README.md).
+  Numbers: "The query path" in [llm-service/README.md](../llm-service/README.md). Measured on the documents path before
+  routing: a routed query holds up to three model calls at once while the router decides, and has a second pool, of 5
+  connections, for generated SQL; what that takes at the peak isn't measured (#11).
 - **Text-to-SQL is a fixed pipeline, not an agent.** The baseline agent spent 4 model calls a question finding a schema
   the code already knows, p50 about 9 s on dev. The pipeline puts the five views with their comments (about 1,050
   tokens), the names in the data and the 3 closest example questions into one prompt: 2 model calls, writing and

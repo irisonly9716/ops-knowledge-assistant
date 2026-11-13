@@ -20,7 +20,7 @@ An assistant for live-commerce operations staff. One entry point answers SOP and
 
 **Principle:** the project analyzes content and results with AI; it does not recompute analytics. Clean numbers go in SQL columns, narrative (SOPs, plans, reviews) goes through RAG, and data other teams already computed is uploaded, not calculated here.
 
-**Status:** upload, approval, ingestion, reranking and document answers through `/query` are implemented. For Text-to-SQL, the data dictionary, the metric views (V9), the fixed pipeline with its parser checks and department filter, run as a read-only role under row-level security (V11), and a baseline agent for the evaluation exist, not reachable from `/query`. The router (`app/router`: documents, data, both or none, by a model with structured output) is built and measured but not wired in yet; cache and memory are not built (`app/memory` is an empty package).
+**Status:** upload, approval, ingestion and reranking are implemented, and `/query` answers from the documents, the campaign data or both: the router (`app/router`, a model with structured output) picks the paths, both start before it decides and the one it rules out is cancelled (`app/query_flow.py`), and each path is a LangGraph state graph. Text-to-SQL has the data dictionary, the metric views (V9), the fixed pipeline with its parser checks and department filter, run as a read-only role under row-level security (V11), and a baseline agent for the evaluation. Cache, memory and rewriting follow-ups and relative dates are not built (`app/memory` is an empty package).
 
 **Language:** documents and questions are in English. There is no cross-language retrieval.
 
@@ -37,8 +37,8 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 
 - **Where 300 QPS comes from:** half of the 500 staff sending in the same second (250), plus 20% headroom. It is a burst, not a sustained rate: people wait for an answer before asking again.
 - **Rate limit:** designed for the 300 QPS peak; above it, `429` with `Retry-After`. `QUERY_RATE_LIMIT_QPS`, per backend instance.
-- **Model concurrency:** sized for the peak (900 in flight across 4 processes) and configurable: `MODEL_MAX_CONCURRENT_CALLS`, default 300 per process, because workers on one port don't get equal shares. Development sets a low value in `.env` because those tests are paid for privately; that value is never a production default or evidence for sizing.
-- **Processes:** one llm-service process reaches about 100 QPS (measured on Linux with a stub model), so production runs `python -m app.server --workers 4` (`LLM_SERVICE_WORKERS`). That met the 3 s target at 300 QPS; 2 didn't, and 3 wasn't run. Development starts one.
+- **Model concurrency:** sized for the peak (900 in flight across 4 processes) and configurable: `MODEL_MAX_CONCURRENT_CALLS`, default 300 per process, because workers on one port don't get equal shares. Development sets a low value in `.env` because those tests are paid for privately; that value is never a production default or evidence for sizing. Sized when a query made one model call at a time: a routed query holds up to three while the router decides, and the size that needs isn't measured (#11).
+- **Processes:** one llm-service process reaches about 100 QPS (measured on Linux with a stub model), so production runs `python -m app.server --workers 4` (`LLM_SERVICE_WORKERS`). That met the 3 s target at 300 QPS; 2 didn't, and 3 wasn't run. Development starts one. That was the documents path alone: the routed path does more per query and isn't measured.
 - **Reranking:** only sees chunks that passed the department filter and counts toward the 3 s; on a timeout or an error, fall back to vector order. It is on by default unless the eval shows no gain or it breaks the 3 s budget: then it stays in the code, is switched off in config, and the numbers go in the report.
 - **Not load tested yet (#11).** Until it is, write "designed for 300 QPS", not "handles 300 QPS".
 - **Upload path:** 1 partition, 1 consumer, 1 broker and local files, because the volume wasn't known when it was designed; #10 is the way out. Partitions follow upload volume: queries don't pass through Kafka.
@@ -57,7 +57,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Models | openai SDK · `text-embedding-3-small` (1536 dimensions) · default chat model `gpt-6-luna` | 3.29.0 |
 | Parsing | markdown-it-py · python-docx · pdfplumber · pyyaml | 4.2.0 · 1.2.0 · 0.11.10 · 6.0.3 |
 | Chunking | langchain-text-splitters · tiktoken | 1.1.3 · 0.14.0 |
-| Agents | langchain (brings LangGraph) · langchain-openai; not langchain-community, unmaintained since May 2026 | 1.4.9 · 1.7.4 |
+| Agents | langgraph (the query path's two state graphs) · langchain · langchain-openai (the SQL baseline); not langchain-community, unmaintained since May 2026 | 1.2.20 · 1.4.9 · 1.7.4 |
 | SQL checks | sqlglot (parses generated SQL for the checks and the department filter) | 30.24.0 |
 | Tests and mock data | pytest · httpx · faker · JUnit and Mockito via Boot | 9.1.1 · 0.28.1 · 33.1.0 |
 
@@ -75,7 +75,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | Python setup | `cd llm-service` · `uv venv` · `uv pip install -r requirements.txt` |
 | Create topics · mock data · SQL examples · the SQL reader's login | `uv run python -m scripts.init_topics` · `uv run python -m scripts.generate_mock_data` · `uv run python -m scripts.load_sql_examples` (after editing `app/sql_agent/examples.yaml`) · `uv run python -m scripts.enable_sql_reader` (after the migrations, with `SQL_READER_PASSWORD` in `.env`) |
 | Evaluation corpus: what's in it · load it · the questions | `uv run python -m scripts.generate_corpus --report` · `uv run python -m scripts.ingest_corpus` (needs the backend, Kafka and the consumer) · `uv run python -m scripts.generate_questions --report` · review: `uv run python -m evaluation.review` |
-| Evaluation run (needs Postgres with the corpus; about $0.27 on `dev`, almost all grading) | `uv run python -m evaluation.run --split dev --name <name>` · SQL: `uv run python -m evaluation.sql_run --split dev --name <name>` (the agent; `--pipeline --dictionary --views --examples 3 --retries 2` for the query path's pipeline, about $0.01) · SQL ablation table from its runs: `uv run python -m evaluation.sql_ablation --split dev` · leak check: `uv run python -m evaluation.sql_leak --name <name>` · routing: `uv run python -m evaluation.route_run --split dev --name <name>` · results in `eval/results/`, what they mean in `docs/eval-report.md` |
+| Evaluation run (needs Postgres with the corpus; about $0.27 on `dev`, almost all grading) | `uv run python -m evaluation.run --split dev --name <name>` · SQL: `uv run python -m evaluation.sql_run --split dev --name <name>` (the agent; `--pipeline --dictionary --views --examples 3 --retries 2` for the query path's pipeline, about $0.01) · SQL ablation table from its runs: `uv run python -m evaluation.sql_ablation --split dev` · leak check: `uv run python -m evaluation.sql_leak --name <name>` · routing: `uv run python -m evaluation.route_run --split dev --name <name>` · the whole query path: `uv run python -m evaluation.flow_run --split dev --name <name>` · results in `eval/results/`, what they mean in `docs/eval-report.md` |
 | Reranker (optional, about 5 GB of memory; queries keep the vector order without it) | `docker compose --profile rerank up -d reranker` (:8082) |
 | Run backend (:8081) | `cd backend-service` · `.\mvnw.cmd spring-boot:run` |
 | Run consumer · LLM API (:8000) | `uv run python -m app.consumers.upload_consumer` · `uv run python -m app.server --reload` (not plain `uvicorn`: async psycopg needs the event loop it chooses) |
@@ -100,6 +100,7 @@ llm-service/app/       Python: ingestion and the query path
   rag/                 parsing/, chunking, document_fields, embeddings, store, retrieval, reranking, query_models, answering
   sql_agent/           schema (what a model is shown of the database), guard (the parser checks, the department filter and the row limit), execute (one read-only SELECT), examples, pipeline
   router/              routing: which paths a question takes, with the keyword rule as fallback
+  query_flow.py        the top of a query: route and both paths at once, cancel the one ruled out, one answer
   server.py            starts the API; query_api.py: POST /query, for the backend only
   time_budget.py       one time budget per message or query
 llm-service/evaluation/   the dataset's format, how a label finds today's chunks, the runs and their grader, the SQL baseline agent; not part of the service
@@ -117,7 +118,7 @@ Key patterns:
 - **Reconciliation:** `UploadReconciler` decides by the owning group's lag, never by age alone: lag above 0 means the message is still in Kafka, so publish nothing and alert if the position stalls; lag 0 means it is gone, so publish again, at most 3 times. Unknown lag means do nothing.
 - **Errors:** a `PermanentError` goes straight to the dead-letter topic (retrying gives the same answer); anything else is retried within the time budget. A failed upload records why, naming the row and column for a bad CSV.
 - **Query limits:** the rate limit runs in the backend after the checks, so `401` and `400` come first and use none of it. A model call holds a slot only during the request, never while waiting to retry, and a query that can't get one within 1 s gets `503` with `Retry-After`. The backend's waits for the database are bounded too, because virtual threads put no limit on how many can wait.
-- **Query path:** async in llm-service, so no blocking call in it; ordinary blocking code in the backend. llm-service trusts the role it is sent, so `/query` requires `X-Internal-Token` and port 8000 must never be exposed. No database connection is held while waiting for a model. An answer needs real citations; anything else is a refusal or an error.
+- **Query path:** route, embedding and both paths start together; the route cancels the path it rules out, and nothing a query started outlives it. The top is asyncio and each path a LangGraph graph, because a graph's parallel branches wait for each other at every step and a running one can't be stopped. Async in llm-service, so no blocking call in it; ordinary blocking code in the backend. llm-service trusts the role it is sent, so `/query` requires `X-Internal-Token` and port 8000 must never be exposed. No database connection is held while waiting for a model. An answer needs real citations; anything else is a refusal or an error.
 - **Time budget:** every layer shares one budget per message or query, with SDK retries off. Compute the worst case from every timeout and retry, not just the typical case.
 - **Replacements:** optimistic concurrency. An upload names the version it replaces (`replaces_upload_id`) and is void if that is no longer current. `doc_id` stays stable, `version` goes up.
 - **Data tables:** validate every cell, then replace all of a campaign's rows in one transaction with `COPY`, so `statement_timeout` bounds the load.
@@ -212,3 +213,4 @@ A new document for one's own department takes effect at once. Replacing anything
 - v13 · 2026-11-09 · Arianna · The role generated SQL runs as, row-level security, the row limit; `sql.Literal` for `SET`.
 - v14 · 2026-11-10 · Arianna · The SQL ablation and leak check commands.
 - v15 · 2026-11-11 · Arianna · The router and its evaluation.
+- v16 · 2026-11-12 · Arianna · The query flow: both paths before the route, a LangGraph graph per path; what the earlier sizing doesn't cover.
