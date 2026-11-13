@@ -1,7 +1,7 @@
 # Evaluation report
 
 **Draft.** Numbers from the `dev` split only: the baseline with vector search alone, reranking compared against it,
-the zero-shot Text-to-SQL baseline and the Text-to-SQL pipeline. Hybrid search and the final `test` numbers come later. Every number below
+the zero-shot Text-to-SQL baseline, the Text-to-SQL pipeline, routing and the whole query path. Hybrid search and the final `test` numbers come later. Every number below
 comes from a file in [eval/results/](../eval/results/), and every table can be rebuilt from the `.jsonl` next to it,
 except the comparison of reranking models, which says where it comes from.
 
@@ -520,6 +520,46 @@ model call. 6 questions are follow-ups, asked without the turns before them, and
   both to none in the other. The router sees the question alone until questions are rewritten with the turns before
   them.
 
+## The whole query path: routing, both paths at once, one answer
+
+```bash
+RERANKER_URL= uv run python -m evaluation.flow_run --split dev --name 1   # $0.04 a run
+```
+
+All 108 questions of `dev` through `app/query_flow.py` as `/query` runs it: the router, the embedding and both paths
+started together, the path the route rules out cancelled, then one answer. One question at a time, on a development
+machine, without the backend and without the reranker: on a CPU it always gives up after its 0.5 s and keeps the vector
+order, so leaving it out only removes that wait. Answers aren't graded here; the SQL is scored on its rows.
+
+| Paths that ran | Questions | Under 3 s | p50 | p95 | Slowest |
+|---|---|---|---|---|---|
+| documents | 38 | 38 | 1.56 s | 1.99 s | 2.02 s |
+| data | 28 | 22 | 2.73 s | 3.21 s | 3.46 s |
+| both | 42 | 14 | 3.22 s | 5.22 s | 5.43 s |
+| all | 108 | 74 (68.5%) | 2.02 s | 4.54 s | 5.43 s |
+
+- **Questions about documents meet the target.** Their answer is written while the router decides (p50 1.26 s), so
+  they end soon after it: p50 1.56 s.
+- **Questions about data mostly do**: p50 2.73 s, 22 of 28 under 3 s. The rows are there at p50 1.56 s and the
+  explanation takes 1.26 s more. Waiting for the route first was estimated at about 3.8 s.
+- **Questions that need both don't.** The 12 of them: p50 4.5 s, none under 3 s. Both paths are done at p50 2.3 s, and
+  the answer written from the two takes 2.3 s more: about 150 output tokens, against 33 for an explanation of rows,
+  so the 2.9 to 3.1 s estimated from an explanation's time was wrong.
+- **Most questions that ran both paths needed one.** 30 of the 42: 21 because the router was below 0.95, 7 because it
+  said both, 2 by the keyword rule. 14 of them had no rows and got the documents' answer at once (p50 1.35 s); the
+  other 16 got one answer from both and none was under 3 s (p50 3.4 s). The threshold that keeps paths from missing
+  costs this much time as well as the extra calls.
+- **Routing, as measured on its own:** a path missing on 3 questions (the two labelled documents that the data answers,
+  and a follow-up asked without its turns), one extra on 35. The keyword rule decided 5, each after the router's 2 s,
+  the first question among them, while its connections were set up; routed alone in its last two runs, 1 each.
+- **Text-to-SQL is unchanged by the flow.** Of the 39 questions with a gold result, the rows held it for 30, against 31
+  and 30 for the pipeline alone on the same questions; the one difference flips between runs of the pipeline too. Two
+  got no rows: a follow-up the router sent to documents, and another follow-up the writer refused.
+- **Cost**: $0.039 for the 108, $0.00036 a question, counting only calls that finished. The writer of SQL is the largest
+  part, 127,000 input tokens, because a query starts being written for every question. Thrown away: the documents'
+  answer of the 28 questions answered from both, 34,000 input and 1,700 output tokens. 28 questions had a path
+  cancelled (documents 18, data 10); what a cancelled call had used isn't known.
+
 ## What these numbers don't show
 
 - **Small samples.** 54 answerable questions, 15 to refuse, 12 keyword questions, 2 out of scope. One question is 2 to
@@ -563,9 +603,10 @@ model call. 6 questions are follow-ups, asked without the turns before them, and
 | `dev-sql-pipeline-department-rule-1`, `-2` | now in the code | Text-to-SQL pipeline with the rule: the regression |
 | `dev-route-1`, `dev-route-2` | the router's first instructions | routing, before the sentence on targets |
 | `dev-route-3`, `dev-route-4` | now in the code | routing |
+| `dev-flow-1` | now in the code | the whole query path, without the reranker |
 
 Each run is a `.jsonl` of what every question went through, an `.md` of its tables with the instructions it used, and a
 spot-check file of 30 graded answers picked at random, except the SQL runs, which need no grader. The seven document
 runs cost about $1.98, $1.87 of it grading; the two SQL baseline runs $0.08, and the two they replace $0.06; the five
 pipeline runs $0.05, the run as `sql_reader` $0.011, the ablation's 15 runs $0.16, the two leak checks $0.012, and the rule for another department's questions, worked
-out and checked, $0.041; the four routing runs $0.027.
+out and checked, $0.041; the four routing runs $0.027; the run of the whole query path $0.039.

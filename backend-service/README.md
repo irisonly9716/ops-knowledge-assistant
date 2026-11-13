@@ -157,15 +157,23 @@ token (`INTERNAL_SERVICE_TOKEN` in `.env`; both services read it).
 ```json
 {
   "status": "answered",
-  "answer": "Do this [1].",
-  "citations": [{"number": 1, "docId": 3, "docType": "sop", "title": "Account Restriction Handling",
-                 "department": "ALL", "headingPath": ["Account Restriction Handling", "Steps"], "score": 0.5183}],
-  "searchedDepartments": ["Beauty", "ALL"]
+  "answer": "The launch converted 8.7% of its viewers, below the 10% its plan set [1].",
+  "citations": [{"number": 1, "docId": 41, "docType": "campaign_plan", "title": "Electronics New Product Launch - Campaign plan",
+                 "department": "Consumer Electronics", "headingPath": ["Electronics New Product Launch - Campaign plan", "Targets"],
+                 "score": 0.6127}],
+  "searchedDepartments": ["Consumer Electronics", "ALL"],
+  "paths": ["documents", "data"],
+  "data": {"sql": "SELECT campaign_name, start_date, avg_conversion_rate FROM ...",
+           "columns": ["campaign_name", "start_date", "avg_conversion_rate"],
+           "rows": [["Electronics New Product Launch", "2026-09-29", "0.08736000000000000000"]], "truncated": false}
 }
 ```
 
-`status` is `refused` when the documents this user may see don't answer the question: `200` with no citations.
-`searchedDepartments` is `null` for executive and admin, who search everything.
+`status` is `refused` when what this user may see doesn't answer the question, and `failed` when no query that answers
+it could be written: both `200` with no citations. `searchedDepartments` is `null` for executive and admin, who search
+everything. `paths` are the sources that ran, `documents` and `data`; `data` is the query an answer rests on with every
+row it returned, or `null`. Its values stay text, `null` included, and this service passes them on without reading them
+as numbers, so an amount like `3000.50` arrives as it is in the database. Every case: `contracts/query.examples.json`.
 
 | Answer | When |
 |---|---|
@@ -341,5 +349,5 @@ Notes:
 | `GET /documents/{id}/status` | implemented | how far an upload got, and why it failed |
 | `GET /documents/approvals`, `POST /documents/approvals/{id}/approve`, `.../reject` | implemented | the approval queue and the decision |
 | `GET /campaigns?month=` | implemented | finding a campaign to upload a plan, review or table for |
-| `POST /query` | implemented | looks up the user, forwards to llm-service with the internal token, returns the answer with its citations or a refusal |
+| `POST /query` | implemented | looks up the user, forwards to llm-service with the internal token, returns the answer with its citations and the data it rests on, or a refusal |
 | read-only structured data endpoints | planned | campaigns / campaign_metrics / hosts queries (for a frontend dashboard, optional) |

@@ -19,13 +19,23 @@ shown; a citation that doesn't exist stays an error, because that is the model m
 A refusal reads the same whether a document exists in another department or not: anything else would tell
 people what other departments have.
 
+The steps are a LangGraph state graph, the same shape as the data path's (app/sql_agent/pipeline.py):
+
+    search -> rerank -> answer
+       |
+       +-> refuse   below the similarity threshold: no reranking, no model
+
 The database connection is held only for the search: a pool of 20 can't wait for hundreds of model calls.
 """
 import logging
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypedDict
+
+from langgraph.graph import END, START, StateGraph
+from langgraph.runtime import Runtime
 
 from app.rag import reranking, retrieval
 from app.rag.query_models import AnswerModel, QueryEmbedder
@@ -108,6 +118,37 @@ class QueryTrace:
     model_ms: float
     input_tokens: int
     output_tokens: int
+    excerpts: list[RetrievedChunk]     # what the model was given; none when the threshold refused the question
+
+
+class DocumentsState(TypedDict, total=False):
+    """What the documents graph's steps hand each other."""
+    question: str
+    vector: Sequence[float]
+    ranked: list[RetrievedChunk]
+    reranked: bool
+    top_score: float
+    excerpts: list[RetrievedChunk]
+    result: QueryAnswer | None
+    error: InvalidAnswer | None
+    uncited: bool
+    tokens: tuple[int, int]
+    search_ms: float
+    rerank_ms: float
+    model_ms: float
+
+
+@dataclass(frozen=True)
+class DocumentsRun:
+    """What stays the same for one question: what the asker may read, how deep to search, and the time left."""
+    departments: list[str] | None
+    depth: int
+    budget: TimeBudget
+
+
+SEARCH, RERANK, ANSWER, REFUSE = "search", "rerank", "answer", "refuse"
+# What decides the dotted edges after the search: the drawn graph shows them
+BELOW_THRESHOLD, RERANKER, NO_RERANKER = "below the threshold", "a reranker", "no reranker"
 
 
 class QueryService:
@@ -121,66 +162,86 @@ class QueryService:
         self._instructions = instructions
         self._reranker = reranker
         self._rerank_candidates = rerank_candidates if reranker else 0
+        self.graph = self._build_graph()
 
-    async def answer(self, question: str, *, user_id: int, role: str, department: str | None,
-                     budget: TimeBudget) -> QueryAnswer:
-        traced = await self.trace(question, role=role, department=department, budget=budget)
-        if traced.error:
-            raise traced.error
-        # The question itself stays out of the logs: what people ask is private (see the audit rules)
-        log.info("query user=%s role=%s status=%s chunks=%d top_score=%.3f reranked=%s embed_ms=%.0f search_ms=%.0f "
-                 "rerank_ms=%.0f model_ms=%.0f tokens_in=%d tokens_out=%d", user_id, role, traced.result.status,
-                 min(len(traced.candidates), self._top_k), traced.top_score, traced.reranked, traced.embed_ms,
-                 traced.search_ms, traced.rerank_ms, traced.model_ms, traced.input_tokens, traced.output_tokens)
-        return traced.result
+    def _build_graph(self):
+        graph = StateGraph(DocumentsState, context_schema=DocumentsRun)
+        graph.add_node(SEARCH, self._search)
+        graph.add_node(RERANK, self._rerank)
+        graph.add_node(ANSWER, self._answer)
+        graph.add_node(REFUSE, self._refuse)
+        graph.add_edge(START, SEARCH)
+        graph.add_conditional_edges(SEARCH, self._after_search,
+                                    {BELOW_THRESHOLD: REFUSE, RERANKER: RERANK, NO_RERANKER: ANSWER})
+        graph.add_edge(RERANK, ANSWER)
+        graph.add_edge(ANSWER, END)
+        graph.add_edge(REFUSE, END)
+        return graph.compile()
 
     async def trace(self, question: str, *, role: str, department: str | None, budget: TimeBudget,
-                    candidates: int = 0) -> QueryTrace:
-        """The query path itself, shared by /query and the evaluation, so the evaluation measures the code that runs.
-        `candidates` searches deeper without changing what the model sees: the evaluation needs the top 50 to tell a
-        chunk ranked too low from one the search never found. With a reranker the search returns rerank_candidates,
-        the reranker orders them, and the prompt gets the first top_k of that order.
+                    candidates: int = 0, vector: Sequence[float] | None = None) -> QueryTrace:
+        """The documents path, shared by the query path and the evaluation, so the evaluation measures the code that
+        runs. `candidates` searches deeper without changing what the model sees: the evaluation needs the top 50 to tell
+        a chunk ranked too low from one the search never found. With a reranker the search returns rerank_candidates,
+        the reranker orders them, and the prompt gets the first top_k of that order. vector: the question's embedding
+        when the caller already has it, as the query path does.
 
         The threshold looks at the best vector similarity, before reranking: it only asks whether a question is far from
         everything (config.py), and reranker scores are on another scale that would need a threshold of their own."""
         departments = retrieval.visible_departments(role, department)   # before anything costs money or time
-
         started = time.perf_counter()
-        vector = await self._embedder.embed_question(question, budget)
+        if vector is None:
+            vector = await self._embedder.embed_question(question, budget)
         embedded = time.perf_counter()
-        async with self._pool.connection(timeout=max(budget.remaining(), 0)) as conn:
-            found = await retrieval.search(conn, vector, departments, self._embedder.model,
-                                           max(self._top_k, candidates, self._rerank_candidates))
-        searched = time.perf_counter()
+        final = await self.graph.ainvoke(
+            {"question": question, "vector": vector, "reranked": False, "excerpts": [], "error": None, "uncited": False,
+             "tokens": (0, 0), "rerank_ms": 0.0, "model_ms": 0.0},
+            context=DocumentsRun(departments, max(self._top_k, candidates, self._rerank_candidates), budget))
+        return QueryTrace(final["result"], final["error"], final["uncited"], final["ranked"], final["reranked"],
+                          final["top_score"], (embedded - started) * 1000, final["search_ms"], final["rerank_ms"],
+                          final["model_ms"], *final["tokens"], final["excerpts"])
 
-        top_score = found[0].score if found else 0.0
-        ranked, reranked = found, False
-        if self._rerank_candidates and top_score >= self._min_similarity:   # a question refused anyway isn't reranked
-            head, rest = found[:self._rerank_candidates], found[self._rerank_candidates:]
-            head, reranked = await reranking.rerank_or_keep(self._reranker, question, head, budget)
-            ranked = head + rest
-        reranked_at = time.perf_counter()
+    # ---- the graph's steps
 
-        chunks = ranked[:self._top_k]
-        input_tokens = output_tokens = 0
-        result, error, uncited = QueryAnswer(REFUSED, REFUSAL_TEXT, [], departments), None, False
-        if top_score >= self._min_similarity:
-            reply = await self._model.answer(self._instructions, build_prompt(question, chunks), budget)
-            input_tokens, output_tokens = reply.input_tokens, reply.output_tokens
-            try:
-                if not reply.complete:
-                    raise InvalidAnswer("the model's answer was cut off")
-                if reply.text.strip() != NOT_IN_DOCUMENTS:
-                    numbers = cited_numbers(reply.text, len(chunks))
-                    result = QueryAnswer(ANSWERED, reply.text.strip(), [Citation(n, chunks[n - 1]) for n in numbers],
-                                         departments)
-            except Uncited:
-                # The refusal it was meant to be. Logged, so a model that stops citing shows up in the query log
-                log.warning("the model's reply cited no excerpt and is shown as a refusal")
-                uncited = True
-            except InvalidAnswer as invalid:   # returned, not raised, so the evaluation keeps what the search found
-                result, error = None, invalid
-        finished = time.perf_counter()
-        return QueryTrace(result, error, uncited, ranked, reranked, top_score, (embedded - started) * 1000,
-                          (searched - embedded) * 1000, (reranked_at - searched) * 1000, (finished - reranked_at) * 1000,
-                          input_tokens, output_tokens)
+    async def _search(self, state: DocumentsState, runtime: Runtime[DocumentsRun]) -> dict:
+        run, started = runtime.context, time.perf_counter()
+        async with self._pool.connection(timeout=max(run.budget.remaining(), 0)) as conn:
+            found = await retrieval.search(conn, state["vector"], run.departments, self._embedder.model, run.depth)
+        return {"ranked": found, "top_score": found[0].score if found else 0.0,
+                "search_ms": (time.perf_counter() - started) * 1000}
+
+    def _after_search(self, state: DocumentsState) -> str:
+        """A question refused anyway isn't reranked."""
+        if state["top_score"] < self._min_similarity:
+            return BELOW_THRESHOLD
+        return RERANKER if self._rerank_candidates else NO_RERANKER
+
+    async def _rerank(self, state: DocumentsState, runtime: Runtime[DocumentsRun]) -> dict:
+        started, found = time.perf_counter(), state["ranked"]
+        head, rest = found[:self._rerank_candidates], found[self._rerank_candidates:]
+        head, reranked = await reranking.rerank_or_keep(self._reranker, state["question"], head, runtime.context.budget)
+        return {"ranked": head + rest, "reranked": reranked, "rerank_ms": (time.perf_counter() - started) * 1000}
+
+    async def _answer(self, state: DocumentsState, runtime: Runtime[DocumentsRun]) -> dict:
+        run, started = runtime.context, time.perf_counter()
+        chunks = state["ranked"][:self._top_k]
+        reply = await self._model.answer(self._instructions, build_prompt(state["question"], chunks), run.budget)
+        result, error, uncited = QueryAnswer(REFUSED, REFUSAL_TEXT, [], run.departments), None, False
+        try:
+            if not reply.complete:
+                raise InvalidAnswer("the model's answer was cut off")
+            if reply.text.strip() != NOT_IN_DOCUMENTS:
+                numbers = cited_numbers(reply.text, len(chunks))
+                result = QueryAnswer(ANSWERED, reply.text.strip(), [Citation(n, chunks[n - 1]) for n in numbers],
+                                     run.departments)
+        except Uncited:
+            # The refusal it was meant to be. Logged, so a model that stops citing shows up in the query log
+            log.warning("the model's reply cited no excerpt and is shown as a refusal")
+            uncited = True
+        except InvalidAnswer as invalid:   # kept, not raised, so the evaluation keeps what the search found
+            result, error = None, invalid
+        return {"excerpts": chunks, "result": result, "error": error, "uncited": uncited,
+                "tokens": (reply.input_tokens, reply.output_tokens), "model_ms": (time.perf_counter() - started) * 1000}
+
+    async def _refuse(self, state: DocumentsState, runtime: Runtime[DocumentsRun]) -> dict:
+        return {"result": QueryAnswer(REFUSED, REFUSAL_TEXT, [], runtime.context.departments)}

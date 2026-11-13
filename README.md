@@ -84,16 +84,21 @@ Two kinds of uploads share this pipeline: **documents** (SOPs, campaign plans, p
 question + X-User-Id
   │
   ▼
-backend /query ──forwards──▶ llm-service /query
-  1. resolve the user → department, role
-  2. check the cache (hit → return immediately)
-  3. route: documents / data / both
-     ├─ documents → vector search, filtered to the user's department plus company-wide docs
-     └─ data      → Text-to-SQL: schema in the prompt → SELECT-only SQL
-                    → department filter injected → execute
-  4. retrieved passages + SQL rows + question + conversation history → LLM → answer
-  5. write the cache and the session memory
+backend /query: the department and role come from the users table, never from the request; rate limit
+  │ forwards
+  ▼
+llm-service /query
+  ├─ route: one model call, documents / data / both / none ─────────────────────────────┐
+  └─ embed the question ─┬─ documents: vector search (own department + ALL) → rerank → answer │ the route cancels
+                         └─ data: write SQL → check → run as a read-only role (↺ retry)       │ the path it rules out
+  then: documents → that answer · data → the rows explained · both → one answer from the passages and the rows
+  returns the answer, its citations, and the SQL with its rows
 ```
+
+Both paths start while the router decides, because routing is a model call: waiting for it would put a question about
+data at about 3.8 s, estimated from each step's measured time, against a 3 s target. The path the route rules out is
+cancelled. Not built yet: the cache, conversation memory,
+and turning follow-ups and relative dates ("the last campaign") into a question that stands on its own.
 
 ---
 

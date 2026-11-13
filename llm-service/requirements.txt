@@ -35,6 +35,10 @@ tiktoken==0.14.0   # token counts with the embedding model's tokenizer; download
 # against 75 MB and 20
 langchain==1.4.9
 langchain-openai==1.7.4
+# The query path's two state graphs (app/rag/answering.py, app/sql_agent/pipeline.py). langchain above brings it, so it
+# installs nothing new; pinned because the service now imports it itself. Measured on a development machine: importing
+# it adds about 17 MB to a process, and a run of a graph about 0.35 ms plus 0.33 ms a step of CPU
+langgraph==1.2.20
 
 # ---- Text-to-SQL checks ----
 # Parses a generated query so it can be checked (one SELECT, only the metric views, only allowed functions) and given

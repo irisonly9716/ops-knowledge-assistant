@@ -32,6 +32,8 @@ DOCUMENTS, DATA = "documents", "data"
 BOTH = frozenset({DOCUMENTS, DATA})
 PATHS = {"documents": frozenset({DOCUMENTS}), "data": frozenset({DATA}), "both": BOTH, "none": frozenset({DOCUMENTS})}
 MODEL, KEYWORDS = "model", "keywords"
+# The reply is a route, a number and one sentence: about 25 tokens on dev. The limit only stops a runaway reason
+MAX_OUTPUT_TOKENS = 200
 
 INSTRUCTIONS = """You decide where the answer to a question from a live-commerce company's operations staff comes from.
 

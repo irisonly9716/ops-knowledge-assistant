@@ -1,7 +1,7 @@
 # llm-service
 
-Python / FastAPI. Document ingestion and retrieval-based answers now; the Text-to-SQL pipeline is built but not yet
-reachable from `/query`; query routing and conversation memory later.
+Python / FastAPI. Document ingestion, and `/query`: routing, answers from the documents, from the campaign data
+(Text-to-SQL) or from both. Conversation memory and caching later.
 
 ## Running it locally
 
@@ -15,8 +15,8 @@ uv pip install -r requirements.txt
 uv run python -m app.server --reload
 ```
 
-It refuses to start without `OPENAI_API_KEY` and `INTERNAL_SERVICE_TOKEN` in `.env`, instead of failing on the first
-question. Use `python -m app.server`, not plain `uvicorn app.main:app`: see "The query path" below.
+It refuses to start without `OPENAI_API_KEY`, `INTERNAL_SERVICE_TOKEN` and `SQL_READER_PASSWORD` in `.env`, instead of
+failing on the first question; the reader's password also needs `scripts.enable_sql_reader` (docs/development.md). Use `python -m app.server`, not plain `uvicorn app.main:app`: see "The query path" below.
 
 http://localhost:8000/health returning `{"status":"ok",...}` means it works.
 http://localhost:8000/docs is the generated API documentation.
@@ -39,8 +39,9 @@ python -m app.server --reload
 ```
 app/
 ├── server.py      how to start the API: chooses the event loop, then starts uvicorn
-├── main.py        the FastAPI app: startup checks, error shape, /health
+├── main.py        the FastAPI app: startup checks, the query flow built from the settings, error shape, /health
 ├── query_api.py   POST /query: internal token, request and response format, time limit, failures to status codes
+├── query_flow.py  the top of a query: route, both paths at once, cancel the one ruled out, one answer
 ├── config.py      environment variables (the repository-root .env)
 ├── db.py          Postgres: sync connections for ingestion, async read-only pools for queries and for generated SQL
 ├── time_budget.py one time budget per message or query, shared by all its layers
@@ -59,18 +60,18 @@ app/
 │   ├── store.py             SQL for ingestion: uploads row, catalog labels, documents + doc_chunks
 │   ├── retrieval.py         who may see what, and the search itself
 │   ├── query_models.py      the async model calls of a query, with retries inside the budget
-│   └── answering.py         a question to an answer: threshold, prompt, citation check, refusal
+│   └── answering.py         the documents path, a state graph: search, threshold, rerank, answer, citation check
 ├── sql_agent/     Text-to-SQL
 │   ├── schema.py            what a model is shown: views or tables, the data dictionary, the names in the data
 │   ├── guard.py             the checks a generated query passes (sqlglot, allow-lists), the department filter, the row limit
 │   ├── execute.py           one SELECT, read-only, with the asker's department set, time and row limits
 │   ├── examples.py          the example questions closest to a question; examples.yaml holds them
-│   └── pipeline.py          a question to an answer: examples, write, check, run, retry with the error, explain
+│   └── pipeline.py          the data path, a state graph: examples, write, check, run, retry with the error; then explain
 ├── router/        routing.py: which paths a question takes
 └── memory/        Redis cache + conversation memory
 evaluation/        the evaluation dataset's format (dataset.py), the review page (review.py), the runs (run.py for
-                   documents, sql_run.py for SQL: the pipeline, or the baseline agent in sql_agent.py); not part of
-                   the service
+                   documents, sql_run.py for SQL: the pipeline, or the baseline agent in sql_agent.py, route_run.py
+                   for routing, flow_run.py for the whole query path); not part of the service
 tests/             pytest; test_events (contract / cross-language drift) test_storage (path traversal)
                    test_upload_consumer (every branch of the consume loop) test_health
                    test_embeddings (fake OpenAI client) test_parsing (all three formats parse the same)
@@ -80,6 +81,8 @@ tests/             pytest; test_events (contract / cross-language drift) test_st
                    test_answering (fake models: refusals, citations, nothing held while waiting)
                    test_query_models (fake client: retries inside the budget, the limit on calls at once)
                    test_query_api (the real app with a fake service: who may call, failures, starting up)
+                   test_query_flow (fake paths and router: what starts before the route, what it cancels, which
+                   answer reaches the asker, nothing left running)
                    test_ingestion (real Postgres: idempotency, rollback, replacements, conflicts, for documents and tables)
                    test_generate_corpus (the corpus generator without a model: numbers, the rules of a draft, authors)
                    test_dataset (the dataset's format, the split, finding a labelled section)
@@ -202,6 +205,108 @@ creates a real "Kafka smoke test" SOP each time, see the script's docstring for 
 trusted, so every call must carry `X-Internal-Token` and the port must not be reachable from anywhere else. It listens
 on 127.0.0.1 unless `LLM_SERVICE_HOST` says otherwise. Examples of the format: `contracts/query.examples.json`.
 
+`app/query_flow.py` runs a question:
+
+```
+question --+-- route: one model call, 2 s at most ----------------------------------+
+           +-- embed --+-- documents graph: search -> rerank -> answer             | the route cancels the
+                       +-- data graph: context -> write -> check -> run (retry)     | path it rules out
+then by the route:  documents -> the documents' answer
+                    data      -> the rows explained
+                    both      -> one answer written from the excerpts and the rows together
+```
+
+**Both paths start before the route is known.** Routing is a model call, p50 1.2 s and p95 1.5 to 1.7 s on a development
+machine, and waiting for it would put a question about data at about 3.8 s, estimated from each step's measured time,
+against the 3 s target. So the documents' answer and the data path's first query are written while the router decides,
+and the path it rules out is cancelled: its model call stops, and a query already running in Postgres is cancelled on the
+server, with its connection back in the pool and working (measured: 5 ms, `test_sql_pipeline.py`). The price is the model
+calls thrown away: a query being written for a question about documents, and a documents' answer for a question that
+gets one answer from both.
+
+**Why the top isn't a LangGraph graph.** LangGraph runs a graph in steps, and the branches of a step all wait for the
+slowest before any goes on. Measured with sleeps standing in for the calls: a 0.5 s chain of three nodes beside a 1 s
+router finished at 1.47 s; the same chain as one subgraph node, at 0.53 s. And a running branch can't be stopped from
+inside the graph, so a question about documents would wait for the data path's query and its retries. So asyncio starts
+the two paths, cancels one and joins the rest, and each path is a state graph of its own. They cost, measured on a
+development machine: about 17 MB more per process to import LangGraph, and 0.35 ms plus 0.33 ms a step of CPU per run,
+about 3 ms a question for the two graphs. Little against 3 s, but CPU is what limits a process (below).
+
+**A question for both.** With excerpts and rows, one model call writes the answer from the two together, citing the
+excerpts as a documents answer does; its numbers come from the rows, which the asker gets with it, so an answer that
+cites no excerpt still stands. Answering from each and merging the answers would be a model call more, about a second,
+and the merge could drop citations. With rows and no excerpts the rows are explained; with no rows, the documents' answer
+is used. How hard the model reasons for it is `COMPOSE_REASONING_EFFORT`, none until the evaluation grades these answers.
+
+**What it returns.** The answer; `status`: answered, refused, or failed when no query that answers it could be written;
+the citations; the departments searched; the `paths` that ran; and `data`, the query an answer rests on with every row,
+each value as text so amounts stay exact.
+
+**Errors.** A path that was needed and failed fails the query, as either path alone did; one the route ruled out may
+fail unheard. Whatever happens, every task a question started is cancelled and waited for before it returns.
+
+The two graphs, as LangGraph draws them (`graph.get_graph().draw_mermaid()`; `test_query_flow.py` checks they match the
+code). The documents path:
+
+```mermaid
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	search(search)
+	rerank(rerank)
+	answer(answer)
+	refuse(refuse)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> search;
+	rerank --> answer;
+	search -. &nbsp;no reranker&nbsp; .-> answer;
+	search -. &nbsp;below the threshold&nbsp; .-> refuse;
+	search -. &nbsp;a reranker&nbsp; .-> rerank;
+	answer --> __end__;
+	refuse --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
+```
+
+The data path (`SQL_RETRIES` is 2; after the last failure it gives up):
+
+```mermaid
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	context(context)
+	write(write)
+	check(check)
+	run(run)
+	give_up(give_up)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> context;
+	check -. &nbsp;no retry left&nbsp; .-> give_up;
+	check -. &nbsp;passed&nbsp; .-> run;
+	check -. &nbsp;rejected&nbsp; .-> write;
+	context --> write;
+	run -. &nbsp;rows&nbsp; .-> __end__;
+	run -. &nbsp;no retry left&nbsp; .-> give_up;
+	run -. &nbsp;error&nbsp; .-> write;
+	write -. &nbsp;not in the data&nbsp; .-> __end__;
+	write -. &nbsp;a query&nbsp; .-> check;
+	give_up --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
+```
+
+### The documents path
+
 ```
 role + department -> which departments may be searched (an unknown role is an error, never an unfiltered search)
 question          -> embedding
@@ -263,7 +368,12 @@ refusing in its own words instead of with the fixed word, and each would have be
 
 **Measured latency** (a few requests on a development machine, not a load test): embedding 0.15 to 0.7 s, search 0.2 ms on
 the server, model 1.3 to 3.1 s with one at 8 s. So a full answer takes about 2 to 3.4 s and **doesn't always meet the 3 s
-target**. On Windows each search also costs about 44 ms in Docker Desktop's port forwarding: the 19 KB vector takes 44 ms
+target**. With routing, through the backend, 6 questions (documents, data, both, another department's data, an
+executive's, one nothing answers) took 2.0 to 3.7 s; the first after starting took 4.7 s, because setting up the first
+connections made the router miss its 2 s and the keyword rule decided. On all 108 dev questions, in-process: p50 1.6 s
+for the documents, 2.7 s for the data, and 4.5 s for the 12 that need both, none of those under 3 s, because the answer
+written from both takes about as long again as the paths ("The whole query path" in
+[docs/eval-report.md](../docs/eval-report.md)). On Windows each search also costs about 44 ms in Docker Desktop's port forwarding: the 19 KB vector takes 44 ms
 through it and 0.2 ms inside the container, so that part is specific to this setup.
 
 **The limit on model calls.** `ModelCallLimit` is an `asyncio.Semaphore`, one per process, shared by embeddings and answers.
@@ -276,7 +386,9 @@ and never past its budget, then gets `503` with `Retry-After`, so nobody queues 
 the model saw at most 2 calls, 8 queries got the `503` in about 1.1 s, and the other 2 got the `504` at 12 s. A slot is held
 only during the request itself, not while waiting to retry, or a rate-limited provider would use up every slot with queries
 that are only sleeping. The SDK's own limits follow this setting, because its default of 1,000 connections, 100 kept
-alive, would be a hidden limit below the 500 QPS target.
+alive, would be a hidden limit below the 500 QPS target. These numbers were measured before routing, when a query made
+one model call at a time. A routed query holds up to three at once while the router decides (the router, the documents'
+answer and the query being written), so the same peak needs more slots; how many hasn't been measured (#11).
 
 **How much one process can do** (real code and real Postgres in a Linux container with 12 CPUs, a stub model taking 2.9 s,
 5 to 10 s of load, every query answered and none refused. Not the load test of #11, and the backend isn't in it):
@@ -292,6 +404,8 @@ alive, would be a hidden limit below the 500 QPS target.
 | 8 workers | 500 | 3.12 s | 3.38 s | 3.58 s | 1,486 |
 
 So one process reaches about 100 QPS: past that, the limit is one CPU core, not the slots. 3 processes weren't run.
+This was the documents path alone. A routed query does more in a process (the router, the two graphs, the data path's
+reads and query), so these numbers don't carry over to it, and it hasn't been measured (#11).
 
 **Database connections.** Each process has its own pool, and Postgres allows 100 connections, shared with the backend and
 the consumers, so `QUERY_POOL_SIZE` is 5. A connection is held only for the search: at 300 QPS at most 3 statements ran at
@@ -306,8 +420,8 @@ network. Through Docker Desktop's port forwarding on Windows, at 44 ms each, 5 c
 3.49 s, slowest 4.43 s; at 300 QPS one worker hit the limit and 214 of 900 queries got a `504`. Linux doesn't have this
 limit, so load tests belong there. The whole chain at 300 QPS hasn't been run yet: that is #11.
 
-**Not built yet:** the router (a question about numbers belongs to Text-to-SQL, but today it can only be answered from
-documents), the cache and the audit table.
+**Not built yet:** the cache, conversation memory, the audit table, and turning a follow-up or a relative date ("the last
+campaign") into a question that stands on its own.
 
 ## Creating the Kafka topics
 
@@ -394,8 +508,9 @@ uv run python -m scripts.enable_sql_reader   # once: sql_reader's login, with SQ
 uv run python -m evaluation.sql_run --split dev --name pipeline --pipeline --dictionary --views --examples 3 --retries 2
 ```
 
-`app/sql_agent/pipeline.py` answers a question about the campaign data in fixed steps, built for the query path but not
-reachable from `/query` until routing exists:
+`app/sql_agent/pipeline.py` answers a question about the campaign data in fixed steps, the data path of `/query`.
+Steps 1 to 5 are a LangGraph state graph (drawn under "The query path"), so the retry is a loop with a bound that can be
+seen; step 6 is apart, because a question for both gets one answer from the excerpts and the rows instead:
 
 1. **Context.** The five metric views with their comments, the names in the data (the asker's department's only) and
    the 3 example questions closest to the question, among the asker's department's and those for every department. The
@@ -428,7 +543,7 @@ calls a question, p50 2.4 s, about $0.0003 a question (numbers: [docs/eval-repor
 uv run python -m evaluation.route_run --split dev --name 1   # every way of routing on dev, about $0.007
 ```
 
-`app/router/routing.py` decides which paths a question takes, not wired into `/query` yet. One model call
+`app/router/routing.py` decides which paths a question takes (`app/query_flow.py` runs it). One model call
 (`ROUTER_MODEL`, no reasoning) with a reply of a fixed shape, a Pydantic model the provider holds the reply to
 (structured output): the route (documents, data, both or none), how sure, and why. Both paths run below
 `ROUTER_MIN_CONFIDENCE` (0.95); `none` still runs the document path, whose threshold and model decide whether to refuse,

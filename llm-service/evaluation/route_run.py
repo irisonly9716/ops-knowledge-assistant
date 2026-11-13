@@ -44,7 +44,6 @@ ROUTES = ("documents", "data", "both", "none")
 NEEDED = {"documents": frozenset({DOCUMENTS}), "data": frozenset({DATA}), "both": BOTH, "none": frozenset()}
 NEIGHBOURS = 5
 THRESHOLDS = (0.0, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95)
-MAX_OUTPUT_TOKENS = 200
 
 
 @dataclass(frozen=True)
@@ -202,7 +201,7 @@ async def main_async(args: argparse.Namespace) -> None:
     client = openai_client_from_settings()
     limit = ModelCallLimit(settings.model_max_concurrent_calls, settings.model_slot_wait_seconds)
     router = QuestionRouter(OpenAIStructuredModel(client, settings.router_model, limit, settings.router_timeout_seconds,
-                                                  MAX_OUTPUT_TOKENS),
+                                                  routing.MAX_OUTPUT_TOKENS),
                             min_confidence=0.0, timeout_seconds=settings.router_timeout_seconds)
     started = time.perf_counter()
     records = []
