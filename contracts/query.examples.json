@@ -30,7 +30,9 @@
       ],
       "searchedDepartments": ["Beauty", "ALL"],
       "paths": ["documents"],
-      "data": null
+      "data": null,
+      "basis": null,
+      "candidates": null
     },
     "refused": {
       "status": "refused",
@@ -38,7 +40,9 @@
       "citations": [],
       "searchedDepartments": ["Beauty", "ALL"],
       "paths": ["documents"],
-      "data": null
+      "data": null,
+      "basis": null,
+      "candidates": null
     },
     "answeredFromData": {
       "status": "answered",
@@ -51,7 +55,9 @@
         "columns": ["campaign_name", "start_date", "total_gmv"],
         "rows": [["Electronics Black Friday Live", "2025-11-16", "1043330.18"]],
         "truncated": false
-      }
+      },
+      "basis": null,
+      "candidates": null
     },
     "answeredFromBoth": {
       "status": "answered",
@@ -74,7 +80,47 @@
         "columns": ["campaign_name", "start_date", "avg_conversion_rate"],
         "rows": [["Electronics New Product Launch", "2026-09-29", "0.08736000000000000000"]],
         "truncated": false
-      }
+      },
+      "basis": null,
+      "candidates": null
+    },
+    "answeredAboutTheLastCampaign": {
+      "status": "answered",
+      "answer": "Based on Beauty Black Friday Live, which ran from 2025-11-18 to 2025-12-14.\n\nIt brought in $600,441.45 in GMV.",
+      "citations": [],
+      "searchedDepartments": ["Beauty"],
+      "paths": ["data"],
+      "data": {
+        "sql": "SELECT campaign_name, start_date, total_gmv FROM (SELECT * FROM campaign_summary WHERE department = CURRENT_SETTING('app.department')) AS campaign_summary WHERE campaign_name = 'Beauty Black Friday Live' AND start_date = CAST('2025-11-18' AS DATE) LIMIT 201",
+        "columns": ["campaign_name", "start_date", "total_gmv"],
+        "rows": [["Beauty Black Friday Live", "2025-11-18", "600441.45"]],
+        "truncated": false
+      },
+      "basis": {"department": "Beauty", "campaignName": "Beauty Black Friday Live", "startDate": "2025-11-18", "endDate": "2025-12-14"},
+      "candidates": null
+    },
+    "clarify": {
+      "status": "clarify",
+      "answer": "Each department ran its own: which one do you mean? Ask again with its name.",
+      "citations": [],
+      "searchedDepartments": null,
+      "paths": [],
+      "data": null,
+      "basis": null,
+      "candidates": [
+        {"department": "Home Goods", "campaignName": "Home Black Friday Live", "startDate": "2025-11-18", "endDate": "2025-12-18"},
+        {"department": "Beauty", "campaignName": "Beauty Black Friday Live", "startDate": "2025-11-18", "endDate": "2025-12-14"}
+      ]
+    },
+    "noSuchCampaign": {
+      "status": "refused",
+      "answer": "I couldn't find a finished campaign you have access to that matches.",
+      "citations": [],
+      "searchedDepartments": ["Beauty"],
+      "paths": [],
+      "data": null,
+      "basis": null,
+      "candidates": null
     },
     "failed": {
       "status": "failed",
@@ -82,7 +128,9 @@
       "citations": [],
       "searchedDepartments": ["Consumer Electronics"],
       "paths": ["data"],
-      "data": null
+      "data": null,
+      "basis": null,
+      "candidates": null
     }
   }
 }

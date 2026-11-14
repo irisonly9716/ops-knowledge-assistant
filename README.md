@@ -89,16 +89,18 @@ backend /query: the department and role come from the users table, never from th
   ▼
 llm-service /query
   ├─ route: one model call, documents / data / both / none ─────────────────────────────┐
+  ├─ rewrite: a follow-up, or "the last Black Friday", into a question that stands alone   │
   └─ embed the question ─┬─ documents: vector search (own department + ALL) → rerank → answer │ the route cancels
                          └─ data: write SQL → check → run as a read-only role (↺ retry)       │ the path it rules out
+  rewritten: find the campaign among the user's own (or ask back), work out the dates, start the paths again
   then: documents → that answer · data → the rows explained · both → one answer from the passages and the rows
-  returns the answer, its citations, and the SQL with its rows
+  returns the answer, its citations, the SQL with its rows, and the campaign it is about
 ```
 
 Both paths start while the router decides, because routing is a model call: waiting for it would put a question about
 data at about 3.8 s, estimated from each step's measured time, against a 3 s target. The path the route rules out is
-cancelled. Not built yet: the cache, conversation memory,
-and turning follow-ups and relative dates ("the last campaign") into a question that stands on its own.
+cancelled. Not built yet: the cache and conversation memory, so `/query` rewrites a question with no turns before it;
+the evaluation passes a follow-up's own.
 
 ---
 

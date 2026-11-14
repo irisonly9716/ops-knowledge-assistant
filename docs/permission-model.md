@@ -144,6 +144,11 @@ The database holds the department too (migration V11), so a query that gets past
 - **The statistics catalog** is a known way around row-level security: the planner samples a column's values into
   `pg_stats`. Postgres shows a column's statistics only to a role that may read the table and isn't held by
   row-level security on it, so `sql_reader` sees none of the business tables'
+- **"The last campaign" is found the same way** (`app/sql_agent/campaigns.py`): a query written in code, with bound
+  parameters, run as `sql_reader` under row-level security in the asker's department, with the department in its WHERE
+  clause as well; tests take each layer away in turn. Another department's campaign is not found, exactly like one that
+  doesn't exist, and a question asked back lists only campaigns this search found. The campaign list never goes to a
+  model. Whether a campaign has a review is read as `ops`, by id, only for campaigns the search already returned
 
 ## 3. Filtering documents (vector search)
 
@@ -188,8 +193,8 @@ A campaign may involve several departments. Two options; the simple one first:
 - [ ] Uploads and replacements by `executive` and `admin` are rejected; `admin` can't approve; nobody approves their own upload
 - [ ] Document retrieval: a `staff` user can't retrieve another department's SOP but can retrieve company-wide (`ALL`) SOPs
 - [ ] The SQL the LLM generates is filtered by `department_id` even when the question doesn't mention a department
-- [ ] "The last campaign" only resolves among campaigns the user can see: a newer campaign in another department changes nothing, and a follow-up question never lists one
-- [ ] Asking about another department's campaign id gets the same answer as an id that doesn't exist
+- [x] "The last campaign" only resolves among campaigns the user can see: a newer campaign in another department changes nothing, and a question asked back never lists one (`tests/test_campaigns.py`)
+- [x] Asking about another department's campaign gets the same answer as one that doesn't exist (`tests/test_campaigns.py`, and end to end through the backend)
 
 ## 6. No permissions at the host level for now
 

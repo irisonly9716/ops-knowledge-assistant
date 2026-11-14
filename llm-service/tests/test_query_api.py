@@ -2,6 +2,7 @@
 look. TestClient isn't used as a context manager, so the app's startup (real pool, real client) doesn't run."""
 import asyncio
 import json
+from datetime import date
 import sys
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from app.query_flow import FlowAnswer
 from app.rag.answering import ANSWERED, REFUSAL_TEXT, REFUSED, Citation, InvalidAnswer
 from app.rag.query_models import ModelBusy
 from app.rag.retrieval import RetrievedChunk
+from app.sql_agent.campaigns import Campaign
 from app.sql_agent.execute import QueryResult
 from app.sql_agent.pipeline import FAILED, FAILED_TEXT
 
@@ -186,6 +188,30 @@ def test_a_question_no_query_could_be_written_for_is_an_answer_that_says_so_not_
                                                   None))
     r = client.post("/query", json=body(), headers=HEADERS)
     assert r.status_code == 200 and r.json() == CONTRACT["responses"]["failed"]
+
+
+def campaign_of(example: dict) -> Campaign:
+    return Campaign(1, example["campaignName"], example["department"], date.fromisoformat(example["startDate"]),
+                    date.fromisoformat(example["endDate"]))
+
+
+def test_an_answer_about_the_last_campaign_carries_the_campaign_it_turned_out_to_be(client):
+    example = CONTRACT["responses"]["answeredAboutTheLastCampaign"]
+    data = example["data"]
+    app.state.query_flow = FakeService(FlowAnswer(
+        ANSWERED, example["answer"], [], ["Beauty"], ("data",), data["sql"],
+        QueryResult(tuple(data["columns"]), tuple(tuple(row) for row in data["rows"]), truncated=False),
+        campaign_of(example["basis"])))
+    assert client.post("/query", json=body(), headers=HEADERS).json() == example
+
+
+def test_a_question_asked_back_lists_its_candidates_and_ran_no_path(client):
+    example = CONTRACT["responses"]["clarify"]
+    app.state.query_flow = FakeService(FlowAnswer(
+        "clarify", example["answer"], [], None, (), None, None, None,
+        tuple(campaign_of(c) for c in example["candidates"])))
+    r = client.post("/query", json=body(role="executive", department=None), headers=HEADERS)
+    assert r.status_code == 200 and r.json() == example
 
 
 def test_searching_everything_is_a_null_scope(client):
@@ -411,6 +437,7 @@ async def test_it_refuses_to_start_without_the_sql_readers_password(monkeypatch)
 
 
 def test_the_contract_has_the_cases_it_should():
-    assert set(CONTRACT["responses"]) == {"answered", "refused", "answeredFromData", "answeredFromBoth", "failed"}
+    assert set(CONTRACT["responses"]) == {"answered", "refused", "answeredFromData", "answeredFromBoth",
+                                          "answeredAboutTheLastCampaign", "clarify", "noSuchCampaign", "failed"}
     with pytest.raises(ValidationError):
         QueryRequest.model_validate({**CONTRACT["requests"][0], "role": "intern"})

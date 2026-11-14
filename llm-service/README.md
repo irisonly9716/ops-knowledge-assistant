@@ -66,8 +66,9 @@ app/
 │   ├── guard.py             the checks a generated query passes (sqlglot, allow-lists), the department filter, the row limit
 │   ├── execute.py           one SELECT, read-only, with the asker's department set, time and row limits
 │   ├── examples.py          the example questions closest to a question; examples.yaml holds them
-│   └── pipeline.py          the data path, a state graph: examples, write, check, run, retry with the error; then explain
-├── router/        routing.py: which paths a question takes
+│   ├── pipeline.py          the data path, a state graph: examples, write, check, run, retry with the error; then explain
+│   └── campaigns.py         which campaign "the last one" is, among the asker's own, as sql_reader
+├── router/        routing.py: which paths a question takes; rewriting.py: a question that stands on its own; periods.py: dates from today
 └── memory/        Redis cache + conversation memory
 evaluation/        the evaluation dataset's format (dataset.py), the review page (review.py), the runs (run.py for
                    documents, sql_run.py for SQL: the pipeline, or the baseline agent in sql_agent.py, route_run.py
@@ -82,7 +83,9 @@ tests/             pytest; test_events (contract / cross-language drift) test_st
                    test_query_models (fake client: retries inside the budget, the limit on calls at once)
                    test_query_api (the real app with a fake service: who may call, failures, starting up)
                    test_query_flow (fake paths and router: what starts before the route, what it cancels, which
-                   answer reaches the asker, nothing left running)
+                   answer reaches the asker, nothing left running, what a rewrite restarts and asks back)
+                   test_rewriting (fake model: which replies are taken, falling back to the question as asked; dates)
+                   test_campaigns (real Postgres as sql_reader: the asker's own campaigns, asking back, each layer alone)
                    test_ingestion (real Postgres: idempotency, rollback, replacements, conflicts, for documents and tables)
                    test_generate_corpus (the corpus generator without a model: numbers, the rules of a draft, authors)
                    test_dataset (the dataset's format, the split, finding a labelled section)
@@ -209,12 +212,35 @@ on 127.0.0.1 unless `LLM_SERVICE_HOST` says otherwise. Examples of the format: `
 
 ```
 question --+-- route: one model call, 2 s at most ----------------------------------+
+           +-- rewrite: one model call, 2 s at most                                 |
            +-- embed --+-- documents graph: search -> rerank -> answer             | the route cancels the
                        +-- data graph: context -> write -> check -> run (retry)     | path it rules out
+rewritten: the paths stop; the campaign is found or asked back; they start again on the question filled in
 then by the route:  documents -> the documents' answer
                     data      -> the rows explained
                     both      -> one answer written from the excerpts and the rows together
 ```
+
+**The rewrite** (`app/router/rewriting.py`). One model call with structured output, beside the router: a follow-up gets
+what "it" or "the Beauty one" refers to from the turns before it, and a campaign or a time named relative to now becomes
+a placeholder, `{campaign}` or `{period}`, with what kind of reference it is. Code fills them in. The campaign is found
+by `app/sql_agent/campaigns.py`: the asker's finished campaigns, latest end date first, narrowed by every word of its
+kind ("Black Friday"), run as `sql_reader` under row-level security with the department in the WHERE clause as well.
+The dates are worked out from today (`app/router/periods.py`). The question goes on as asked when the model doesn't
+reply within `REWRITE_TIMEOUT_SECONDS` (2 s), fails, or replies with placeholders and references that don't agree.
+
+- **Asked back**, `status: clarify` with `candidates`: an executive or admin asking about a kind of campaign more than
+  one department ran ("the last Black Friday"), or two campaigns at the place asked for that ended on the same day.
+- **Nothing found**: one fixed sentence, the same for another department's campaign and for one that doesn't exist.
+- **The basis**: an answer about a campaign found this way opens with it ("Based on Beauty Black Friday Live, which ran
+  from 2025-11-18 to 2025-12-14.") and carries it as `basis`. When the documents were searched and it has no review
+  yet, the line says so and names the latest before it that has one.
+- `/query` has no conversation memory yet, so it gives the rewrite no turns; the evaluation passes a follow-up's own.
+- On dev ("With the rewrite" and "Tuning the rewrite's instructions" in [docs/eval-report.md](../docs/eval-report.md)):
+  14 of 108 rewritten, 5 of the 6 follow-ups among them (the first instructions wrote out 2), at p50 3.7 s as the paths
+  start again; the questions left as asked took as long as before there was a rewrite. "The previous batch" and a
+  campaign named by its date stay as asked.
+- `evaluation/rewrite_run.py` runs the rewrite alone, to try its instructions for a fraction of a full run.
 
 **Both paths start before the route is known.** Routing is a model call, p50 1.2 s and p95 1.5 to 1.7 s on a development
 machine, and waiting for it would put a question about data at about 3.8 s, estimated from each step's measured time,
@@ -387,8 +413,8 @@ the model saw at most 2 calls, 8 queries got the `503` in about 1.1 s, and the o
 only during the request itself, not while waiting to retry, or a rate-limited provider would use up every slot with queries
 that are only sleeping. The SDK's own limits follow this setting, because its default of 1,000 connections, 100 kept
 alive, would be a hidden limit below the 500 QPS target. These numbers were measured before routing, when a query made
-one model call at a time. A routed query holds up to three at once while the router decides (the router, the documents'
-answer and the query being written), so the same peak needs more slots; how many hasn't been measured (#11).
+one model call at a time. A routed query holds up to four at once while the router decides (the router, the rewrite, the
+documents' answer and the query being written), so the same peak needs more slots; how many hasn't been measured (#11).
 
 **How much one process can do** (real code and real Postgres in a Linux container with 12 CPUs, a stub model taking 2.9 s,
 5 to 10 s of load, every query answered and none refused. Not the load test of #11, and the backend isn't in it):
@@ -420,8 +446,8 @@ network. Through Docker Desktop's port forwarding on Windows, at 44 ms each, 5 c
 3.49 s, slowest 4.43 s; at 300 QPS one worker hit the limit and 214 of 900 queries got a `504`. Linux doesn't have this
 limit, so load tests belong there. The whole chain at 300 QPS hasn't been run yet: that is #11.
 
-**Not built yet:** the cache, conversation memory, the audit table, and turning a follow-up or a relative date ("the last
-campaign") into a question that stands on its own.
+**Not built yet:** the cache, conversation memory (so `/query` has no turns before a question to give the rewrite) and the
+audit table.
 
 ## Creating the Kafka topics
 

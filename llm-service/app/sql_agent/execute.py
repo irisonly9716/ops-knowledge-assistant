@@ -13,7 +13,9 @@ SET takes no bound parameter, so the department is composed into it with sql.Lit
 reads it: the one value not passed as a parameter (AGENTS.md).
 """
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 import psycopg
 from psycopg.sql import SQL, Literal
@@ -40,10 +42,11 @@ def as_text(value) -> str | None:
 
 async def run_select(conn: psycopg.AsyncConnection, sql: str, *, department: str | None = None,
                      every_department: bool = False, max_rows: int = MAX_ROWS,
-                     timeout_ms: int = STATEMENT_TIMEOUT_MS) -> QueryResult:
+                     timeout_ms: int = STATEMENT_TIMEOUT_MS, params: Mapping[str, Any] | None = None) -> QueryResult:
     """Raises SqlRejected for anything but a single SELECT, and psycopg.Error when the database refuses it.
     department: the one department whose rows the query may read; every_department: an asker who may read them all.
-    Neither: nothing is set, and as sql_reader every view is empty."""
+    Neither: nothing is set, and as sql_reader every view is empty. params: bound parameters of a query written in code,
+    such as the one that finds a campaign (campaigns.py); a model's query has none, as guard.py refuses placeholders."""
     if department is not None and every_department:
         raise ValueError("a query reads one department or every department, not both")
     text = sql.strip().rstrip(";").strip()
@@ -57,7 +60,7 @@ async def run_select(conn: psycopg.AsyncConnection, sql: str, *, department: str
             await conn.execute(SQL("SET LOCAL app.department = {}").format(Literal(department)))
         if every_department:
             await conn.execute("SET LOCAL app.all_departments = 'on'")
-        cursor = await conn.execute(text)
+        cursor = await conn.execute(text, params)
         columns = tuple(column.name for column in cursor.description or ())
         rows = await cursor.fetchmany(max_rows + 1)
     return QueryResult(columns, tuple(tuple(as_text(v) for v in row) for row in rows[:max_rows]),

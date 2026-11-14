@@ -218,12 +218,13 @@ backend /query
       │
       ├──forwards with the internal service token──▶ llm-service /query (accepts calls from the backend only)
       │
-      │ 2. rewrite the question into a standalone one, using the conversation memory
-      │    ("and the time before?" only means something together with the previous turns), and make
-      │    relative references concrete ("the last campaign" → "campaign 11", "last month" → "2026-10").
-      │    The model only spots a relative reference; a query through the read-only role and row-level
-      │    security finds which campaign it means, so only campaigns this user can see are candidates.
-      │    If that doesn't settle it, ask the user back and skip the cache
+      │ 2. rewrite the question into a standalone one, using the turns before it ("and the time before?"
+      │    only means something together with them), and make relative references concrete ("the last
+      │    Black Friday" → "Beauty Black Friday Live, which ran from 2025-11-18 to 2025-12-14", "last month"
+      │    → "October 2026 (2026-10-01 to 2026-10-31)"). The model only marks a relative reference; a query
+      │    through the read-only role and row-level security finds which campaign it means, so only
+      │    campaigns this user can see are candidates, and code works out the dates. If that doesn't settle
+      │    it, the question is asked back with the candidates. Runs beside the router, not before it
       │ 3. check the cache: key = department + role + knowledge-base version + rewritten question
       │    (a hit returns immediately)
       │ 4. route: documents / data / both / none? One model call with structured output; below 0.95 confidence
@@ -243,9 +244,8 @@ backend /query
       │             - on an error, show the model the error and generate again (2 retries at most)
       │
       │ 5. documents → their answer, with citations; data → the rows explained in a few sentences;
-      │    both → one answer written from the chunks and the rows together. Still to come: the conversation
-      │    history in the prompt, and an answer that opens by naming the campaign it is based on, so a wrong
-      │    reading is easy to spot
+      │    both → one answer written from the chunks and the rows together. A campaign found in step 2
+      │    opens the answer ("Based on ..., which ran from ... to ..."), so a wrong reading is easy to spot
       │ 6. write the cache + the conversation memory + the audit record
       ▼
    back to the user
@@ -259,16 +259,35 @@ between the two would keep serving old answers. Relative references are made con
 when a new campaign finishes the key changes; a question that still has one after rewriting skips the cache. The
 TTL is only a safety net.
 
-**What exists today:** the backend's `/query`, the internal token, and steps 1, 4 and 5 (`app/query_flow.py`): the
-router, the search with its department filter and the reranker, the Text-to-SQL pipeline with its checks, department
-filter, read-only role and row-level security, and one answer from either or both, with citations and refusals. A
-baseline agent for Text-to-SQL is measured on the evaluation dataset. Rewriting (step 2), the cache (3) and step 6 are
-still to come. Details
+**What exists today:** the backend's `/query`, the internal token, and steps 1, 2, 4 and 5 (`app/query_flow.py`): the
+rewrite with the campaign search and the dates, asking back, the router, the search with its department filter and the
+reranker, the Text-to-SQL pipeline with its checks, department filter, read-only role and row-level security, and one
+answer from either or both, with citations, refusals and the campaign it is about. The turns before a question come
+from the evaluation only: `/query` has none until there is conversation memory. A baseline agent for Text-to-SQL is
+measured on the evaluation dataset. The cache (3) and step 6 are still to come. Details
 and measurements: "The query path" in [llm-service/README.md](../llm-service/README.md). How well it answers, measured on the evaluation
 dataset, and why the refusal threshold and the answer instructions are what they are:
 [eval-report.md](eval-report.md).
 
 Design decisions so far:
+- **The rewrite runs beside the router, not before everything.** A model call in front of every question would add its
+  time to all of them, about 1.2 s; most questions stand on their own and lose nothing this way. One that is rewritten
+  stops the paths that had started on it and starts them again on the question filled in, so it pays that time.
+  Not taken: the router rewriting too (one call fewer, but its instructions and 0.95 threshold were measured as they
+  are), and a keyword check deciding when to rewrite ("the previous batch" and "next time" would pay for nothing).
+- **A model marks a reference; code resolves it.** The rewrite writes `{campaign}` or `{period}` with what kind of
+  reference it is (a closed set: the most recent finished campaign, of a kind, or the n-th before it; this or last month
+  or year, or the last n full months). Which campaign is a query: the asker's department's finished campaigns, latest
+  end date first, run as `sql_reader` under row-level security with the department in the WHERE clause too, so another
+  department's campaign reads exactly as one that doesn't exist. Dates are code. Left to a model, the SQL writer once
+  read "last Black Friday" as the day of the holiday.
+- **Asked back rather than guessed.** An executive's "the last Black Friday" gets each department's, since every
+  department runs one; two campaigns ending on the same day get both. Candidates come from the same search, so only
+  campaigns the asker may see. Nothing found is one fixed sentence: there is nothing to choose from.
+- **The basis line is code, not the model's**, which could drop or alter it, and it is the point of it. When the
+  documents were searched and the campaign has no review yet, the line says so and names the latest before it that
+  has one. Whether one exists is `campaigns.has_review_doc`, read as `ops` by id, for campaigns the search already
+  found: no view has it, and adding it to one would show the SQL writer a column that is a routing shortcut.
 - **Both paths start before the route is known.** Routing is a model call, p50 1.2 s and p95 1.5 to 1.7 s on a
   development machine, and in front of the paths it would put a question about data at about 3.8 s, estimated from each
   step's measured time, against the 3 s target. So the embedding, the documents' answer and the data path's first query
@@ -312,7 +331,7 @@ Design decisions so far:
   Uvicorn's workers need no load balancer, at the price of an uneven share of the work, so each process gets 300 model
   call slots rather than an exact 225, and 5 database connections because all their pools share the 100 Postgres allows.
   Numbers: "The query path" in [llm-service/README.md](../llm-service/README.md). Measured on the documents path before
-  routing: a routed query holds up to three model calls at once while the router decides, and has a second pool, of 5
+  routing: a routed query holds up to four model calls at once while the router decides, and has a second pool, of 5
   connections, for generated SQL; what that takes at the peak isn't measured (#11).
 - **Text-to-SQL is a fixed pipeline, not an agent.** The baseline agent spent 4 model calls a question finding a schema
   the code already knows, p50 about 9 s on dev. The pipeline puts the five views with their comments (about 1,050

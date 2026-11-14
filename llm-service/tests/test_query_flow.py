@@ -13,7 +13,9 @@ from app.rag.answering import ANSWERED, REFUSED, Citation, InvalidAnswer, QueryA
 from app.rag.answering import REFUSAL_TEXT as DOCUMENTS_REFUSAL
 from app.rag.query_models import ModelAnswer, ModelBusy
 from app.rag.retrieval import RetrievedChunk
+from app.router.rewriting import CampaignReference, PeriodReference, Rewritten, Turn
 from app.router.routing import BOTH, PATHS, Routing
+from app.sql_agent.campaigns import EACH_DEPARTMENT_TEXT, NOT_FOUND_TEXT, SAME_DAY_TEXT, Campaign, Found
 from app.sql_agent import pipeline
 from app.sql_agent.execute import QueryResult
 from app.sql_agent.pipeline import FAILED, Attempt, SqlAnswer, SqlOptions, SqlService, SqlTrace
@@ -82,8 +84,38 @@ class FakeRouter:
     def __init__(self, route="documents", delay=0.05, paths=None):
         self.step = Recorded(delay, Routing(route, 0.99, "Because.", paths or PATHS[route], "model", 300, 25))
 
-    async def route(self, question, budget):
-        return await self.step(question)
+    async def route(self, question, budget, turns=()):
+        return await self.step(question, turns=turns)
+
+
+UNCHANGED = Rewritten(None, None, None, "stands on its own", 120, 8)
+
+
+class FakeRewriter:
+    def __init__(self, rewritten=UNCHANGED, delay=0.03):
+        self.step = Recorded(delay, rewritten)
+
+    async def rewrite(self, question, turns, budget):
+        return await self.step(question, turns=turns)
+
+
+LAST_BF = Campaign(7, "Beauty Black Friday Live", "Beauty", date(2025, 11, 18), date(2025, 12, 14))
+BF_BEFORE = Campaign(3, "Beauty Black Friday Live", "Beauty", date(2024, 11, 18), date(2024, 12, 14))
+GROCERY_BF = Campaign(9, "Grocery Black Friday Live", "Fresh Grocery", date(2025, 11, 12), date(2025, 12, 20))
+
+
+class FakeCampaigns:
+    def __init__(self, found=None, reviewed=frozenset()):
+        self.found, self.reviewed = found or Found(LAST_BF, (), (BF_BEFORE,)), set(reviewed)
+        self.asked, self.reviews_asked = [], []
+
+    async def find(self, reference, *, role, department, budget):
+        self.asked.append((reference, role, department))
+        return self.found
+
+    async def with_review(self, campaigns, budget):
+        self.reviews_asked.append(campaigns)
+        return {c.campaign_id for c in campaigns} & self.reviewed
 
 
 class FakeDocuments:
@@ -117,15 +149,20 @@ class FakeData(SqlService):
         return await self.step(question, role=role, department=department, today=today, vector=vector)
 
 
-def build(route="documents", *, documents=None, data=None, router=None, composer=None, embedder=None):
+def build(route="documents", *, documents=None, data=None, router=None, composer=None, embedder=None, rewriter=None,
+          campaigns=None):
     parts = {"embedder": embedder or FakeEmbedder(), "router": router or FakeRouter(route),
-             "documents": documents or FakeDocuments(), "data": data or FakeData(),
+             "rewriter": rewriter or FakeRewriter(), "documents": documents or FakeDocuments(),
+             "data": data or FakeData(), "campaigns": campaigns or FakeCampaigns(),
              "composer": composer or FakeModel("It converted 8.7%, below the 10% target [1].")}
-    return QueryFlow(parts["embedder"], parts["router"], parts["documents"], parts["data"], parts["composer"]), parts
+    return QueryFlow(parts["embedder"], parts["router"], parts["rewriter"], parts["documents"], parts["data"],
+                     parts["campaigns"], parts["composer"]), parts
 
 
-async def trace(flow, role="staff", department="Beauty", question="How did the summer sale convert against its plan?"):
-    return await flow.trace(question, role=role, department=department, today=TODAY, budget=TimeBudget(10))
+async def trace(flow, role="staff", department="Beauty", question="How did the summer sale convert against its plan?",
+                turns=()):
+    return await flow.trace(question, role=role, department=department, today=TODAY, budget=TimeBudget(10),
+                            turns=turns)
 
 
 # ---- what starts, and what the route stops
@@ -210,7 +247,8 @@ async def test_with_excerpts_and_rows_one_call_writes_the_answer_from_both():
     assert "[1] Target 1: 10% conversion.\n\n[2] Target 2" in prompt and "Beauty Summer Sale | 0.087" in prompt
     assert f"Query:\n{SQL}" in prompt and prompt.endswith("Question: How did the summer sale convert against its plan?")
     assert "only the Beauty department's data" in rules and NOT_IN_SOURCES in rules
-    assert traced.compose_tokens == (200, 40) and traced.tokens == (300 + 100 + 300 + 200, 25 + 20 + 30 + 40)
+    assert traced.compose_tokens == (200, 40)
+    assert traced.tokens == (300 + 120 + 100 + 300 + 200, 25 + 8 + 20 + 30 + 40)   # the rewriter's 120 and 8 too
 
 
 @pytest.mark.anyio
@@ -355,8 +393,107 @@ async def test_the_query_log_has_one_line_with_the_route_and_each_paths_numbers_
     [line] = [r.getMessage() for r in caplog.records]
     assert "my private question" not in line and SQL not in line
     for part in ("route=both", "decided_by=model", "paths=documents,data", "written_by=both", "status=answered",
-                 "reranked=True", "sql_attempts=1", "rows=1", "tokens_in=900", "tokens_out=115", "cancelled=-"):
+                 "reranked=True", "sql_attempts=1", "rows=1", "tokens_in=1020", "tokens_out=123", "cancelled=-",
+                 "rewritten=False", "restarted=False", "basis=-"):
         assert part in line
+
+
+# ---- rewriting: follow-ups, and campaigns and times named relative to now
+
+
+FOLLOW_UP = (Turn("user", "Who owns the Beauty sale event inventory check?"),
+             Turn("assistant", "The Beauty Supply Chain team owns the check."))
+
+
+@pytest.mark.anyio
+async def test_a_question_that_stands_on_its_own_goes_on_as_asked_and_the_router_sees_any_turns():
+    flow, parts = build("documents")
+    traced = await trace(flow, question="Who signs off on it?", turns=FOLLOW_UP)
+    assert parts["rewriter"].step.calls[0] == (("Who signs off on it?",), {"turns": FOLLOW_UP})
+    assert parts["router"].step.calls[0] == (("Who signs off on it?",), {"turns": FOLLOW_UP})
+    assert not traced.restarted and traced.asked == "Who signs off on it?"
+    assert len(parts["documents"].step.calls) == 1 and parts["campaigns"].asked == []
+
+
+@pytest.mark.anyio
+async def test_a_rewritten_follow_up_stops_the_paths_and_starts_them_again_on_the_question_that_stands_alone():
+    standalone = "Who signs off on the Beauty sale event inventory check?"
+    flow, parts = build("documents", rewriter=FakeRewriter(Rewritten(standalone, None, None, "rewritten", 150, 20),
+                                                           delay=0.05),
+                        documents=FakeDocuments(delay=0.2), data=FakeData(delay=0.2))
+    traced = await trace(flow, question="Who signs off on it?", turns=FOLLOW_UP)
+    first, second = parts["documents"].step.calls
+    assert first[0] == ("Who signs off on it?",) and second[0] == (standalone,)
+    assert [c[0] for c in parts["embedder"].step.calls] == [("Who signs off on it?",), (standalone,)]
+    assert parts["data"].step.cancelled   # started on the question as asked, stopped by the rewrite
+    assert traced.restarted and traced.asked == standalone and traced.answer.basis is None
+    assert traced.answer.text == "Aim for 10% [1]."   # no campaign, so no line saying which one
+
+
+@pytest.mark.anyio
+async def test_a_campaign_named_by_its_place_in_time_is_found_filled_in_and_named_first():
+    rewritten = Rewritten("What was the GMV of {campaign}?", CampaignReference(words="Black Friday", department=None,
+                                                                               position=1), None, "rewritten")
+    flow, parts = build("data", rewriter=FakeRewriter(rewritten))
+    traced = await trace(flow, question="What was the GMV of our last Black Friday?")
+    reference, role, department = parts["campaigns"].asked[0]
+    assert (reference.words, role, department) == ("Black Friday", "staff", "Beauty")
+    asked = "What was the GMV of Beauty Black Friday Live (the campaign that ran from 2025-11-18 to 2025-12-14)?"
+    assert traced.asked == asked and parts["data"].step.calls[-1][0] == (asked,)
+    assert traced.answer.text == ("Based on Beauty Black Friday Live, which ran from 2025-11-18 to 2025-12-14.\n\n"
+                                  "It converted 8.7%.")
+    assert traced.answer.basis == LAST_BF
+    assert parts["campaigns"].reviews_asked == []   # only the data was searched: whether it has a review doesn't matter
+
+
+@pytest.mark.anyio
+async def test_when_the_documents_are_searched_a_campaign_without_a_review_says_so_and_names_the_one_before():
+    rewritten = Rewritten("What did the review of {campaign} say?", CampaignReference(words="Black Friday",
+                                                                                      department=None, position=1),
+                          None, "rewritten")
+    flow, parts = build("documents", rewriter=FakeRewriter(rewritten), campaigns=FakeCampaigns(reviewed={3}))
+    text = (await trace(flow)).answer.text
+    assert text.startswith("Based on Beauty Black Friday Live, which ran from 2025-11-18 to 2025-12-14. It has no "
+                           "post-campaign review yet; the latest one before it that has one is Beauty Black Friday "
+                           "Live, which ran from 2024-11-18 to 2024-12-14.\n\n")
+    assert parts["campaigns"].reviews_asked == [(LAST_BF, BF_BEFORE)]
+
+
+@pytest.mark.anyio
+async def test_a_campaign_with_a_review_gets_the_basis_alone():
+    rewritten = Rewritten("What did the review of {campaign} say?", CampaignReference(words=None, department=None,
+                                                                                      position=1), None, "rewritten")
+    flow, _ = build("documents", rewriter=FakeRewriter(rewritten), campaigns=FakeCampaigns(reviewed={7}))
+    assert "review" not in (await trace(flow)).answer.text.split("\n\n")[0]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("found", "status", "text"), [
+    (Found(None, (LAST_BF, GROCERY_BF), ()), "clarify", EACH_DEPARTMENT_TEXT),
+    (Found(None, (LAST_BF, replace(LAST_BF, campaign_id=8, name="Beauty Holiday Live")), ()), "clarify", SAME_DAY_TEXT),
+    (Found(None, (), ()), REFUSED, NOT_FOUND_TEXT),
+])
+async def test_a_campaign_asked_back_or_not_found_runs_no_path_and_stops_the_router(found, status, text):
+    rewritten = Rewritten("What was the GMV of {campaign}?", CampaignReference(words="Black Friday", department=None,
+                                                                               position=1), None, "rewritten")
+    flow, parts = build("data", rewriter=FakeRewriter(rewritten), router=FakeRouter("data", delay=5),
+                        data=FakeData(delay=5), documents=FakeDocuments(delay=5), campaigns=FakeCampaigns(found))
+    traced = await trace(flow, role="executive", department=None)
+    answer = traced.answer
+    assert (answer.status, answer.text, answer.paths, answer.result, answer.basis) == (status, text, (), None, None)
+    assert answer.candidates == found.candidates and answer.searched_departments is None
+    assert parts["router"].step.cancelled and parts["data"].step.cancelled and len(parts["data"].step.calls) == 1
+    assert traced.routing is None and traced.total_ms < 1000
+
+
+@pytest.mark.anyio
+async def test_a_time_relative_to_now_is_filled_in_with_dates_worked_out_from_today():
+    rewritten = Rewritten("What was our GMV in {period}?", None, PeriodReference(kind="last_month", months=None),
+                          "rewritten")
+    flow, parts = build("data", rewriter=FakeRewriter(rewritten))
+    traced = await trace(flow)
+    assert traced.asked == "What was our GMV in September 2026 (2026-09-01 to 2026-09-30)?"   # TODAY is in October
+    assert parts["data"].step.calls[-1][1]["today"] == TODAY and parts["campaigns"].asked == []
 
 
 # ---- the graphs as the README draws them

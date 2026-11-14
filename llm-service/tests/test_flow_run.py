@@ -1,15 +1,19 @@
 """How the query path's evaluation records and sums up a question, with a fake flow: no network, no database."""
 from dataclasses import replace
+from datetime import date
 
 import pytest
 
-from app.query_flow import FlowAnswer, FlowTrace
+from app.query_flow import CLARIFY, FlowAnswer, FlowTrace
+from app.router.rewriting import Rewritten
+from app.router.rewriting import Turn as RouterTurn
 from app.rag.answering import ANSWERED
 from app.router.routing import PATHS, Routing
 from app.sql_agent.execute import QueryResult
+from app.sql_agent.campaigns import Campaign, Found
 from app.sql_agent.pipeline import Attempt, SqlAnswer, SqlTrace
 from evaluation import flow_run
-from evaluation.dataset import Asker, Question, split_for
+from evaluation.dataset import Asker, Question, Turn, split_for
 
 ROWS = QueryResult(("campaign_name", "total_gmv"), (("Beauty Summer Sale", "3000.50"),), truncated=False)
 
@@ -35,8 +39,8 @@ class FakeFlow:
     def __init__(self, traced=None, error=None):
         self.traced, self.error, self.asked = traced, error, []
 
-    async def trace(self, question, *, role, department, today, budget):
-        self.asked.append((question, role, department, today))
+    async def trace(self, question, *, role, department, today, budget, turns=()):
+        self.asked.append((question, role, department, today) + ((turns,) if turns else ()))
         if self.error:
             raise self.error
         return self.traced
@@ -78,3 +82,21 @@ async def test_the_summary_counts_questions_over_the_target_by_the_paths_that_ra
     assert "their rows hold the gold result for 2 (100.0%)" in report
     assert "not used, because the answer came from both: 2 questions" in report
 
+
+@pytest.mark.anyio
+async def test_a_follow_up_is_asked_with_its_turns_and_a_question_asked_back_is_recorded_without_paths():
+    follow_up = question().model_copy(update={"turns": (Turn(role="user", content="When did the summer sale run?"),
+                                                        Turn(role="assistant", content="June to July."))})
+    candidate = Campaign(7, "Beauty Black Friday Live", "Beauty", date(2025, 11, 18), date(2025, 12, 14))
+    asked_back = FlowTrace(FlowAnswer(CLARIFY, "Which one?", [], None, (), None, None, None, (candidate,)), None, None,
+                           "-", None, None, (), 200.0, 0.0, 0.0, 0.0, (0, 0), 1400.0,
+                           Rewritten("GMV of {campaign}?", None, None, "rewritten", 200, 20), "GMV of {campaign}?",
+                           Found(None, (candidate,), ()), 1300.0, False)
+    fake = FakeFlow(asked_back)
+    record = await flow_run.ask(fake, follow_up, 10)
+    assert fake.asked[0][4] == (RouterTurn("user", "When did the summer sale run?"), RouterTurn("assistant", "June to July."))
+    assert (record["status"], record["paths"], record["route"], record["missing_path"]) == (CLARIFY, [], None, False)
+    assert record["candidates"] == [["Beauty", "Beauty Black Friday Live", "2025-11-18"]]
+    assert record["tokens"]["rewriter"] == [200, 20] and record["tokens"]["router"] == [0, 0]
+    report = flow_run.summarize([record], "dev", "test", 1.0)
+    assert "Rewritten: 1 of 1" in report and "asked back: 1" in report

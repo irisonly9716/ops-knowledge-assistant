@@ -21,6 +21,7 @@ from pydantic.alias_generators import to_camel
 
 from app.config import settings
 from app.query_flow import FlowAnswer, QueryFlow
+from app.sql_agent.campaigns import Campaign
 from app.rag.answering import InvalidAnswer
 from app.rag.query_models import ModelBusy
 from app.rag.retrieval import ROLES_LIMITED_TO_A_DEPARTMENT
@@ -77,13 +78,28 @@ class DataResponse(_CamelModel):
     truncated: bool   # the query returned more rows than are kept
 
 
+class CampaignResponse(_CamelModel):
+    department: str
+    campaign_name: str
+    start_date: str   # ISO dates
+    end_date: str
+
+    @classmethod
+    def of(cls, campaign: Campaign) -> "CampaignResponse":
+        return cls(department=campaign.department, campaign_name=campaign.name,
+                   start_date=campaign.start_date.isoformat(), end_date=campaign.end_date.isoformat())
+
+
 class QueryResponse(_CamelModel):
-    status: Literal["answered", "refused", "failed"]   # failed: no query that answers it could be written
+    # failed: no query that answers it could be written; clarify: the question is asked back, with candidates
+    status: Literal["answered", "refused", "failed", "clarify"]
     answer: str
     citations: list[CitationResponse]
     searched_departments: list[str] | None   # null: all departments
     paths: list[Literal["documents", "data"]]
     data: DataResponse | None
+    basis: CampaignResponse | None           # the campaign "the last one" turned out to be
+    candidates: list[CampaignResponse] | None   # only when asked back
 
     @classmethod
     def of(cls, result: FlowAnswer) -> "QueryResponse":
@@ -95,7 +111,9 @@ class QueryResponse(_CamelModel):
                                                title=c.chunk.title, department=c.chunk.department,
                                                heading_path=list(c.chunk.heading_path), score=round(c.chunk.score, 4))
                               for c in result.citations],
-                   paths=list(result.paths), data=data)
+                   paths=list(result.paths), data=data,
+                   basis=CampaignResponse.of(result.basis) if result.basis else None,
+                   candidates=[CampaignResponse.of(c) for c in result.candidates] or None)
 
 
 def require_backend(x_internal_token: str | None = Header(default=None)) -> None:

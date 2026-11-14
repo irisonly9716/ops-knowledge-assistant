@@ -8,9 +8,10 @@ evaluation/route_run.py), how long each part took, what the model calls cost, an
 whether the rows the answer rests on hold the gold result. Answers are not graded here: grading is most of what a run of
 evaluation.run costs, and that run grades the documents path's answers.
 
-Questions are asked one at a time, so the latency is one question's own. Follow-ups are asked without the turns before
-them: the query path has no conversation memory yet. A cancelled model call's tokens are unknown, so the cost counts
-only the calls that finished. Writes eval/results/<split>-flow-<name>.jsonl and .md.
+Questions are asked one at a time, so the latency is one question's own. A follow-up is asked with the turns before it,
+as its record has them: /query has no conversation memory yet, so this is what the rewrite will get from it. A cancelled
+model call's tokens are unknown, so the cost counts only the calls that finished. Writes
+eval/results/<split>-flow-<name>.jsonl and .md.
 """
 import argparse
 import asyncio
@@ -29,6 +30,7 @@ from app.query_flow import QueryFlow
 from app.rag.query_models import ModelBusy, openai_client_from_settings
 from app.rag.reranking import tei_reranker_from_settings
 from app.router import routing
+from app.router.rewriting import Turn
 from app.router.routing import DATA, DOCUMENTS
 from app.server import choose_event_loop
 from app.time_budget import TimeBudget
@@ -50,7 +52,8 @@ async def ask(flow: QueryFlow, question: Question, budget_seconds: float) -> dic
         async with asyncio.timeout(budget_seconds):
             traced = await flow.trace(question.question, role=question.asker.role,
                                       department=question.asker.department, today=AS_OF,
-                                      budget=TimeBudget(budget_seconds))
+                                      budget=TimeBudget(budget_seconds),
+                                      turns=tuple(Turn(t.role, t.content) for t in question.turns))
     except TimeoutError:
         return record | {"status": TIMEOUT, "total_ms": (time.perf_counter() - started) * 1000}
     except (APIError, ModelBusy, psycopg.Error) as error:
@@ -58,12 +61,20 @@ async def ask(flow: QueryFlow, question: Question, budget_seconds: float) -> dic
                          "total_ms": (time.perf_counter() - started) * 1000}
 
     routed, documents, data, answer = traced.routing, traced.documents, traced.data, traced.answer
+    rewritten = traced.rewritten
     sql_answer = data.answer if data else None
     rows = sql_answer.result.rows if sql_answer and sql_answer.result else None
-    missing, extra = scored(question.route, routed.paths)
+    # No path runs for a question asked back, or for a campaign that wasn't found: nothing to miss, nothing extra
+    ran = routed.paths if routed and (answer is None or answer.paths) else frozenset()
+    missing, extra = scored(question.route, ran) if ran else (False, False)
     record |= {
-        "route": routed.route, "confidence": routed.confidence, "decided_by": routed.decided_by,
-        "paths": [p for p in (DOCUMENTS, DATA) if p in routed.paths], "missing_path": missing, "extra_path": extra,
+        "route": routed.route if routed else None, "confidence": routed.confidence if routed else None,
+        "decided_by": routed.decided_by if routed else None,
+        "paths": [p for p in (DOCUMENTS, DATA) if p in ran], "missing_path": missing, "extra_path": extra,
+        "rewritten": rewritten.standalone if rewritten else None, "rewrite_reason": rewritten.reason if rewritten else None,
+        "asked": traced.asked, "restarted": traced.restarted, "rewrite_ms": traced.rewrite_ms,
+        "basis": ([answer.basis.name, answer.basis.start_date.isoformat()] if answer and answer.basis else None),
+        "candidates": [[c.department, c.name, c.start_date.isoformat()] for c in answer.candidates] if answer else [],
         "cancelled": list(traced.cancelled), "written_by": traced.written_by,
         "status": answer.status if answer else INVALID, "error": str(traced.error) if traced.error else None,
         "answer": answer.text if answer else None, "citations": len(answer.citations) if answer else 0,
@@ -74,7 +85,8 @@ async def ask(flow: QueryFlow, question: Question, budget_seconds: float) -> dic
         "embed_ms": traced.embed_ms, "route_ms": traced.route_ms, "paths_ms": traced.paths_ms,
         "compose_ms": traced.compose_ms, "total_ms": traced.total_ms,
         "explain_ms": data.explain_ms if data else None,
-        "tokens": {"router": [routed.input_tokens, routed.output_tokens],
+        "tokens": {"router": [routed.input_tokens, routed.output_tokens] if routed else [0, 0],
+                   "rewriter": [rewritten.input_tokens, rewritten.output_tokens] if rewritten else [0, 0],
                    "documents": [documents.input_tokens, documents.output_tokens] if documents else [0, 0],
                    "writer": list(data.writer_tokens) if data else [0, 0],
                    "explainer": list(data.explainer_tokens) if data else [0, 0],
@@ -86,7 +98,8 @@ async def ask(flow: QueryFlow, question: Question, budget_seconds: float) -> dic
 
 def cost(tokens: dict) -> Decimal:
     """The query embedding is left out: about 15 tokens, $0.0000003 a question."""
-    return (price(settings.router_model, *tokens["router"]) + price(settings.chat_model, *tokens["documents"])
+    return (price(settings.router_model, *tokens["router"]) + price(settings.rewrite_model, *tokens["rewriter"])
+            + price(settings.chat_model, *tokens["documents"])
             + price(settings.sql_model, *tokens["writer"]) + price(settings.chat_model, *tokens["explainer"])
             + price(settings.chat_model, *tokens["compose"]))
 
@@ -137,13 +150,14 @@ def summarize(records: list[dict], split: str, name: str, run_seconds: float) ->
               f"${sum(costs):.4f} in all, ${sum(costs) / max(len(costs), 1):.6f} a question on average, the calls that "
               "finished only. By the part of the path:", "",
               "| Part | Input tokens | Output tokens |", "|---|---|---|"]
-    for part in ("router", "documents", "writer", "explainer", "compose"):
+    for part in ("router", "rewriter", "documents", "writer", "explainer", "compose"):
         lines.append(f"| {part} | {sum(r['tokens'][part][0] for r in ran)} | {sum(r['tokens'][part][1] for r in ran)} |")
     thrown = [r for r in ran if r["written_by"] == "both"]
     lines += ["", f"The documents' answer written while routing and then not used, because the answer came from both: "
                   f"{len(thrown)} questions, {sum(r['tokens']['documents'][0] for r in thrown)} input and "
                   f"{sum(r['tokens']['documents'][1] for r in thrown)} output tokens."]
 
+    lines += rewriting_section(ran)
     gold = [r for r in ran if r["exact"] is not None]
     with_gold = [r for r in records if r["route_needed"] in ("data", "both") and r["expected"] == "answer"]
     lines += ["", "## The data answers", "",
@@ -161,6 +175,30 @@ def summarize(records: list[dict], split: str, name: str, run_seconds: float) ->
                   for r in trouble]
         lines.append("")
     return "\n".join(lines)
+
+
+def rewriting_section(ran: list[dict]) -> list[str]:
+    """What the rewrite did: which questions it changed, what the campaign search found, and what starting again cost."""
+    changed = [r for r in ran if r["rewritten"]]
+    follow_ups = [r for r in ran if "multi_turn" in r["tags"]]
+    restarted = [r["total_ms"] for r in ran if r["restarted"]]
+    kept = [r["total_ms"] for r in ran if not r["rewritten"]]
+    reasons = Counter(r["rewrite_reason"] for r in ran if not r["rewritten"])
+    lines = ["", "## The rewrite", "",
+             f"Rewritten: {len(changed)} of {len(ran)} ({sum('multi_turn' in r['tags'] for r in changed)} of the "
+             f"{len(follow_ups)} follow-ups). A campaign found and named first: {sum(bool(r['basis']) for r in ran)}; "
+             f"asked back: {sum(r['status'] == 'clarify' for r in ran)}; no campaign found: "
+             f"{sum(r['status'] == 'refused' and not r['paths'] for r in ran)}. Left as asked: "
+             + ", ".join(f"{k} {v}" for k, v in reasons.most_common()) + ".", "",
+             f"Total ms, p50 / p95 / max: started again on the rewritten question {ms(restarted)} ({len(restarted)}); "
+             f"left as asked {ms(kept)} ({len(kept)}). The rewrite itself, from the start: "
+             f"{ms([r['rewrite_ms'] for r in ran])}.", ""]
+    if changed:
+        lines += ["| Question | Rewritten | Basis or candidates | Status |", "|---|---|---|---|"]
+        lines += [f"| `{r['id']}` {r['question'].replace('|', '/')} | {(r['rewritten'] or '').replace('|', '/')} | "
+                  f"{' '.join(r['basis']) if r['basis'] else '; '.join(' '.join(c) for c in r['candidates']) or '–'} | "
+                  f"{r['status']} |" for r in changed]
+    return lines
 
 
 async def main_async(args: argparse.Namespace) -> None:
