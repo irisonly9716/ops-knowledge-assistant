@@ -1,7 +1,7 @@
 """HTTP entry point of llm-service (FastAPI). Start it with `python -m app.server` (see app/server.py).
 
 /health and POST /query (app/query_api.py), which answers through app/query_flow.py: routing, the documents and the
-campaign data. Conversation memory and caching come later.
+campaign data, with the answer cache and the conversation memory in Redis (app/memory).
 
 Note: the Kafka consumer is NOT started here. It is a separate worker process
 (python -m app.consumers.upload_consumer); see app/consumers/upload_consumer.py for why.
@@ -14,11 +14,15 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
+from redis.asyncio import Redis
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import db
 from app.config import settings
 from app.query_api import router as query_router
+from app.memory.cache import AnswerCache
+from app.memory.conversation import ConversationMemory
+from app.memory.redis_client import redis_from_settings
 from app.query_flow import QueryFlow
 from app.rag.answering import QueryService
 from app.rag.query_models import (ModelCallLimit, OpenAIAnswerModel, OpenAIQueryEmbedder, OpenAIStructuredModel,
@@ -31,9 +35,11 @@ from app.sql_agent.campaigns import CampaignFinder
 from app.sql_agent.pipeline import SqlOptions, SqlService
 
 
-def query_flow_from_settings(client: AsyncOpenAI, pool: Any, reader_pool: Any, reranker: Reranker | None) -> QueryFlow:
+def query_flow_from_settings(client: AsyncOpenAI, pool: Any, reader_pool: Any, reranker: Reranker | None,
+                             redis: Redis | None = None) -> QueryFlow:
     """The query path's parts with their settings. The evaluation (evaluation/flow_run.py) builds it here too, so it
-    measures what /query runs."""
+    measures what /query runs, without redis: no cached answers and no conversation, or a second run would be answered
+    from the first."""
     # One limit for every model call of the process: the router, embeddings, answers and queries share the same slots
     limit = ModelCallLimit(settings.model_max_concurrent_calls, settings.model_slot_wait_seconds)
     embedder = OpenAIQueryEmbedder(client, settings.embedding_model, limit, settings.query_embedding_timeout_seconds)
@@ -52,7 +58,14 @@ def query_flow_from_settings(client: AsyncOpenAI, pool: Any, reader_pool: Any, r
                                 timeout_seconds=settings.rewrite_timeout_seconds)
     composer = OpenAIAnswerModel(client, settings.chat_model, limit, settings.query_model_timeout_seconds,
                                  settings.answer_max_output_tokens, reasoning_effort=settings.compose_reasoning_effort)
-    return QueryFlow(embedder, router, rewriter, documents, data, CampaignFinder(pool, reader_pool), composer)
+    timeout = settings.redis_timeout_seconds
+    cache = (AnswerCache(redis, pool, ttl_seconds=settings.cache_ttl_seconds, timeout_seconds=timeout)
+             if redis is not None else None)
+    memory = (ConversationMemory(redis, messages=settings.memory_messages, ttl_seconds=settings.memory_ttl_seconds,
+                                 answer_chars=settings.memory_answer_chars, timeout_seconds=timeout)
+              if redis is not None else None)
+    return QueryFlow(embedder, router, rewriter, documents, data, CampaignFinder(pool, reader_pool), composer,
+                     cache=cache, memory=memory)
 
 
 @asynccontextmanager
@@ -67,12 +80,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await pool.open()
     await reader_pool.open()
     reranker = tei_reranker_from_settings()   # not checked here: a reranker that is down only costs answer quality
-    app.state.query_flow = query_flow_from_settings(client, pool, reader_pool, reranker)
+    redis = redis_from_settings()   # nor this: without Redis, questions are answered with no cache and no conversation
+    app.state.query_flow = query_flow_from_settings(client, pool, reader_pool, reranker, redis)
     try:
         yield
     finally:
         await pool.close()
         await reader_pool.close()
+        await redis.aclose()
         await client.close()
         if reranker:
             await reranker.aclose()

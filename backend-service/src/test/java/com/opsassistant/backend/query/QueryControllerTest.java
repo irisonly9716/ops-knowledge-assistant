@@ -185,6 +185,33 @@ class QueryControllerTest {
     }
 
     @Test
+    void the_conversation_a_question_belongs_to_is_passed_on_in_its_usual_form() throws Exception {
+        mockMvc.perform(ask("2", """
+                        {"question":"And the one before that?","sessionId":" 5F0C1C9E-3C4E-4A3E-9D4E-2F1B7A6C8D90 "}"""))
+                .andExpect(status().isOk());
+
+        assertThat(sent()).containsEntry("sessionId", "5f0c1c9e-3c4e-4a3e-9d4e-2f1b7a6c8d90").containsEntry("userId", 2);
+    }
+
+    @Test
+    void a_question_without_a_conversation_is_sent_on_its_own() throws Exception {
+        mockMvc.perform(ask("2")).andExpect(status().isOk());
+
+        assertThat(sent()).containsEntry("sessionId", null);
+    }
+
+    @Test
+    void a_conversation_id_that_is_not_a_uuid_is_a_400_and_goes_no_further() throws Exception {
+        int before = calls;
+        mockMvc.perform(ask("2", """
+                        {"question":"Why?","sessionId":"memory:3:someone-elses"}"""))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("sessionId is not a UUID"));
+
+        assertThat(calls).isEqualTo(before);
+    }
+
+    @Test
     void a_client_can_not_choose_its_own_department_or_role() throws Exception {
         mockMvc.perform(ask("2", """
                         {"question":"Why?","department":"Fresh Grocery","role":"executive","userId":25}"""))
@@ -369,7 +396,7 @@ class QueryControllerTest {
         QueryClient down = new QueryClient("http://127.0.0.1:1", TOKEN, 500, 500);
 
         org.assertj.core.api.Assertions.assertThatThrownBy(
-                        () -> down.ask(new LlmQueryRequest("Why?", 2L, "staff", "Beauty")))
+                        () -> down.ask(new LlmQueryRequest("Why?", 2L, "staff", "Beauty", null)))
                 .isInstanceOfSatisfying(org.springframework.web.server.ResponseStatusException.class, e -> {
                     assertThat(e.getStatusCode().value()).isEqualTo(503);
                     assertThat(e.getReason()).isEqualTo("the answer service is unavailable");
@@ -381,7 +408,7 @@ class QueryControllerTest {
         QueryClient unconfigured = new QueryClient("http://127.0.0.1:" + stub.getAddress().getPort(), "", 500, 500);
 
         org.assertj.core.api.Assertions.assertThatThrownBy(
-                        () -> unconfigured.ask(new LlmQueryRequest("Why?", 2L, "staff", "Beauty")))
+                        () -> unconfigured.ask(new LlmQueryRequest("Why?", 2L, "staff", "Beauty", null)))
                 .isInstanceOfSatisfying(org.springframework.web.server.ResponseStatusException.class,
                         e -> assertThat(e.getStatusCode().value()).isEqualTo(503));
         assertThat(calls).isZero();

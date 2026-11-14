@@ -46,12 +46,16 @@ async def rewrite(model, question="And the one before that?", turns=TURNS, timeo
 # ---- what the model is shown
 
 
-def test_a_question_without_a_conversation_is_sent_alone_and_a_long_conversation_keeps_its_last_turns():
+def test_a_long_conversation_keeps_its_last_turns_in_full_and_only_the_questions_before_them():
     assert rewriting.build_prompt("Who signs off?", ()) == "Question: Who signs off?"
     many = tuple(Turn("user" if i % 2 == 0 else "assistant", f"turn {i}") for i in range(10))
     prompt = rewriting.build_prompt("And then?", many)
-    assert "turn 3" not in prompt and prompt.startswith("Conversation so far:\nuser: turn 4\nassistant: turn 5")
-    assert prompt.endswith("\n\nQuestion: And then?")
+    # The last six in full; before them the questions alone, the answers left out
+    assert prompt.startswith("Conversation so far:\nuser, earlier: turn 0\nuser, earlier: turn 2\nuser: turn 4\n"
+                             "assistant: turn 5")
+    assert "turn 1" not in prompt and "turn 3" not in prompt and prompt.endswith("\n\nQuestion: And then?")
+    short = tuple(Turn("user" if i % 2 == 0 else "assistant", f"turn {i}") for i in range(4))
+    assert "earlier" not in rewriting.build_prompt("And then?", short)
 
 
 def test_the_instructions_leave_campaigns_and_dates_to_code_and_next_time_alone():
@@ -104,6 +108,7 @@ async def test_a_follow_up_comes_back_rewritten_with_its_campaign_reference():
 async def test_a_question_that_stands_on_its_own_or_comes_back_the_same_goes_on_as_asked(reply):
     rewritten = await rewrite(FakeModel(reply))
     assert not rewritten.changed and rewritten.campaign is None and rewritten.input_tokens == 250
+    assert rewritten.stands_alone
 
 
 @pytest.mark.anyio
@@ -115,6 +120,7 @@ async def test_a_question_that_stands_on_its_own_or_comes_back_the_same_goes_on_
 async def test_when_the_model_fails_the_question_goes_on_as_asked(error):
     rewritten = await rewrite(FakeModel(error=error))
     assert not rewritten.changed and type(error).__name__ in rewritten.reason
+    assert not rewritten.stands_alone   # the model didn't judge it, so the cache can't keep it as asked
 
 
 @pytest.mark.anyio

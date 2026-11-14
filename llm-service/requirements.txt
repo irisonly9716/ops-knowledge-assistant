@@ -46,10 +46,13 @@ langgraph==1.2.20
 # releases about weekly: this was the newest release more than two weeks old
 sqlglot==30.24.0
 
+# ---- cache and conversation memory ----
+# The answer cache and the turns of a conversation, with its asyncio client (app/memory). 2.8 MB, and nothing else on
+# Python 3.12. The newest release more than two weeks old
+redis==8.1.0
+
 # ---- uncomment when the feature needs it (versions from when this list was started: take the current one) ----
 # vector store (psycopg is installed above; this is pgvector's Python adapter)
 # pgvector==0.3.6
 # sqlalchemy==2.0.36
-#
-# Redis cache / conversation memory
-# redis==5.2.1
+

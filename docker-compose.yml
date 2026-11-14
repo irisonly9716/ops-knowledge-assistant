@@ -68,7 +68,10 @@ services:
   redis:
     image: redis:7-alpine
     container_name: oka-redis
-    command: ["redis-server", "--appendonly", "yes"]   # AOF persistence on
+    # AOF persistence on. A memory limit, and when it is reached only keys with an expiry are evicted, least recently
+    # used first: the answer cache and the conversations both expire, and losing either only costs a model call or a
+    # follow-up's context. How much production needs isn't measured (#11)
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
     ports:
       - "${REDIS_PORT}:6379"
     volumes:

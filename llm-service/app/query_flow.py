@@ -32,6 +32,12 @@ questions stand on their own, and those lose nothing. A follow-up, or a question
 to now, starts again once the rewrite is in, which costs it about the time of one model call. A campaign found that way
 opens the answer ("Based on ..."), so a wrong reading of "the last one" shows at once.
 
+The answer cache (app/memory/cache.py) is looked up twice. First, before anything runs, under the question as asked,
+when there is no conversation: a hit makes no model call. Only questions the rewrite judged to stand on their own are
+kept under the question as asked, so "last month's GMV" never is, and a question whose rewrite timed out isn't either.
+Then, after a rewrite, under the question filled in: "the last Black Friday" is kept under the campaign it meant.
+A follow-up isn't looked up as asked, since what it means depends on the turns before it.
+
 A path that was needed and failed fails the query, as either path alone did. A path the route ruled out may fail
 without anyone hearing of it: its answer was never going to be used.
 """
@@ -41,6 +47,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date
+from typing import TYPE_CHECKING
 
 from app.rag.answering import ANSWERED, REFUSED, Citation, InvalidAnswer, QueryService, QueryTrace, Uncited, cited_numbers
 from app.rag.query_models import AnswerModel, QueryEmbedder
@@ -54,6 +61,10 @@ from app.sql_agent.campaigns import (EACH_DEPARTMENT_TEXT, NOT_FOUND_TEXT, SAME_
 from app.sql_agent.execute import QueryResult
 from app.sql_agent.pipeline import SqlService, SqlTrace
 from app.time_budget import TimeBudget
+
+if TYPE_CHECKING:   # the cache serializes FlowAnswer, so it imports this module
+    from app.memory.cache import AnswerCache
+    from app.memory.conversation import ConversationMemory
 
 log = logging.getLogger("query")
 
@@ -119,6 +130,7 @@ class FlowTrace:
     found: Found | None = None           # the campaign search, when the question named one by its place in time
     rewrite_ms: float = 0.0              # from the start
     restarted: bool = False              # the paths started again on the rewritten question
+    cached: str = ""                     # the answer came from the cache: "as asked" or "rewritten"; "" when it didn't
 
     @property
     def tokens(self) -> tuple[int, int]:
@@ -137,7 +149,9 @@ class FlowTrace:
 
 class QueryFlow:
     def __init__(self, embedder: QueryEmbedder, router: QuestionRouter, rewriter: QuestionRewriter,
-                 documents: QueryService, data: SqlService, campaigns: CampaignFinder, composer: AnswerModel):
+                 documents: QueryService, data: SqlService, campaigns: CampaignFinder, composer: AnswerModel, *,
+                 cache: "AnswerCache | None" = None, memory: "ConversationMemory | None" = None):
+        """cache and memory: None in the evaluation, whose questions would otherwise be answered from its last run."""
         self._embedder = embedder
         self._router = router
         self._rewriter = rewriter
@@ -145,20 +159,29 @@ class QueryFlow:
         self._data = data
         self._campaigns = campaigns
         self._composer = composer
+        self._cache = cache
+        self._memory = memory
 
-    async def answer(self, question: str, *, user_id: int, role: str, department: str | None,
-                     budget: TimeBudget) -> FlowAnswer:
-        traced = await self.trace(question, role=role, department=department, today=date.today(), budget=budget)
+    async def answer(self, question: str, *, user_id: int, role: str, department: str | None, budget: TimeBudget,
+                     session_id: str | None = None) -> FlowAnswer:
+        """session_id: the conversation, whose turns the rewrite and the router read, and which keeps this one. None:
+        a question on its own."""
+        remembering = self._memory is not None and session_id is not None
+        turns = await self._memory.recent(user_id, session_id) if remembering else ()
+        traced = await self.trace(question, role=role, department=department, today=date.today(), budget=budget,
+                                  turns=turns)
         documents, data, routing = traced.documents, traced.data, traced.routing
         # The question and the query stay out of the logs: what people ask is private (see the audit rules)
-        log.info("query user=%s role=%s route=%s decided_by=%s confidence=%s paths=%s rewritten=%s restarted=%s "
+        log.info("query user=%s role=%s cached=%s turns=%d route=%s decided_by=%s confidence=%s paths=%s rewritten=%s "
+                 "rewrite_reason=%r restarted=%s "
                  "basis=%s cancelled=%s written_by=%s status=%s chunks=%s top_score=%s reranked=%s sql_attempts=%s "
                  "rows=%s embed_ms=%.0f route_ms=%.0f rewrite_ms=%.0f paths_ms=%.0f compose_ms=%.0f total_ms=%.0f "
-                 "tokens_in=%d tokens_out=%d", user_id, role,
+                 "tokens_in=%d tokens_out=%d", user_id, role, traced.cached or "-", len(turns),
                  routing.route if routing else "-", routing.decided_by if routing else "-",
                  routing.confidence if routing else "-",
                  ",".join(path for path in PATH_ORDER if path in routing.paths) if routing else "-",
-                 traced.rewritten.changed if traced.rewritten else "-", traced.restarted,
+                 traced.rewritten.changed if traced.rewritten else "-",
+                 traced.rewritten.reason if traced.rewritten else "-", traced.restarted,
                  traced.answer.basis.campaign_id if traced.answer and traced.answer.basis else "-",
                  ",".join(traced.cancelled) or "-", traced.written_by,
                  traced.answer.status if traced.answer else "invalid",
@@ -169,6 +192,8 @@ class QueryFlow:
                  traced.total_ms, *traced.tokens)
         if traced.error:
             raise traced.error
+        if remembering:
+            await self._memory.remember(user_id, session_id, question, traced.answer.text)
         return traced.answer
 
     async def trace(self, question: str, *, role: str, department: str | None, today: date, budget: TimeBudget,
@@ -178,6 +203,12 @@ class QueryFlow:
         departments = visible_departments(role, department)   # both fail closed, before anything costs money or time
         asker = schema.visible_department(role, department)
         started = time.perf_counter()
+        versions = await self._cache.versions(role, department, budget) if self._cache else None
+        if versions is not None and not turns:
+            hit = await self._cache.get(self._cache.key(asker, role, versions, question))
+            if hit is not None:
+                return FlowTrace(hit, None, None, "cache", None, None, (), 0.0, 0.0, 0.0, 0.0, (0, 0),
+                                 (time.perf_counter() - started) * 1000, asked=question, cached="as asked")
         routing_task = asyncio.create_task(self._router.route(question, budget, turns))
         rewrite_task = asyncio.create_task(self._rewriter.rewrite(question, turns, budget))
         tasks: dict[str, asyncio.Task] = {"route": routing_task, "rewrite": rewrite_task}
@@ -202,6 +233,13 @@ class QueryFlow:
                     return FlowTrace(early, None, routing, "-", None, None, (), (embedded - started) * 1000, 0.0, 0.0,
                                      0.0, (0, 0), (finished - started) * 1000, rewritten, asked, found,
                                      (rewrote - started) * 1000, False)
+                if versions is not None:
+                    hit = await self._cache.get(self._cache.key(asker, role, versions, asked))
+                    if hit is not None:
+                        routing = routing_task.result() if routing_task.done() else None
+                        return FlowTrace(hit, None, routing, "cache", None, None, (), (embedded - started) * 1000,
+                                         0.0, 0.0, 0.0, (0, 0), (time.perf_counter() - started) * 1000, rewritten,
+                                         asked, found, (rewrote - started) * 1000, False, "rewritten")
                 vector = await self._embedder.embed_question(asked, budget)
                 self._start_paths(tasks, asked, vector, routing_task, role, department, today, budget)
             routing = await routing_task
@@ -226,6 +264,12 @@ class QueryFlow:
             for task in (*tasks.values(), *stopped):
                 task.cancel()
             await asyncio.gather(*tasks.values(), *stopped, return_exceptions=True)
+        if versions is not None and answer is not None:
+            # Under the question filled in, or the question as asked when the rewrite judged it to stand alone. Not when
+            # the rewrite couldn't say: "our last campaign" kept as asked would outlive the next campaign
+            kept_as = asked if rewritten.changed else question if rewritten.stands_alone else None
+            if kept_as is not None:
+                await self._cache.put(self._cache.key(asker, role, versions, kept_as), answer)
         compose_ms = (finished - joined) * 1000 if written_by == "both" else 0.0
         return FlowTrace(answer, error, routing, written_by, documents, data, cancelled, (embedded - started) * 1000,
                          (routed - started) * 1000, (joined - started) * 1000, compose_ms, compose_tokens,

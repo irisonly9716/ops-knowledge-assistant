@@ -28,7 +28,8 @@ from app.time_budget import TimeBudget
 CAMPAIGN, PERIOD = "{campaign}", "{period}"
 MAX_OUTPUT_TOKENS = 300   # a question and two references; the limit only stops a runaway reply
 MOST_POSITIONS = 10       # the 10th campaign back is as far as "the one before that" plausibly goes
-TURNS_KEPT = 6            # the last three questions and answers: enough for "and the one before that"
+TURNS_KEPT = 6            # the last three questions and answers in full: enough for "and the one before that"
+STANDS_ALONE, SAME_QUESTION = "stands on its own", "the model wrote the question as it was"
 
 INSTRUCTIONS = f"""You rewrite questions from employees of a live-commerce company so that each stands on its own. You get the conversation so far, if there is one, and the latest question. There are two things to do, each only where it is needed.
 
@@ -94,9 +95,19 @@ class Rewritten:
     def changed(self) -> bool:
         return self.standalone is not None
 
+    @property
+    def stands_alone(self) -> bool:
+        """The model judged the question to stand on its own, as against going on as asked because it couldn't help:
+        only then can the question as asked be a cache key (app/memory/cache.py)."""
+        return self.reason in (STANDS_ALONE, SAME_QUESTION)
+
 
 def conversation(turns: Sequence[Turn]) -> str:
-    return "\n".join(f"{turn.role}: {turn.content}" for turn in turns[-TURNS_KEPT:])
+    """The last TURNS_KEPT turns in full, and the questions before them alone: a question is a few words, an answer up
+    to a thousand characters, so older topics cost the prompt little and "back to the inventory check" still has one."""
+    earlier = [turn.content for turn in turns[:-TURNS_KEPT] if turn.role == "user"]
+    lines = [f"user, earlier: {question}" for question in earlier]
+    return "\n".join(lines + [f"{turn.role}: {turn.content}" for turn in turns[-TURNS_KEPT:]])
 
 
 def build_prompt(question: str, turns: Sequence[Turn]) -> str:
@@ -125,12 +136,15 @@ def checked(choice: RewriteChoice) -> str | None:
     return None
 
 
+def normalized(question: str) -> str:
+    """A question without what doesn't change it: case, spacing and the closing mark."""
+    return " ".join(question.casefold().split()).rstrip("?.! ")
+
+
 def same_question(rewritten: str, question: str) -> bool:
     """Only case, spacing or the closing punctuation changed: on dev, "who updates the stream plan?" came back with a
     capital W, and taken as a rewrite it would have started both paths again for nothing."""
-    def plain(text: str) -> str:
-        return " ".join(text.casefold().split()).rstrip("?.! ")
-    return plain(rewritten) == plain(question)
+    return normalized(rewritten) == normalized(question)
 
 
 class QuestionRewriter:
@@ -153,6 +167,6 @@ class QuestionRewriter:
         if problem:
             return Rewritten(None, None, None, f"the reply was refused: {problem}", *tokens)
         if choice.standalone is not None and same_question(choice.standalone, question):
-            return Rewritten(None, None, None, "the model wrote the question as it was", *tokens)
+            return Rewritten(None, None, None, SAME_QUESTION, *tokens)
         return Rewritten(choice.standalone, choice.campaign, choice.period,
-                         "stands on its own" if choice.standalone is None else "rewritten", *tokens)
+                         STANDS_ALONE if choice.standalone is None else "rewritten", *tokens)

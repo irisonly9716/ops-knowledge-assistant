@@ -18,6 +18,14 @@ class Settings(BaseSettings):
 
     redis_host: str = "localhost"
     redis_port: int = 6379
+    # The query path's Redis: answers cached and the turns of a conversation (app/memory). The tests use another db
+    redis_db: int = 0
+    # Per process. A call needs a connection only while it runs, about a millisecond, so few serve many queries; at
+    # most this many, because redis-py's default pool would open one for every caller waiting
+    redis_max_connections: int = 50
+    # Every call, waiting for a connection included. Redis answers in about a millisecond; past this the query goes on
+    # without the cache or the conversation, so a slow Redis can't hold it up
+    redis_timeout_seconds: float = 0.1
 
     kafka_bootstrap_servers: str = "localhost:9092"
     doc_upload_topic: str = "document-upload-events"
@@ -134,6 +142,18 @@ class Settings(BaseSettings):
     # medium or high. None, as every other answer, until the evaluation grades these answers: planning advice is where
     # reasoning could pay, and it is slower and costs output tokens
     compose_reasoning_effort: str = "none"
+
+    # ---- cache and conversation memory ----
+    # How long a cached answer lives. Not what keeps it correct, the knowledge versions are (app/memory/cache.py): a
+    # backstop for what no write moves on, such as a campaign that was running yesterday and has finished today
+    cache_ttl_seconds: int = 3600
+    # Messages kept per conversation: 10 questions and their answers. The rewrite reads the last 6 in full and the
+    # questions before them alone (app/router/rewriting.py)
+    memory_messages: int = 20
+    # A conversation expires this long after its last turn
+    memory_ttl_seconds: int = 1800
+    # An answer is kept up to this many characters: enough to say what "it" refers to, not the whole answer
+    memory_answer_chars: int = 1000
 
     llm_service_host: str = "127.0.0.1"
     llm_service_port: int = 8000

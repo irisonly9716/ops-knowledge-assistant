@@ -4,13 +4,15 @@
       "question": "How do I handle an account restriction?",
       "userId": 2,
       "role": "staff",
-      "department": "Beauty"
+      "department": "Beauty",
+      "sessionId": "5f0c1c9e-3c4e-4a3e-9d4e-2f1b7a6c8d90"
     },
     {
       "question": "How do I handle an account restriction?",
       "userId": 25,
       "role": "executive",
-      "department": null
+      "department": null,
+      "sessionId": null
     }
   ],
   "responses": {
