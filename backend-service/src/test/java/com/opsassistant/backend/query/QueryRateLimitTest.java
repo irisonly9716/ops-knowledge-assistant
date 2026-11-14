@@ -49,7 +49,7 @@ class QueryRateLimitTest {
         when(userRepository.findById(2L)).thenReturn(Optional.of(new User(2L, "Staff", 1L, "staff")));
         when(departmentRepository.findById(1L)).thenReturn(Optional.of(new Department(1L, "Beauty")));
         when(queryClient.ask(any())).thenReturn(new LlmQueryResponse("refused", "no", List.of(), List.of("Beauty", "ALL"),
-                List.of("documents"), null));
+                List.of("documents"), null, null, null));
     }
 
     private static MockHttpServletRequestBuilder ask(String user, String body) {

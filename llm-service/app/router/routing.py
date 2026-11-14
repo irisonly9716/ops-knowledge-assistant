@@ -15,10 +15,13 @@ When the model can't be asked in time, or its reply doesn't fit the shape, a key
 coarse on purpose: a fallback, and the baseline the model is measured against (evaluation/route_run.py).
 
 The router sees the question alone, not who asks: which source holds an answer doesn't depend on the asker, and what
-they may see is enforced on each path.
+they may see is enforced on each path. A follow-up comes with the turns before it, without which "and the Beauty one?"
+names no source; on dev, follow-ups about data asked alone went to none. A question without them is sent exactly as
+before, so the routing measured on dev still holds for it.
 """
 import asyncio
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -26,6 +29,7 @@ from openai import APIError
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.rag.query_models import ModelBusy, StructuredModel
+from app.router.rewriting import Turn, conversation
 from app.time_budget import TimeBudget
 
 DOCUMENTS, DATA = "documents", "data"
@@ -103,12 +107,13 @@ class QuestionRouter:
         self._min_confidence = min_confidence
         self._timeout = timeout_seconds
 
-    async def route(self, question: str, budget: TimeBudget) -> Routing:
+    async def route(self, question: str, budget: TimeBudget, turns: Sequence[Turn] = ()) -> Routing:
         """Never fails: whatever goes wrong with the model, the keyword rule decides and the reason says what."""
         own = TimeBudget(max(min(self._timeout, budget.remaining()), 0))
+        prompt = f"Conversation so far:\n{conversation(turns)}\n\nQuestion: {question}" if turns else question
         try:
             async with asyncio.timeout(own.remaining()):
-                answer = await self._model.ask(INSTRUCTIONS, question, RouteChoice, own)
+                answer = await self._model.ask(INSTRUCTIONS, prompt, RouteChoice, own)
         except (TimeoutError, APIError, ModelBusy, ValueError) as error:   # ValueError: a reply the shape refused
             return self.by_keywords(question, f"the model didn't route it: {type(error).__name__}")
         choice = answer.value

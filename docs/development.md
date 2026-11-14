@@ -120,6 +120,12 @@ stop containers you don't need. `--max-batch-tokens 1024` in `docker-compose.yml
 
 ## Troubleshooting
 
+**Every `/query` through the backend gets `502` "the answer service is not configured"**
+llm-service refused the backend's `INTERNAL_SERVICE_TOKEN` (its log shows `401`), so the two read different values. Both
+read the same `.env`, and the backend's reader follows python-dotenv's rules: quotes around a value, `export`, a comment
+after ` #`, Unicode whitespace. A variable of the same name set in the environment wins over `.env` in both: check that
+neither process has one. Then restart both.
+
 **`password authentication failed for user "ops"` although `.env` looks right**
 - Another PostgreSQL may be listening on port 5432 (for example a native Windows install). Check with `Get-NetTCPConnection -LocalPort 5432 -State Listen` in PowerShell. Set `POSTGRES_PORT=5433` in `.env` and run `docker compose up -d`; Compose, Spring and Python all read this variable.
 - Postgres only uses `POSTGRES_PASSWORD` when the data volume is first created. Changing it in `.env` later does not change the database password: run `ALTER USER` inside the container, or recreate the volume with `docker compose down -v`.

@@ -24,8 +24,10 @@ from app.rag.answering import QueryService
 from app.rag.query_models import (ModelCallLimit, OpenAIAnswerModel, OpenAIQueryEmbedder, OpenAIStructuredModel,
                                   openai_client_from_settings)
 from app.rag.reranking import Reranker, tei_reranker_from_settings
-from app.router import routing
+from app.router import rewriting, routing
+from app.router.rewriting import QuestionRewriter
 from app.router.routing import QuestionRouter
+from app.sql_agent.campaigns import CampaignFinder
 from app.sql_agent.pipeline import SqlOptions, SqlService
 
 
@@ -45,9 +47,12 @@ def query_flow_from_settings(client: AsyncOpenAI, pool: Any, reader_pool: Any, r
     router = QuestionRouter(OpenAIStructuredModel(client, settings.router_model, limit, settings.router_timeout_seconds,
                                                   routing.MAX_OUTPUT_TOKENS),
                             min_confidence=settings.router_min_confidence, timeout_seconds=settings.router_timeout_seconds)
+    rewriter = QuestionRewriter(OpenAIStructuredModel(client, settings.rewrite_model, limit,
+                                                      settings.rewrite_timeout_seconds, rewriting.MAX_OUTPUT_TOKENS),
+                                timeout_seconds=settings.rewrite_timeout_seconds)
     composer = OpenAIAnswerModel(client, settings.chat_model, limit, settings.query_model_timeout_seconds,
                                  settings.answer_max_output_tokens, reasoning_effort=settings.compose_reasoning_effort)
-    return QueryFlow(embedder, router, documents, data, composer)
+    return QueryFlow(embedder, router, rewriter, documents, data, CampaignFinder(pool, reader_pool), composer)
 
 
 @asynccontextmanager

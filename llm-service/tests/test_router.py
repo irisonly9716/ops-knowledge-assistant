@@ -8,6 +8,7 @@ import pytest
 
 from app.rag.query_models import ModelBusy, StructuredAnswer
 from app.router import routing
+from app.router.rewriting import Turn
 from app.router.routing import BOTH, DATA, DOCUMENTS, QuestionRouter, RouteChoice
 from app.time_budget import TimeBudget
 
@@ -105,3 +106,14 @@ async def test_the_router_takes_no_more_than_what_is_left_of_the_query():
 async def test_a_reply_that_did_not_complete_falls_back_but_still_counts_its_tokens():
     decided = await router(FakeModel(None)).route("Who approves the plan?", TimeBudget(10))
     assert (decided.route, decided.decided_by, decided.input_tokens) == ("documents", "keywords", 300)
+
+
+@pytest.mark.anyio
+async def test_a_follow_up_is_routed_with_the_turns_before_it():
+    model = FakeModel(RouteChoice(route="data", confidence=0.99, reason="Numbers about a campaign."))
+    turns = (Turn("user", "When did the Electronics Black Friday Live campaign run?"),
+             Turn("assistant", "It ran from 2025-11-16 to 2025-12-12."))
+    await router(model).route("And the Beauty one?", TimeBudget(10), turns)
+    prompt = model.asked[0][1]
+    assert prompt.startswith("Conversation so far:\nuser: When did the Electronics")
+    assert prompt.endswith("\n\nQuestion: And the Beauty one?")
