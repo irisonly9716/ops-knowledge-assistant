@@ -150,7 +150,15 @@ The database holds the department too (migration V11), so a query that gets past
   doesn't exist, and a question asked back lists only campaigns this search found. The campaign list never goes to a
   model. Whether a campaign has a review is read as `ops`, by id, only for campaigns the search already returned
 
-## 3. Filtering documents (vector search)
+## 3. The answer cache and the conversation
+
+- **The cache's key holds the department and the role** (`llm-service/app/memory/cache.py`), so an answer cached for
+  one department is never found for another, whatever the question. Within a department and a role everyone sees the
+  same, so the key has no user id; it would need one if permissions ever went down to the person.
+- **A conversation is kept under the user id as well as the session id.** The user id comes from the `users` table
+  through the backend; the session id from the client, which can make one up. Someone else's session id reads nothing.
+
+## 4. Filtering documents (vector search)
 
 - `doc_chunks.department` is a real column (a department or `ALL`), kept consistent with its document by a composite foreign key
 - Retrieval filters on this column:
@@ -176,7 +184,7 @@ The database holds the department too (migration V11), so a query that gets past
   campaign's, never `ALL`); they can also be narrowed down to "only this campaign's review" by
   `campaign_id` / `doc_type` through a join with `documents`
 
-## 4. Campaigns that span departments
+## 5. Campaigns that span departments
 
 A campaign may involve several departments. Two options; the simple one first:
 
@@ -185,7 +193,7 @@ A campaign may involve several departments. Two options; the simple one first:
 | **A. One owning department** (used now) | `campaigns.department_id` records only the owning department | simple; cross-department visibility comes from SOPs saying "work with department X" |
 | B. Many-to-many | a `campaign_departments(campaign_id, department_id)` join table | more realistic, but SQL filtering and the schema get a level more complex |
 
-## 5. Acceptance checklist
+## 6. Acceptance checklist
 
 - [ ] A `staff` user asking for another department's campaign GMV gets no data / a clear "no permission"
 - [ ] The same question from an `executive` or `admin` user gets the data
@@ -196,7 +204,7 @@ A campaign may involve several departments. Two options; the simple one first:
 - [x] "The last campaign" only resolves among campaigns the user can see: a newer campaign in another department changes nothing, and a question asked back never lists one (`tests/test_campaigns.py`)
 - [x] Asking about another department's campaign gets the same answer as one that doesn't exist (`tests/test_campaigns.py`, and end to end through the backend)
 
-## 6. No permissions at the host level for now
+## 7. No permissions at the host level for now
 
 `campaigns.host_id` / `documents.campaign_id -> campaigns.host_id` only **trace** which host a campaign,
 plan or review belongs to; they are not a permission dimension. The required scale (8 departments, 500

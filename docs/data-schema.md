@@ -3,7 +3,8 @@
 > The actual DDL lives in the Flyway migrations under [db/migration/](../db/migration/) (V1 pgvector, V2 base
 > schema, V3 uploads / roles / chunk department, V4 the `document_catalog` view, V5 its `catalog_entry()` function,
 > V6 the `outbox` table, V7 `documents.version` and `uploads.category`, V8 the delivery and republish counts on
-> `uploads`, V9 the data dictionary and the metric views, V10 `sql_examples`), applied in
+> `uploads`, V9 the data dictionary and the metric views, V10 `sql_examples`, V11 the role generated SQL runs as and
+> row-level security, V12 `knowledge_versions`), applied in
 > version order (this document explains them; the SQL files are authoritative for column types).
 > The data is mock data generated with Python + Faker (see `llm-service/scripts/generate_mock_data.py`).
 
@@ -377,6 +378,25 @@ the backend's relay publishes it to Kafka afterwards and marks it. See "Transact
 
 A partial index on `id WHERE published_at IS NULL` keeps the relay's lookup as small as the backlog.
 Published rows are deleted after 7 days. Something waiting: `SELECT * FROM outbox WHERE published_at IS NULL`.
+
+### knowledge_versions (V12)
+The version of what a question can be answered from, part of the answer cache's key (`llm-service/app/memory/cache.py`).
+Every document or table write moves it on, as the last statements of the write's own transaction
+(`store.bump_knowledge_versions`), so an answer cached before the write is never found again.
+
+| Column | Type | Notes |
+|---|---|---|
+| knowledge_version_id | serial PK | |
+| scope | text | `department`, `all` (documents for every department) or `everything` (moved by every write) |
+| department_id | int FK, nullable | set for `department` only |
+| version | bigint | from `knowledge_version_seq`: never handed out twice, even after the table is emptied |
+| updated_at | timestamptz | |
+
+Unique on (scope, department_id) with NULLS NOT DISTINCT, so `all` and `everything` are one row each. A staff
+member's or a manager's key holds their department's version and `all`; an executive's or admin's, `everything`. A
+scope with no row reads as 0. The rows are locked in one order, department, `all`, `everything`, by documents and
+tables alike, so two writers can't deadlock on them. `generate_mock_data` moves every scope on, since it rewrites the
+data without the consumer.
 
 ## Mock data (generated)
 

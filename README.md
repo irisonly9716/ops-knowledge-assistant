@@ -88,8 +88,9 @@ backend /query: the department and role come from the users table, never from th
   │ forwards
   ▼
 llm-service /query
+  ├─ cached? same department, role, knowledge version and question → the answer, no model call
   ├─ route: one model call, documents / data / both / none ─────────────────────────────┐
-  ├─ rewrite: a follow-up, or "the last Black Friday", into a question that stands alone   │
+  ├─ rewrite: a follow-up (with the conversation's last turns), or "the last Black Friday" │
   └─ embed the question ─┬─ documents: vector search (own department + ALL) → rerank → answer │ the route cancels
                          └─ data: write SQL → check → run as a read-only role (↺ retry)       │ the path it rules out
   rewritten: find the campaign among the user's own (or ask back), work out the dates, start the paths again
@@ -99,8 +100,9 @@ llm-service /query
 
 Both paths start while the router decides, because routing is a model call: waiting for it would put a question about
 data at about 3.8 s, estimated from each step's measured time, against a 3 s target. The path the route rules out is
-cancelled. Not built yet: the cache and conversation memory, so `/query` rewrites a question with no turns before it;
-the evaluation passes a follow-up's own.
+cancelled. Answers are cached in Redis under the department, the role and a knowledge version that every document
+or table write moves on in its own transaction, so an answer is never served after what it rests on has changed; a
+conversation's last turns are kept in Redis for the rewrite. Not built yet: the audit table.
 
 ---
 

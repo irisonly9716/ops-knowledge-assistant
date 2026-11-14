@@ -20,7 +20,7 @@ An assistant for live-commerce operations staff. One entry point answers SOP and
 
 **Principle:** the project analyzes content and results with AI; it does not recompute analytics. Clean numbers go in SQL columns, narrative (SOPs, plans, reviews) goes through RAG, and data other teams already computed is uploaded, not calculated here.
 
-**Status:** upload, approval, ingestion and reranking are implemented, and `/query` answers from the documents, the campaign data or both: the router (`app/router`, a model with structured output) picks the paths, both start before it decides and the one it rules out is cancelled (`app/query_flow.py`), and each path is a LangGraph state graph. Text-to-SQL has the data dictionary, the metric views (V9), the fixed pipeline with its parser checks and department filter, run as a read-only role under row-level security (V11), and a baseline agent for the evaluation. A rewrite beside the router turns a follow-up, or a campaign or time named relative to now, into a question that stands on its own: the campaign is found as `sql_reader` among the asker's own, the dates by code, and an ambiguous one is asked back (`app/router/rewriting.py`, `app/sql_agent/campaigns.py`). Cache and memory are not built (`app/memory` is an empty package), so `/query` has no turns to give the rewrite; the evaluation passes a follow-up's own.
+**Status:** upload, approval, ingestion and reranking are implemented, and `/query` answers from the documents, the campaign data or both: the router (`app/router`, a model with structured output) picks the paths, both start before it decides and the one it rules out is cancelled (`app/query_flow.py`), and each path is a LangGraph state graph. Text-to-SQL has the data dictionary, the metric views (V9), the fixed pipeline with its parser checks and department filter, run as a read-only role under row-level security (V11), and a baseline agent for the evaluation. A rewrite beside the router turns a follow-up, or a campaign or time named relative to now, into a question that stands on its own: the campaign is found as `sql_reader` among the asker's own, the dates by code, and an ambiguous one is asked back (`app/router/rewriting.py`, `app/sql_agent/campaigns.py`). Answers are cached in Redis under the asker's department, role and the knowledge versions (V12) that every document or table write moves on in its own transaction; a conversation's last turns are kept in Redis per user and session and given to the rewrite and the router (`app/memory`). The audit table is not built.
 
 **Language:** documents and questions are in English. There is no cross-language retrieval.
 
@@ -53,7 +53,7 @@ Design for these requirements, agreed with the CEO and department stakeholders f
 | LLM service | Python via `uv` · FastAPI · uvicorn · pydantic-settings · python-dotenv | 3.12 · 0.115.6 · 0.34.0 · 2.7.1 · 1.0.1 |
 | Database | `pgvector/pgvector` · Flyway · psycopg (binary) · psycopg-pool | pg16 · 13.10.3-alpine · 3.2.3 · 3.3.3 |
 | Messaging | `apache/kafka` (KRaft) · kafka-ui · confluent-kafka | 3.9.0 · v0.7.2 · 2.6.1 |
-| Cache and memory | Redis (running, not wired in yet) | 7-alpine |
+| Cache and memory | Redis · redis-py (its asyncio client) | 7-alpine · 8.1.0 |
 | Models | openai SDK · `text-embedding-3-small` (1536 dimensions) · default chat model `gpt-6-luna` | 3.29.0 |
 | Parsing | markdown-it-py · python-docx · pdfplumber · pyyaml | 4.2.0 · 1.2.0 · 0.11.10 · 6.0.3 |
 | Chunking | langchain-text-splitters · tiktoken | 1.1.3 · 0.14.0 |
@@ -100,6 +100,7 @@ llm-service/app/       Python: ingestion and the query path
   rag/                 parsing/, chunking, document_fields, embeddings, store, retrieval, reranking, query_models, answering
   sql_agent/           schema (what a model is shown of the database), guard (the parser checks, the department filter and the row limit), execute (one read-only SELECT), examples, pipeline, campaigns (which campaign "the last one" is)
   router/              routing: which paths a question takes, with the keyword rule as fallback; rewriting: a question that stands on its own; periods: dates from today
+  memory/              cache (answers under department, role and knowledge versions), conversation (a session's turns), redis_client
   query_flow.py        the top of a query: route and both paths at once, cancel the one ruled out, one answer
   server.py            starts the API; query_api.py: POST /query, for the backend only
   time_budget.py       one time budget per message or query
@@ -119,6 +120,7 @@ Key patterns:
 - **Errors:** a `PermanentError` goes straight to the dead-letter topic (retrying gives the same answer); anything else is retried within the time budget. A failed upload records why, naming the row and column for a bad CSV.
 - **Query limits:** the rate limit runs in the backend after the checks, so `401` and `400` come first and use none of it. A model call holds a slot only during the request, never while waiting to retry, and a query that can't get one within 1 s gets `503` with `Retry-After`. The backend's waits for the database are bounded too, because virtual threads put no limit on how many can wait.
 - **Query path:** route, rewrite, embedding and both paths start together; the route cancels the path it rules out, a rewrite starts the paths again on the question filled in, and nothing a query started outlives it. The top is asyncio and each path a LangGraph graph, because a graph's parallel branches wait for each other at every step and a running one can't be stopped. Async in llm-service, so no blocking call in it; ordinary blocking code in the backend. llm-service trusts the role it is sent, so `/query` requires `X-Internal-Token` and port 8000 must never be exposed. No database connection is held while waiting for a model. An answer needs real citations; anything else is a refusal or an error.
+- **Cache and memory:** a cached answer is never deleted, only made unreachable: its key holds the knowledge versions, which move on in the transaction of every document or table write (V12, never in Redis: that would be a dual write). Looked up as asked only when there is no conversation and the rewrite judged the question to stand alone; after a rewrite, under the question filled in. Redis never fails a query: every call has a hard stop of `REDIS_TIMEOUT_SECONDS`, and an error means no cache and no conversation.
 - **Time budget:** every layer shares one budget per message or query, with SDK retries off. Compute the worst case from every timeout and retry, not just the typical case.
 - **Replacements:** optimistic concurrency. An upload names the version it replaces (`replaces_upload_id`) and is void if that is no longer current. `doc_id` stays stable, `version` goes up.
 - **Data tables:** validate every cell, then replace all of a campaign's rows in one transaction with `COPY`, so `statement_timeout` bounds the load.
@@ -193,6 +195,7 @@ A new document for one's own department takes effect at once. Replacing anything
 **Security**
 - Never read, print or commit `.env` or secrets such as `OPENAI_API_KEY`. `.env.example` has placeholders only, and secrets never go into images.
 - `X-User-Id` is simulated identity: anyone can forge it (#5). State that accurately; the authorization rules are real, the authentication isn't yet.
+- A conversation is kept under the user id from the `users` table as well as the client's `sessionId`, so a session id someone else made up reads nothing; the answer cache's key holds the department and role, so one department's answer never reaches another.
 - Client file names are hostile: `UploadStorage.sanitizeFilename` and `resolve_upload_path` defend against path traversal. Keep both.
 - Generated SQL gets several layers; no single one is enough: parser checks with allow-lists (`guard.py`), the department filter added to every view a query reads, a read-only transaction with time and row limits, the role `sql_reader` that can read only the views, and row-level security on the tables behind them, with `set_config` revoked so a query can't change its department (V11). The fixed reads of the pipeline (catalog, names, examples) run as `ops`; the model's query runs as `sql_reader`, and so does the search for the campaign a question means (`campaigns.py`), with the department in its WHERE clause as well, so another department's campaign reads as one that doesn't exist.
 
@@ -215,3 +218,4 @@ A new document for one's own department takes effect at once. Replacing anything
 - v15 · 2026-11-11 · Arianna · The router and its evaluation.
 - v16 · 2026-11-12 · Arianna · The query flow: both paths before the route, a LangGraph graph per path; what the earlier sizing doesn't cover.
 - v17 · 2026-11-13 · Arianna · The rewrite, the campaign search as `sql_reader`, asking back.
+- v18 · 2026-11-14 · Arianna · The answer cache, the knowledge versions, conversation memory; redis-py.
