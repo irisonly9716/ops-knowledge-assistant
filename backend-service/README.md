@@ -150,8 +150,10 @@ executive and admin belong to none and see all. A malformed month is a `400`.
 
 ### `POST /query`
 
-Body: `{"question": "..."}`, at most 2,000 characters; `X-User-Id` says who is asking. The role and department come from
-the `users` table, so anything else in the body is ignored. `QueryClient` forwards them to llm-service with the internal
+Body: `{"question": "...", "sessionId": "..."}`, the question at most 2,000 characters; `X-User-Id` says who is asking.
+`sessionId` is optional: a UUID the client makes for each conversation, so a follow-up is understood with the turns
+before it; llm-service keeps a conversation under the user id too. The role and department come from the `users`
+table, so anything else in the body is ignored. `QueryClient` forwards them to llm-service with the internal
 token (`INTERNAL_SERVICE_TOKEN` in `.env`; both services read it).
 
 ```json
@@ -179,7 +181,7 @@ as numbers, so an amount like `3000.50` arrives as it is in the database. Every 
 
 | Answer | When |
 |---|---|
-| `400` | empty or too long, or the body isn't JSON |
+| `400` | empty or too long, a `sessionId` that isn't a UUID, or the body isn't JSON |
 | `401` | unknown user. Never because of the internal token: a token the two services disagree on is a `502` and an error in the log, since the client can do nothing about it |
 | `429` | over the rate limit, with `Retry-After` |
 | `502` | the model failed, or its answer failed validation (for example it cited an excerpt that doesn't exist) |

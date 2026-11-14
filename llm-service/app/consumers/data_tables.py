@@ -269,4 +269,5 @@ def save_rows(conn: psycopg.Connection, upload: store.UploadRow, rows: Sequence[
         for row in rows:
             loader.write_row((upload.campaign_id, *row))
     store.set_status(conn, upload.upload_id, "done")
+    store.bump_knowledge_versions(conn, upload.department)   # answers about this campaign's numbers change
     return replaced

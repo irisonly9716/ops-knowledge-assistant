@@ -29,6 +29,7 @@ from faker import Faker
 from psycopg.types.json import Jsonb
 
 from app.config import settings
+from app.rag.store import ALL_DEPARTMENTS, bump_knowledge_versions
 
 SEED = 42
 random.seed(SEED)
@@ -292,6 +293,10 @@ def main():
                             behavior_rows,
                         )
 
+        # Everything an answer could rest on changed, and TRUNCATE ... CASCADE emptied knowledge_versions with the
+        # departments: new versions, from the sequence, so no answer cached before this run is found again (V12)
+        for name in (*dept_ids, ALL_DEPARTMENTS):
+            bump_knowledge_versions(conn, name)
         conn.commit()  # one transaction for the whole script: an error rolls everything back
 
     print("Mock data generated")

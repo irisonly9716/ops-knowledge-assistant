@@ -1,7 +1,7 @@
 # llm-service
 
 Python / FastAPI. Document ingestion, and `/query`: routing, answers from the documents, from the campaign data
-(Text-to-SQL) or from both. Conversation memory and caching later.
+(Text-to-SQL) or from both, with an answer cache and conversation memory in Redis.
 
 ## Running it locally
 
@@ -69,7 +69,8 @@ app/
 │   ├── pipeline.py          the data path, a state graph: examples, write, check, run, retry with the error; then explain
 │   └── campaigns.py         which campaign "the last one" is, among the asker's own, as sql_reader
 ├── router/        routing.py: which paths a question takes; rewriting.py: a question that stands on its own; periods.py: dates from today
-└── memory/        Redis cache + conversation memory
+└── memory/        cache.py: answers under department, role and knowledge versions; conversation.py: a session's
+                   turns; redis_client.py: the bounded client both use
 evaluation/        the evaluation dataset's format (dataset.py), the review page (review.py), the runs (run.py for
                    documents, sql_run.py for SQL: the pipeline, or the baseline agent in sql_agent.py, route_run.py
                    for routing, flow_run.py for the whole query path); not part of the service
@@ -86,6 +87,8 @@ tests/             pytest; test_events (contract / cross-language drift) test_st
                    answer reaches the asker, nothing left running, what a rewrite restarts and asks back)
                    test_rewriting (fake model: which replies are taken, falling back to the question as asked; dates)
                    test_campaigns (real Postgres as sql_reader: the asker's own campaigns, asking back, each layer alone)
+                   test_memory (Redis database 15 and Postgres: the cache's key and what it keeps, the versions,
+                   a conversation's turns, Redis down)
                    test_ingestion (real Postgres: idempotency, rollback, replacements, conflicts, for documents and tables)
                    test_generate_corpus (the corpus generator without a model: numbers, the rules of a draft, authors)
                    test_dataset (the dataset's format, the split, finding a labelled section)
@@ -446,8 +449,33 @@ network. Through Docker Desktop's port forwarding on Windows, at 44 ms each, 5 c
 3.49 s, slowest 4.43 s; at 300 QPS one worker hit the limit and 214 of 900 queries got a `504`. Linux doesn't have this
 limit, so load tests belong there. The whole chain at 300 QPS hasn't been run yet: that is #11.
 
-**Not built yet:** the cache, conversation memory (so `/query` has no turns before a question to give the rewrite) and the
-audit table.
+### The answer cache and the conversation
+
+`app/memory`, on the compose Redis. Both only make a query faster or let it understand a follow-up, so neither ever
+fails one.
+
+- **The cache** keeps answers and refusals under `cache:<department>:<role>:<versions>:<sha256 of the question>`. The
+  versions come from `knowledge_versions` (migration V12): every document or table write moves them on in its own
+  transaction, so an answer is never found after what it rests on has changed, and nothing has to be deleted; Redis
+  expires the old keys after `CACHE_TTL_SECONDS` (an hour). Reading them is one more query a question.
+- **Looked up twice.** Before anything runs, under the question as asked, when there is no conversation: a hit makes no
+  model call, 15 ms through the backend against 2 to 4 s. Only a question the rewrite judged to stand alone is kept that
+  way. After a rewrite, under the question filled in, so "our last campaign" is kept under the campaign it meant and
+  misses once a newer one finishes; that hit comes after the rewrite, about a second in. A question asked back,
+  "failed", and an answer that failed validation aren't kept. The evaluation runs without the cache.
+- **The conversation** (`sessionId` in the request) keeps the last `MEMORY_MESSAGES` (20) under the user id and the
+  session id, for `MEMORY_TTL_SECONDS` (30 minutes) after its last turn. The rewrite and the router read the last 6 in
+  full and the questions before them alone; an answer is kept up to `MEMORY_ANSWER_CHARS` (1,000).
+- **Redis down or slow:** every call stops after `REDIS_TIMEOUT_SECONDS` (0.1 s), with redis-py's own retries off
+  (built without a pool, a client retried three times: 5.7 s a call with Redis down), and the query goes on with no
+  cache and no conversation. The pool holds at most `REDIS_MAX_CONNECTIONS` (50) a process.
+
+Verified end to end through the backend, Kafka, the consumer, Postgres and Redis: two departments asking the same
+question get their own answers and each is found again; a new Beauty document makes Beauty's cached answer miss and
+leaves Fresh Grocery's; a Beauty CSV does the same; a follow-up in a conversation is understood, and the same words in
+another conversation mean something else; and "our last campaign" moves to a campaign that has just finished.
+
+**Not built yet:** the audit table.
 
 ## Creating the Kafka topics
 

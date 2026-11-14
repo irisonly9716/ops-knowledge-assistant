@@ -86,7 +86,8 @@ cd backend-service
 ./mvnw test                           # Windows: .\mvnw.cmd test
 
 # Python: Kafka not required. tests/test_ingestion.py and tests/test_retrieval.py need the docker compose Postgres
-# (they create and drop a throwaway database) and are skipped when Postgres isn't running
+# (they create and drop a throwaway database) and are skipped when Postgres isn't running. tests/test_memory.py uses
+# the compose Redis, database 15, which it empties before and after; the query path uses database 0
 cd ../llm-service
 uv run pytest
 ```

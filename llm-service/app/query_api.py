@@ -12,6 +12,7 @@ import asyncio
 import hmac
 import logging
 from typing import Literal
+from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -43,6 +44,7 @@ class QueryRequest(_CamelModel):
     user_id: int
     role: Literal["staff", "manager", "executive", "admin"]
     department: str | None
+    session_id: UUID | None = None   # the conversation the question belongs to; none: a question on its own
 
     @field_validator("question")
     @classmethod
@@ -132,7 +134,7 @@ async def query(body: QueryRequest, flow: QueryFlow = Depends(query_flow)) -> Qu
     budget_seconds = settings.query_budget_seconds
     try:
         async with asyncio.timeout(budget_seconds):
-            result = await flow.answer(body.question, user_id=body.user_id, role=body.role,
+            result = await flow.answer(body.question, session_id=str(body.session_id) if body.session_id else None, user_id=body.user_id, role=body.role,
                                           department=body.department, budget=TimeBudget(budget_seconds))
     except (TimeoutError, APITimeoutError) as e:
         log.warning("query user=%s ran out of time: %s", body.user_id, type(e).__name__)

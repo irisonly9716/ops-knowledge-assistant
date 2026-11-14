@@ -43,8 +43,9 @@ class FakeService:
         self.delay = delay
         self.calls = []
 
-    async def answer(self, question, *, user_id, role, department, budget):
-        self.calls.append({"question": question, "user_id": user_id, "role": role, "department": department, "budget": budget})
+    async def answer(self, question, *, user_id, role, department, budget, session_id=None):
+        self.calls.append({"question": question, "user_id": user_id, "role": role, "department": department, "budget": budget,
+                           "session_id": session_id})
         if self.delay:
             await asyncio.sleep(self.delay)
         if self.error:
@@ -99,6 +100,15 @@ def test_the_role_and_department_reach_the_service_as_sent(client):
     assert client.post("/query", json=body(), headers=HEADERS).status_code == 200
     call = app.state.query_flow.calls[0]
     assert (call["question"], call["user_id"], call["role"], call["department"]) == ("How do I handle a restriction?", 2, "staff", "Beauty")
+    assert call["session_id"] is None   # no conversation: a question on its own
+
+
+def test_the_conversation_reaches_the_service_as_a_uuid_and_anything_else_is_a_400(client):
+    session = "5F0C1C9E-3C4E-4A3E-9D4E-2F1B7A6C8D90"
+    assert client.post("/query", json=body(sessionId=session), headers=HEADERS).status_code == 200
+    assert app.state.query_flow.calls[0]["session_id"] == session.lower()
+    r = client.post("/query", json=body(sessionId="memory:3:someone-elses"), headers=HEADERS)
+    assert r.status_code == 400 and "sessionId" in r.json()["error"] and len(app.state.query_flow.calls) == 1
 
 
 @pytest.mark.parametrize("overrides", [

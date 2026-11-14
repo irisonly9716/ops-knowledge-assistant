@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from app.memory.cache import AnswerCache
 from app.query_flow import NOT_IN_SOURCES, REFUSAL_TEXT, QueryFlow, compose_instructions
 from app.rag.answering import ANSWERED, REFUSED, Citation, InvalidAnswer, QueryAnswer, QueryService, QueryTrace
 from app.rag.answering import REFUSAL_TEXT as DOCUMENTS_REFUSAL
@@ -149,14 +150,54 @@ class FakeData(SqlService):
         return await self.step(question, role=role, department=department, today=today, vector=vector)
 
 
+class FakeRedis:
+    """A dict standing in for Redis: what the cache kept, under which key."""
+
+    def __init__(self):
+        self.kept = {}
+
+    async def get(self, key):
+        return self.kept.get(key)
+
+    async def set(self, key, value, ex):
+        self.kept[key] = value
+
+
+class FakeCache(AnswerCache):
+    """The real cache's rules over a dict, with the versions it is given instead of Postgres."""
+
+    def __init__(self, versions="d1.a1"):
+        super().__init__(FakeRedis(), None, ttl_seconds=60)
+        self.versions_are = versions
+
+    async def versions(self, role, department, budget):
+        return self.versions_are
+
+    def kept_under(self, question, department="Beauty", role="staff"):
+        return self.key(department, role, self.versions_are, question) in self._redis.kept
+
+
+class FakeMemory:
+    def __init__(self, turns=()):
+        self.turns, self.read, self.kept = tuple(turns), [], []
+
+    async def recent(self, user_id, session_id):
+        self.read.append((user_id, session_id))
+        return self.turns
+
+    async def remember(self, user_id, session_id, question, answer):
+        self.kept.append((user_id, session_id, question, answer))
+
+
 def build(route="documents", *, documents=None, data=None, router=None, composer=None, embedder=None, rewriter=None,
-          campaigns=None):
+          campaigns=None, cache=None, memory=None):
     parts = {"embedder": embedder or FakeEmbedder(), "router": router or FakeRouter(route),
              "rewriter": rewriter or FakeRewriter(), "documents": documents or FakeDocuments(),
              "data": data or FakeData(), "campaigns": campaigns or FakeCampaigns(),
-             "composer": composer or FakeModel("It converted 8.7%, below the 10% target [1].")}
+             "composer": composer or FakeModel("It converted 8.7%, below the 10% target [1]."),
+             "cache": cache, "memory": memory}
     return QueryFlow(parts["embedder"], parts["router"], parts["rewriter"], parts["documents"], parts["data"],
-                     parts["campaigns"], parts["composer"]), parts
+                     parts["campaigns"], parts["composer"], cache=cache, memory=memory), parts
 
 
 async def trace(flow, role="staff", department="Beauty", question="How did the summer sale convert against its plan?",
@@ -394,7 +435,7 @@ async def test_the_query_log_has_one_line_with_the_route_and_each_paths_numbers_
     assert "my private question" not in line and SQL not in line
     for part in ("route=both", "decided_by=model", "paths=documents,data", "written_by=both", "status=answered",
                  "reranked=True", "sql_attempts=1", "rows=1", "tokens_in=1020", "tokens_out=123", "cancelled=-",
-                 "rewritten=False", "restarted=False", "basis=-"):
+                 "rewritten=False", "rewrite_reason='stands on its own'", "restarted=False", "basis=-"):
         assert part in line
 
 
@@ -506,3 +547,105 @@ def test_the_readme_draws_the_graphs_the_code_builds():
              SqlService(None, None, None, None, None, SqlOptions(examples=0, retries=2)).graph]
     for graph in drawn:
         assert f"```mermaid\n{graph.get_graph().draw_mermaid().strip()}\n```" in readme
+
+
+# ---- the answer cache and the conversation
+
+
+QUESTION = "How did the summer sale convert against its plan?"
+
+
+@pytest.mark.anyio
+async def test_a_question_that_stands_on_its_own_is_kept_as_asked_and_answered_again_without_a_model():
+    cache = FakeCache()
+    flow, parts = build("documents", cache=cache)
+    first = await trace(flow)
+    assert first.cached == "" and cache.kept_under(QUESTION)
+    again, parts_again = build("documents", cache=cache)
+    traced = await trace(again, question="how did the summer sale  convert against its plan")
+    assert traced.cached == "as asked" and (traced.answer.status, traced.answer.text) == (first.answer.status,
+                                                                                          first.answer.text)
+    assert [(c.number, c.chunk.doc_id) for c in traced.answer.citations] == [(1, 11)]   # the excerpt's text isn't kept
+    for part in ("router", "rewriter"):
+        assert not parts_again[part].step.started
+    assert not parts_again["embedder"].step.started and not parts_again["documents"].step.started
+
+
+@pytest.mark.anyio
+async def test_another_department_or_a_newer_version_finds_nothing_kept():
+    cache = FakeCache()
+    await trace(build("documents", cache=cache)[0])
+    assert (await trace(build("documents", cache=cache)[0], department="Fresh Grocery")).cached == ""
+    cache.versions_are = "d2.a1"   # a document was written since
+    assert (await trace(build("documents", cache=cache)[0])).cached == ""
+
+
+@pytest.mark.anyio
+async def test_a_question_the_rewrite_couldnt_judge_is_not_kept_as_asked():
+    timed_out = Rewritten(None, None, None, "the model didn't rewrite it: TimeoutError")
+    cache = FakeCache()
+    await trace(build("data", rewriter=FakeRewriter(timed_out), cache=cache)[0],
+                question="What was the GMV of our last campaign?")
+    assert cache._redis.kept == {}   # kept as asked, "our last campaign" would outlive the next campaign
+
+
+@pytest.mark.anyio
+async def test_a_rewritten_question_is_kept_and_found_under_the_question_filled_in():
+    rewritten = Rewritten("What was the GMV of {campaign}?", CampaignReference(words="Black Friday", department=None,
+                                                                               position=1), None, "rewritten")
+    cache = FakeCache()
+    await trace(build("data", rewriter=FakeRewriter(rewritten), cache=cache)[0],
+                question="What was the GMV of our last Black Friday?")
+    filled_in = "What was the GMV of Beauty Black Friday Live (the campaign that ran from 2025-11-18 to 2025-12-14)?"
+    assert cache.kept_under(filled_in) and not cache.kept_under("What was the GMV of our last Black Friday?")
+    flow, parts = build("data", rewriter=FakeRewriter(rewritten), cache=cache, data=FakeData(delay=5))
+    traced = await trace(flow, question="What's the GMV of our latest Black Friday?")
+    assert traced.cached == "rewritten" and traced.answer.basis == LAST_BF
+    assert parts["data"].step.cancelled and len(parts["data"].step.calls) == 1   # the restart never happened
+
+
+@pytest.mark.anyio
+async def test_a_follow_up_isnt_looked_up_as_asked_since_its_turns_decide_what_it_means():
+    cache = FakeCache()
+    await trace(build("documents", cache=cache)[0], question="Who signs off on it?")   # kept: it stood alone then
+    traced = await trace(build("documents", cache=cache)[0], question="Who signs off on it?", turns=FOLLOW_UP)
+    assert traced.cached == ""
+
+
+@pytest.mark.anyio
+async def test_a_question_asked_back_is_not_kept():
+    rewritten = Rewritten("What was the GMV of {campaign}?", CampaignReference(words="Black Friday", department=None,
+                                                                               position=1), None, "rewritten")
+    cache = FakeCache("e5")
+    flow, _ = build("data", rewriter=FakeRewriter(rewritten), cache=cache,
+                    campaigns=FakeCampaigns(Found(None, (LAST_BF, GROCERY_BF), ())))
+    assert (await trace(flow, role="executive", department=None)).answer.status == "clarify"
+    assert cache._redis.kept == {}
+
+
+@pytest.mark.anyio
+async def test_a_conversations_turns_reach_the_rewrite_and_its_answer_is_kept_in_it():
+    memory = FakeMemory(FOLLOW_UP)
+    flow, parts = build("documents", memory=memory)
+    answer = await flow.answer("Who signs off on it?", user_id=2, role="staff", department="Beauty",
+                               budget=TimeBudget(10), session_id="s-1")
+    assert memory.read == [(2, "s-1")] and parts["rewriter"].step.calls[0][1]["turns"] == FOLLOW_UP
+    assert memory.kept == [(2, "s-1", "Who signs off on it?", answer.text)]
+
+
+@pytest.mark.anyio
+async def test_a_question_without_a_conversation_reads_and_keeps_no_turns():
+    memory = FakeMemory(FOLLOW_UP)
+    flow, parts = build("documents", memory=memory)
+    await flow.answer("Who owns the check?", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10))
+    assert memory.read == [] and memory.kept == [] and parts["rewriter"].step.calls[0][1]["turns"] == ()
+
+
+@pytest.mark.anyio
+async def test_an_answer_that_failed_validation_is_not_kept_in_the_conversation():
+    memory = FakeMemory()
+    flow, _ = build("data", data=FakeData(explanation=ModelAnswer("", True, 1, 0)), memory=memory)
+    with pytest.raises(InvalidAnswer):
+        await flow.answer("How much?", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10),
+                          session_id="s-1")
+    assert memory.kept == []

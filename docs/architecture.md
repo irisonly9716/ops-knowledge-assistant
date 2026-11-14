@@ -225,8 +225,9 @@ backend /query
       │    through the read-only role and row-level security finds which campaign it means, so only
       │    campaigns this user can see are candidates, and code works out the dates. If that doesn't settle
       │    it, the question is asked back with the candidates. Runs beside the router, not before it
-      │ 3. check the cache: key = department + role + knowledge-base version + rewritten question
-      │    (a hit returns immediately)
+      │ 3. check the cache: key = department + role + knowledge versions + the question. Before anything
+      │    runs, the question as asked, when there is no conversation; after a rewrite, the question filled
+      │    in. A hit returns at once
       │ 4. route: documents / data / both / none? One model call with structured output; below 0.95 confidence
       │    both paths run, and a keyword rule decides if the model doesn't reply in 2 s. The embedding and both
       │    paths start at the same time as the router, and the route cancels the path it rules out
@@ -246,30 +247,49 @@ backend /query
       │ 5. documents → their answer, with citations; data → the rows explained in a few sentences;
       │    both → one answer written from the chunks and the rows together. A campaign found in step 2
       │    opens the answer ("Based on ..., which ran from ... to ..."), so a wrong reading is easy to spot
-      │ 6. write the cache + the conversation memory + the audit record
+      │ 6. write the cache + the conversation memory; the audit record is still to come
       ▼
    back to the user
 ```
 
 The cache and the permission boundary meet in the key: without the department and role, one department's answer
-could be served to another. A new or replaced document bumps the knowledge-base version of its department (an `ALL`
-document: every department's), and so does a data-table upload, which changes SQL answers. The version lives in
-Postgres and goes up in the same transaction as the write: in Redis it would be another dual write, and a crash
-between the two would keep serving old answers. Relative references are made concrete before the key is built, so
-when a new campaign finishes the key changes; a question that still has one after rewriting skips the cache. The
-TTL is only a safety net.
+could be served to another. A new or replaced document moves its department's knowledge version on (an `ALL`
+document: the `all` version, which every staff key holds), and so does a data-table upload, which changes SQL
+answers; every write also moves `everything`, the version an executive's or admin's key holds. The versions live in
+Postgres (V12) and move in the same transaction as the write: in Redis they would be another dual write, and a crash
+between the two would keep serving old answers. They come from one sequence, so emptying the table can't hand a
+version out again. Relative references are made concrete before the key is built, so when a new campaign finishes
+the key changes; a question the rewrite couldn't judge isn't kept under the question as asked. The TTL, an hour, is
+only a backstop for what no write moves on, such as a campaign that finished today.
 
-**What exists today:** the backend's `/query`, the internal token, and steps 1, 2, 4 and 5 (`app/query_flow.py`): the
+**What exists today:** the backend's `/query`, the internal token, and steps 1 to 5 and the cache and memory of 6
+(`app/query_flow.py`, `app/memory`): the
 rewrite with the campaign search and the dates, asking back, the router, the search with its department filter and the
 reranker, the Text-to-SQL pipeline with its checks, department filter, read-only role and row-level security, and one
-answer from either or both, with citations, refusals and the campaign it is about. The turns before a question come
-from the evaluation only: `/query` has none until there is conversation memory. A baseline agent for Text-to-SQL is
-measured on the evaluation dataset. The cache (3) and step 6 are still to come. Details
+answer from either or both, with citations, refusals and the campaign it is about. A client sends a `sessionId`
+with a conversation's questions, and its last turns reach the rewrite. A baseline agent for Text-to-SQL is measured on
+the evaluation dataset. The audit record of step 6 is still to come. Details
 and measurements: "The query path" in [llm-service/README.md](../llm-service/README.md). How well it answers, measured on the evaluation
 dataset, and why the refusal threshold and the answer instructions are what they are:
 [eval-report.md](eval-report.md).
 
 Design decisions so far:
+- **Looked up twice, kept carefully.** Before anything runs, the cache is looked up under the question as asked, and a
+  hit makes no model call: measured through the backend, 15 ms against 2 to 4 s. Only questions the rewrite judged to
+  stand alone are kept that way, so "last month's GMV" never is, and neither is a question whose rewrite timed out:
+  "our last campaign" kept as asked would outlive the next campaign. After a rewrite it is looked up under the question
+  filled in, about a second in, once the rewrite has answered. A follow-up is never looked up as asked. Not taken: one
+  lookup after the rewrite (every hit would wait for it), and keying on the question as typed (a relative question
+  would be served after its answer changed).
+- **A conversation keeps its last 20 messages**; the rewrite reads the last 6 in full and the questions before them
+  alone. The answers come from the documents and the data, never from the conversation, so it only has to say what "it"
+  or "the one before that" means; an answer is up to a thousand characters and a question a few words, so older topics
+  cost the prompt little. Not taken: summarizing older turns, a model call per long conversation for references dev
+  has no question needing.
+- **Redis never fails a query.** Every call is bounded by `REDIS_TIMEOUT_SECONDS` (0.1 s) twice: the client has no
+  retries, and the call runs under `asyncio.timeout`. A redis-py 8 client built without a pool retries three times by
+  default: measured with Redis down, one call took 5.7 s. An error or a timeout means no cache and no conversation.
+  Redis has a memory limit and evicts only keys with an expiry, which both the answers and the conversations have.
 - **The rewrite runs beside the router, not before everything.** A model call in front of every question would add its
   time to all of them, about 1.2 s; most questions stand on their own and lose nothing this way. One that is rewritten
   stops the paths that had started on it and starts them again on the question filled in, so it pays that time.

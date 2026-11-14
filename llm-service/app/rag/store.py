@@ -14,6 +14,8 @@ from psycopg.types.json import Jsonb
 from app.rag.chunking import Chunk, DocumentInfo
 from app.rag.document_fields import DocumentFields
 
+ALL_DEPARTMENTS = "ALL"   # the department of a document for everyone
+
 
 class DocumentConflict(Exception):
     """The document can't be written as the upload asks: a document with the same natural key already
@@ -157,7 +159,29 @@ def save_document(conn: psycopg.Connection, upload: UploadRow, fields: DocumentF
         conn.execute("UPDATE campaigns SET has_review_doc = TRUE WHERE campaign_id = %s", (upload.campaign_id,))
 
     set_status(conn, upload.upload_id, "done")
+    bump_knowledge_versions(conn, fields.department)
     return doc_id, replaced
+
+
+# In this order every time, documents and tables alike: two writers locking the same rows in the same order can't
+# deadlock. The last statements of the write transaction, so the rows stay locked only until the commit
+_BUMP = """
+    INSERT INTO knowledge_versions (scope, department_id, version) VALUES (%s, %s, nextval('knowledge_version_seq'))
+    ON CONFLICT (scope, department_id) DO UPDATE SET version = EXCLUDED.version, updated_at = now()
+"""
+
+
+def bump_knowledge_versions(conn: psycopg.Connection, department: str) -> None:
+    """A write of what questions are answered from: the versions it moves on (V12), so no answer cached before it is
+    found again. department: the written document's or campaign's department, or ALL for a document for everyone."""
+    if department == ALL_DEPARTMENTS:
+        conn.execute(_BUMP, ("all", None))
+    else:
+        row = conn.execute("SELECT department_id FROM departments WHERE name = %s", (department,)).fetchone()
+        if row is None:
+            raise ValueError(f"no such department: {department!r}")
+        conn.execute(_BUMP, ("department", row[0]))
+    conn.execute(_BUMP, ("everything", None))
 
 
 def vector_literal(vector: Sequence[float]) -> str:
