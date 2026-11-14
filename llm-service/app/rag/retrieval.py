@@ -15,9 +15,8 @@ from dataclasses import dataclass
 
 import psycopg
 
-from app.rag.store import vector_literal
+from app.rag.store import ALL_DEPARTMENTS, vector_literal
 
-ALL_DEPARTMENTS = "ALL"
 ROLES_LIMITED_TO_A_DEPARTMENT = ("staff", "manager")
 ROLES_THAT_SEE_EVERYTHING = ("executive", "admin")
 

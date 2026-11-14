@@ -636,3 +636,54 @@ def test_a_value_one_step_past_a_column_limit_is_refused_with_a_clear_message(ta
     header = PRODUCTS_HEADER if table == "campaign_products" else CUSTOMERS_HEADER
     with pytest.raises(data_tables.TableValidationError, match=f"row 2, {column}: .* is out of range"):
         data_tables.parse_table(table, (header + row).encode(), 1)
+
+
+# ---------------------------------------------------------------------------
+# The knowledge versions the answer cache is keyed on (V12)
+# ---------------------------------------------------------------------------
+def _versions(conn) -> dict[str, int]:
+    rows = conn.execute("""SELECT kv.scope, d.name, kv.version FROM knowledge_versions kv
+                           LEFT JOIN departments d USING (department_id)""").fetchall()
+    return {(name or scope): version for scope, name, version in rows}
+
+
+def test_a_document_for_everyone_moves_the_all_and_everything_versions_in_its_own_transaction(conn, upload,
+                                                                                               make_handler):
+    before = _versions(conn)
+    make_handler()(upload(SOP))
+    after = _versions(conn)
+    assert after["all"] > before.get("all", 0) and after["everything"] > before.get("everything", 0)
+    assert after.get("Beauty") == before.get("Beauty")   # a Beauty answer still depends on it: through 'all'
+
+
+def test_a_departments_document_and_its_campaign_table_move_its_version_and_everything(conn, upload, table_upload,
+                                                                                       make_handler):
+    before = _versions(conn)
+    make_handler()(upload(SOP, department="Beauty"))
+    middle = _versions(conn)
+    assert middle["Beauty"] > before.get("Beauty", 0) and middle["everything"] > before.get("everything", 0)
+    assert middle.get("all") == before.get("all") and middle.get("Fresh Grocery") == before.get("Fresh Grocery")
+    make_handler()(table_upload(PRODUCTS_HEADER + SERUM))
+    after = _versions(conn)
+    assert after["Beauty"] > middle["Beauty"] and after["everything"] > middle["everything"]
+
+
+def test_a_write_that_rolls_back_leaves_the_versions_where_they_were(conn, upload, make_handler, monkeypatch):
+    before = _versions(conn)
+
+    def broken(vector):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(store, "vector_literal", broken)
+    with pytest.raises(RuntimeError, match="disk full"):
+        make_handler()(upload(SOP))
+    assert _versions(conn) == before
+
+
+def test_a_version_is_never_handed_out_twice_even_after_the_table_is_emptied(conn, database):
+    store.bump_knowledge_versions(conn, "ALL")
+    seen = _versions(conn)["all"]
+    conn.execute("TRUNCATE knowledge_versions")
+    store.bump_knowledge_versions(conn, "ALL")
+    assert _versions(conn)["all"] > seen   # a key cached before the reset can't match an answer written after it
+    with pytest.raises(ValueError, match="no such department"):
+        store.bump_knowledge_versions(conn, "Toys")
