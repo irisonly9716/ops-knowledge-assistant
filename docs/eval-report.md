@@ -560,6 +560,97 @@ order, so leaving it out only removes that wait. Answers aren't graded here; the
   answer of the 28 questions answered from both, 34,000 input and 1,700 output tokens. 28 questions had a path
   cancelled (documents 18, data 10); what a cancelled call had used isn't known.
 
+### With the rewrite
+
+```bash
+RERANKER_URL= uv run python -m evaluation.flow_run --split dev --name 2   # $0.048 a run
+```
+
+The same 108 questions with the rewrite beside the router (`app/router/rewriting.py`), and each follow-up asked with
+the turns before it.
+
+| Paths that ran | Questions | Under 3 s, run 1 / 2 | p50, run 1 / 2 | p95, run 1 / 2 |
+|---|---|---|---|---|
+| documents | 38 / 38 | 38 / 37 | 1.56 / 1.75 s | 1.99 / 2.86 s |
+| data | 28 / 29 | 22 / 10 | 2.73 / 3.14 s | 3.21 / 5.31 s |
+| both | 42 / 41 | 14 / 16 | 3.22 / 3.97 s | 5.22 / 7.68 s |
+
+- **11 questions were rewritten**, and they pay for it: p50 5.2 s, the paths started again after the rewrite (p50
+  1.26 s). 8 named a campaign by its place in time and opened their answer with it; 3 were a period or a follow-up.
+  None was asked back or found nothing: dev has no executive's question about "the last" of a kind of campaign.
+- **Waiting for the rewrite slowed no other question**: of the 97 it left as asked, it finished before the paths every
+  time. Those questions were slower all the same, because the calls were: the ones beside the rewrite took 9 to 14%
+  longer than in run 1 (the router p50 1.26 to 1.41 s, the paths with no restart 1.56 to 1.75 s for documents and 1.56
+  to 1.77 s for data). Of the calls that run alone afterwards, the explanation wasn't slower (1.26 to 1.20 s) and the
+  answer from both was (1.66 to 1.87 s). Run 3 settles it: with the same four calls, its timings are back to run 1's, so it was a slower hour of the API.
+  Data questions sit just under 3 s (p50 2.78 s in run 1, without a restart), so small changes move many across it:
+  22 of 28 under it, then 10 of 29.
+- **Follow-ups: 2 of 6 rewritten.** "Who signs off on it?" became the inventory check's question, and "And the one
+  before that?" found the launch before the one in the previous answer, whose rows held the gold result. Three that
+  need their turns came back as they were asked, "And the Beauty one?" among them: the router, which now sees the
+  turns, sent it to the data, but the SQL writer got the question alone and its rows were wrong. The rewrite's
+  instructions decide this, and dev is where they are tuned.
+- **Text-to-SQL**: rows for all 39 questions with a gold result (37 in run 1), the gold result in 32 of them (30). Up:
+  the rewritten "the one before that", the rewritten anniversary-sale question, and the question that flips between
+  runs of the pipeline alone. Down: one question the rewrite left as asked. The two follow-ups about data both get rows
+  now; "And the Beauty one?" wrong ones.
+- **Routing**: a path missing on 2 questions (3 in run 1): with the turns, "And the Beauty one?" went to the data.
+- **Cost**: $0.048, $0.0004 a question; the rewrite $0.009 of it, mostly its instructions as input.
+
+### Run 3: with the tuned rewrite
+
+```bash
+RERANKER_URL= uv run python -m evaluation.flow_run --split dev --name 3   # $0.054 a run
+```
+
+| Paths that ran | Questions | Under 3 s, run 1 / 2 / 3 | p50, run 1 / 2 / 3 | p95, run 1 / 2 / 3 |
+|---|---|---|---|---|
+| documents | 38 / 38 / 37 | 38 / 37 / 36 | 1.56 / 1.75 / 1.60 s | 1.99 / 2.86 / 2.74 s |
+| data | 28 / 29 / 29 | 22 / 10 / 17 | 2.73 / 3.14 / 2.76 s | 3.21 / 5.31 / 4.55 s |
+| both | 42 / 41 / 42 | 14 / 16 / 17 | 3.22 / 3.97 / 3.33 s | 5.22 / 7.68 / 5.20 s |
+
+- **Run 2's slowness was the API, not the fourth call at once.** Run 3 has the same four calls while the router decides,
+  and the questions left as asked are back where run 1 was: documents p50 1.54 s (1.56 in run 1), data 2.66 s (2.78),
+  17 of 22 data questions under 3 s (22 of 28), the router 1.23 s (1.26).
+- **14 questions rewritten**, 5 of the 6 follow-ups among them, and they pay for it: p50 3.7 s, 3 under 3 s. Of the 92
+  others, only "the home black friday live", taken as the latest, which is the only one.
+- **Text-to-SQL**: the gold result in 33 of 39 (30 in run 1, 32 in run 2). "And the Beauty one?", written out now,
+  gets the right rows; one rewritten question about the anniversary sale went wrong this time after going right in run 2.
+- **Cost**: $0.054, $0.0005 a question; the rewrite $0.014 of it (run 2: $0.009), because the examples made its
+  instructions longer.
+
+### Tuning the rewrite's instructions
+
+```bash
+uv run python -m evaluation.rewrite_run --split dev --name hard-5 --only hard   # the rewrite alone, $0.0025
+```
+
+The rewrite alone (`evaluation/rewrite_run.py`), on the 6 follow-ups and the 10 questions with a word like "last" or
+"this year", and once on all 108; no search, no SQL, no answer. The questions have no label for the rewrite, so it is
+read by eye: a follow-up should come back written out, a campaign by its place in time with `{campaign}`, and
+everything else as asked. "Wrong" is a reference the question didn't make.
+
+| Instructions | Runs | Follow-ups written out (6) | Relative words right (10) | Wrong |
+|---|---|---|---|---|
+| first, as in run 2 above | `dev-flow-2` | 2 | 8 | 0 |
+| + what "stands on its own" means, examples | `hard-1` | 6 | 7 | 1: "the previous batch" became a campaign |
+| + two jobs apart, what isn't a campaign | `hard-2` | 4 | 8 | 0 |
+| + a follow-up example with "the one before it" | `hard-3`, `hard-4` | 5, 5 | 8, 7 (one past its 2 s) | 0, 0 |
+| + a campaign named by its date stays as asked (now in the code) | `hard-5` | 5 | 8 | 0 |
+
+- **Follow-ups**: the first instructions sent "And the Beauty one?" and two more back as they were asked; a definition of
+  what stands on its own, and two examples from other companies, fixed them. The one left as asked, "who updates the
+  stream plan if a shade gets pulled?", can be read without its turns.
+- **Saying more broke other things.** With the definition alone, "the last one" in a question about the anniversary
+  sale and "last Beauty Black Friday" came back as standing on their own, and "the previous batch" became a campaign:
+  the rewrite then had to be told its two jobs apart, and that batches, tests and steps aren't campaigns.
+- **On all 108** (`all-1`, the instructions before the last row): 2 of the 92 other questions were rewritten. "The
+  November 2025 Grocery Fan Appreciation Day" became the latest one, which would have answered about another; the last
+  row's rule fixed it (`hard-5`). "The home black friday live" is still taken as the latest, which here is the only
+  one. With the last row's instructions, in run 3 below, it is the only one of the 92 rewritten.
+- **Cost and time**: $0.024 for the six runs; the examples make the instructions about 800 tokens, so a question's
+  rewrite costs about $0.00013. p50 about 1.0 s, p95 1.5 to 2.0 s: 1 of 16 went past the 2 s limit once.
+
 ## What these numbers don't show
 
 - **Small samples.** 54 answerable questions, 15 to refuse, 12 keyword questions, 2 out of scope. One question is 2 to
@@ -603,10 +694,14 @@ order, so leaving it out only removes that wait. Answers aren't graded here; the
 | `dev-sql-pipeline-department-rule-1`, `-2` | now in the code | Text-to-SQL pipeline with the rule: the regression |
 | `dev-route-1`, `dev-route-2` | the router's first instructions | routing, before the sentence on targets |
 | `dev-route-3`, `dev-route-4` | now in the code | routing |
-| `dev-flow-1` | now in the code | the whole query path, without the reranker |
+| `dev-flow-1` | before the rewrite | the whole query path, without the reranker |
+| `dev-flow-2` | the rewrite's first instructions | the same, with the rewrite and each follow-up's turns |
+| `dev-rewrite-hard-1` to `-hard-4`, `-all-1` | earlier rewrite instructions | the rewrite alone, while tuning it |
+| `dev-rewrite-hard-5` | now in the code | the rewrite alone |
+| `dev-flow-3` | now in the code | the whole query path, with the tuned rewrite |
 
 Each run is a `.jsonl` of what every question went through, an `.md` of its tables with the instructions it used, and a
 spot-check file of 30 graded answers picked at random, except the SQL runs, which need no grader. The seven document
 runs cost about $1.98, $1.87 of it grading; the two SQL baseline runs $0.08, and the two they replace $0.06; the five
 pipeline runs $0.05, the run as `sql_reader` $0.011, the ablation's 15 runs $0.16, the two leak checks $0.012, and the rule for another department's questions, worked
-out and checked, $0.041; the four routing runs $0.027; the run of the whole query path $0.039.
+out and checked, $0.041; the four routing runs $0.027; the three runs of the whole query path $0.141; tuning the rewrite $0.024.

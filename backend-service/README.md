@@ -170,7 +170,9 @@ token (`INTERNAL_SERVICE_TOKEN` in `.env`; both services read it).
 ```
 
 `status` is `refused` when what this user may see doesn't answer the question, and `failed` when no query that answers
-it could be written: both `200` with no citations. `searchedDepartments` is `null` for executive and admin, who search
+it could be written: both `200` with no citations. `clarify` asks the question back, with `candidates`: an executive's
+"the last Black Friday", which every department ran. `basis` is the campaign a question like that turned out to mean, for
+a staff member their own department's latest; the answer opens with it. `searchedDepartments` is `null` for executive and admin, who search
 everything. `paths` are the sources that ran, `documents` and `data`; `data` is the query an answer rests on with every
 row it returned, or `null`. Its values stay text, `null` included, and this service passes them on without reading them
 as numbers, so an amount like `3000.50` arrives as it is in the database. Every case: `contracts/query.examples.json`.
