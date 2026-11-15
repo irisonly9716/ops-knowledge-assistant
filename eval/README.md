@@ -42,6 +42,14 @@ how it tries (`tries`), and what it asks for (`asks_for`: another department, ev
 the asker's own department). It is a check every question has to pass, not a score, so nothing is tuned on it.
 `unauthorized-sql-dev.jsonl` holds 10 more in the same format, the ones rules are worked out on.
 
+`conversations-dev.jsonl` and `conversations.jsonl` aren't part of the dataset either: 16 conversations each, written
+from the mock data by the assistant that builds this project (`source: written:claude`), to check the rewrite and the
+campaign search through the whole query path (`evaluation/conversation_run.py`). Each has who asks, the turns before
+the question, its kind (`follow_up`, `last_campaign`, `period`, `ask_back`, `another_department`, `as_asked`) and one
+expectation: the campaign the answer must be about (`basis`, by department, name and start date), the departments a
+question asked back must offer (`clarify`), a refusal (`refused`), no rewrite (`as_asked`), or words the question
+that ran must hold (`asked_contains`). The rewrite is tuned on the dev file; the other only checks it.
+
 ## dev and test
 
 About 40% of the questions are in `dev` and 60% in `test`, decided by a hash, so a question never changes side

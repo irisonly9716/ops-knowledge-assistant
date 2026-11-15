@@ -310,7 +310,10 @@ Design decisions so far:
   or year, or the last n full months). Which campaign is a query: the asker's department's finished campaigns, latest
   end date first, run as `sql_reader` under row-level security with the department in the WHERE clause too, so another
   department's campaign reads exactly as one that doesn't exist. Dates are code. Left to a model, the SQL writer once
-  read "last Black Friday" as the day of the holiday.
+  read "last Black Friday" as the day of the holiday. A follow-up about a campaign an answer already named ("Based on
+  ..., which ran from ... to ...") is written out with that name and those dates instead, so it stays the campaign the
+  asker just saw; one the conversation only placed in time gets `{campaign}`. Without saying so, the rewrite copied
+  "our last campaign" into the question and the follow-up went on unresolved, every time it was tried.
 - **Asked back rather than guessed.** An executive's "the last Black Friday" gets each department's, since every
   department runs one; two campaigns ending on the same day get both. Candidates come from the same search, so only
   campaigns the asker may see. Nothing found is one fixed sentence: there is nothing to choose from.

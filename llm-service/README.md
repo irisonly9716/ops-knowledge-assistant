@@ -76,7 +76,9 @@ app/
                    turns; redis_client.py: the bounded client both use
 evaluation/        the evaluation dataset's format (dataset.py), the review page (review.py), the runs (run.py for
                    documents, sql_run.py for SQL: the pipeline, or the baseline agent in sql_agent.py, route_run.py
-                   for routing, flow_run.py for the whole query path); not part of the service
+                   for routing, flow_run.py for the whole query path, conversation_run.py for follow-ups and
+                   relative references, compose_run.py for the reasoning effort of the answer from both); not part
+                   of the service
 tests/             pytest; test_events (contract / cross-language drift) test_storage (path traversal)
                    test_upload_consumer (every branch of the consume loop) test_health
                    test_embeddings (fake OpenAI client) test_parsing (all three formats parse the same)
@@ -243,12 +245,17 @@ reply within `REWRITE_TIMEOUT_SECONDS` (2 s), fails, or replies with placeholder
 - **The basis**: an answer about a campaign found this way opens with it ("Based on Beauty Black Friday Live, which ran
   from 2025-11-18 to 2025-12-14.") and carries it as `basis`. When the documents were searched and it has no review
   yet, the line says so and names the latest before it that has one.
-- `/query` has no conversation memory yet, so it gives the rewrite no turns; the evaluation passes a follow-up's own.
+- A follow-up gets the conversation's turns from its memory (below); the evaluation passes a follow-up's own. When
+  "it" is a campaign an earlier answer named ("Based on ..., which ran from ... to ..."), the follow-up is written out
+  with that name and those dates and nothing is looked up again; when the conversation only placed a campaign in time
+  ("the last Black Friday", then "the Fresh Grocery one"), it gets `{campaign}` with that reference.
 - On dev ("With the rewrite" and "Tuning the rewrite's instructions" in [docs/eval-report.md](../docs/eval-report.md)):
   14 of 108 rewritten, 5 of the 6 follow-ups among them (the first instructions wrote out 2), at p50 3.7 s as the paths
   start again; the questions left as asked took as long as before there was a rewrite. "The previous batch" and a
   campaign named by its date stay as asked.
-- `evaluation/rewrite_run.py` runs the rewrite alone, to try its instructions for a fraction of a full run.
+- `evaluation/rewrite_run.py` runs the rewrite alone, to try its instructions for a fraction of a full run, and
+  `evaluation/conversation_run.py` runs conversations through the whole query path, each checked against the
+  campaign, the question asked back or the words it should come to ("Conversations" in the evaluation report).
 
 **Both paths start before the route is known.** Routing is a model call, p50 1.2 s and p95 1.5 to 1.7 s on a development
 machine, and waiting for it would put a question about data at about 3.8 s, estimated from each step's measured time,
