@@ -23,10 +23,10 @@ since their run weren't run again: the cache, the conversation memory and the au
 | Retrieval | Recall@5 / MRR of the 66 questions with labelled sections, with reranking (vector order alone) | 92.7% / 0.913 (80.3% / 0.743) | `dev-rerank-1`, `-2` (2026-11-06) |
 | Text-to-SQL | execution accuracy on the 27 data questions, the query path's pipeline as `sql_reader`; through the whole path, the 39 with a gold result | 92.6% / 88.9%; 33 of 39 | `dev-sql-pipeline-department-rule-1`, `-2` (2026-11-10); `dev-flow-3` (2026-11-13) |
 | Answers | from documents: answered of 54, faithfulness, coverage | 53 and 53; 99.6% / 96.5%; 88.9% / 85.3% | `dev-rerank-1`, `-2` |
-| | from documents and data together, as the query path writes them: answered of 54, faithfulness, coverage with refusals as 0 | 54; 96.0%; 62.5% | `dev-compose-1` (2026-11-14) |
+| | from documents and data together, as the query path writes them: coverage with refusals as 0, faithfulness, on the 23 questions both runs composed | 75.0%, 94.4% (62.0%, 95.4% when told to be short) | `dev-compose-2`, against `dev-compose-1` (2026-11-14) |
 | | from data: not graded; their rows are scored as Text-to-SQL above | | |
 | Permissions | leaks of another department's data: Text-to-SQL check questions; sections the asker may not see among the 50 candidates; conversations | 0 of 20 twice; none; 0 in 32 | `sql-leak-3`, `-4` (2026-11-10); `dev-baseline`; `conversations-*` |
-| Performance | the whole path, one question at a time on a development machine: p50 and how many under 3 s, by the paths that ran; cost | documents 1.60 s, 36 of 37; data 2.76 s, 17 of 29; both 3.33 s, 17 of 42; $0.0005 a question | `dev-flow-3`, before the follow-up rules, which change only how follow-ups are written out |
+| Performance | the whole path, one question at a time on a development machine: p50 and how many under 3 s, by the paths that ran; cost | documents 1.60 s, 36 of 37; data 2.76 s, 17 of 29; both 3.33 s, 17 of 42; $0.0005 a question | `dev-flow-3`, before the follow-up rules, which change only how follow-ups are written out, and before the answer from both was asked to be complete, which adds about 0.5 s at its p50 (`dev-compose-2`) |
 
 What each part is worth, each measured by changing it alone:
 
@@ -40,7 +40,8 @@ What each part is worth, each measured by changing it alone:
 | The rule for another department's data | before and after | answered with the asker's own rows: 4 of 4 to 0 (dev), 3 of 8 to 0 (check) | `sql-leak-*` |
 | Both paths below 0.95 confidence | the router alone, and at 0.95 | a path missing 3 to 2, at a third of questions running both | `dev-route-3`, `-4` |
 | The rewrite's tuning | first instructions, tuned | follow-ups written out 2 of 6 to 5 of 6; conversations 15 of 16 to 16 of 16 | `dev-flow-2`, `-3`, `dev-rewrite-*`, `conversations-dev-*` |
-| Reasoning for the answer from both | `none` and `low`, the same inputs | coverage +3.5 points, short of the 5 set before the run; faithfulness within the noise; p95 +1.2 s: `none` stays | `dev-compose-1` |
+| Reasoning for the answer from both | `none` and `low`, the same inputs, with the instructions that asked for short answers | coverage +3.5 points, short of the 5 set before the run; faithfulness within the noise; p95 +1.2 s: `none` stays | `dev-compose-1` |
+| A complete answer from both instead of a short one | the instructions before and after, 23 questions | coverage 62.0% to 75.0%; faithfulness 95.4% to 94.4%; 117 to 240 output tokens; composing p50 1.88 to 2.41 s, p95 2.79 to 5.02 s | `dev-compose-2`, against `dev-compose-1` |
 
 ## What is measured, and how
 
@@ -759,10 +760,50 @@ The rule was set before the run: `low` replaces `none` only if its coverage is a
   shares with the answer.
 - **What the numbers say besides:** the 11 questions labelled for both sources cover about half their points (46% at
   `none`, 53% at `low`); the 14 labelled for documents that the router sent to both, about 80%. The answers are short,
-  as their instructions ask, and on planning advice they leave points out. That is the composing instructions, not the
-  effort, and is tuned later on `dev`.
+  as their instructions asked, and on planning advice they leave points out. That is the composing instructions, not
+  the effort: next section.
 - **Cost**: $0.98 for the run, $0.96 of it grading: about $0.009 an answer, against the $0.005 of a documents answer the
   estimate was made from, because the grader reads the rows and more claims.
+
+### Complete instead of short
+
+```bash
+RERANKER_URL= uv run python -m evaluation.compose_run --split dev --name 2 --efforts none --repeats 1 --against dev-compose-1
+```
+
+The 27 answers of the run above, at `none`, averaged 61 words and missed 29 of their 67 points. What they left out
+was mostly in what they were written from: the figures behind a statement (a product's profit beside its sales, the
+conversion rate beside GMV), the upper end of a target range, the discount in the plan, the risks the plan flagged, and
+what the review said to check next time. A few misses were the grader's strictness (17.62% against a point's 17.6%, a
+review not named by its start date). The instructions dropped "Be short" for: answer every part completely, back each
+statement with its figures and both ends of a target range, name the campaign by its name and start date, and for
+reasons or advice give every recommendation the sources support with what is behind it, the plan's risks and the
+review's next steps, saying so where they don't establish a cause.
+
+The new instructions composed once; the answers they are compared with are those of `dev-compose-1` at `none`, already
+graded, on the 23 questions both runs composed (4 of the 27 went another way this time). Composing the earlier
+instructions again on the same inputs was dropped to halve the cost, so the two runs took their inputs separately and a
+query that returned other rows counts in the difference too.
+
+| Instructions | Answers | Coverage, refusals as 0 | Faithfulness | Words | Output tokens, mean / most | Composing p50 / p95 |
+|---|---|---|---|---|---|---|
+| short (`dev-compose-1`, two repeats) | 46 | 62.0% (62.3% / 61.6%) | 95.4% | 61 | 117 / 254 | 1.88 / 2.79 s |
+| complete | 23 | 75.0% | 94.4% | 143 | 240 / 661 | 2.41 / 5.02 s |
+
+- **Kept**, by the rule set before the run: coverage up 13.0 points, against the 0.7 the earlier answers differed
+  between their own repeats; faithfulness down 1.0, within the 3 allowed.
+- **Where it gained**: the 11 questions labelled for both sources, 46% to 67%; the 5 asking for planning advice, 44%
+  to 80%; the 12 labelled for documents, 76% to 82%. None was refused or cut off.
+- **What is still left out** (18 points): sales beside profit, the plan's risk of offer confusion, the review's call to
+  check viewer drop-off and promotion timing, "the planned hero product". More can be asked for; each sentence of
+  instructions also changes answers that were right.
+- **The cost is time and length**: twice the words, 0.5 s more at the composing call's p50 and 2.2 s more at its p95,
+  so a question for both now takes about 0.5 s longer at the median. Streaming the answer (#31) would show its first
+  words sooner. The longest answer took 661 output tokens, too close to the 800 every answer had for a cut-off answer
+  to stay rare, so the answer from both has its own limit of 1,200 (`COMPOSE_MAX_OUTPUT_TOKENS`).
+- **Whether reasoning helps the complete answers** isn't measured: the effort was compared with the short ones.
+- **Cost**: about $0.35, $0.33 of it grading, about $0.014 an answer; the run stopped before it, which was composing the
+  earlier instructions again, cost about $0.02 and wrote nothing.
 
 ## What these numbers don't show
 
@@ -819,11 +860,13 @@ The rule was set before the run: `low` replaces `none` only if its coverage is a
 | `conversations-dev-1`, `-2` | the rewrite before the follow-up rules | conversations, dev |
 | `conversations-dev-3` | the first follow-up rule | conversations, dev |
 | `conversations-dev-4`, `conversations-check-1` | now in the code | conversations, dev and check |
-| `dev-compose-1` | now in the code | the answer from both at each reasoning effort |
+| `dev-compose-1` | the answer from both told to be short | the answer from both at each reasoning effort |
+| `dev-compose-2` | now in the code | the answer from both, complete, against `dev-compose-1` |
 
 Each run is a `.jsonl` of what every question went through, an `.md` of its tables with the instructions it used, and a
 spot-check file of 30 graded answers picked at random, except the SQL runs, which need no grader. The seven document
 runs cost about $1.98, $1.87 of it grading; the two SQL baseline runs $0.08, and the two they replace $0.06; the five
 pipeline runs $0.05, the run as `sql_reader` $0.011, the ablation's 15 runs $0.16, the two leak checks $0.012, and the rule for another department's questions, worked
 out and checked, $0.041; the four routing runs $0.027; the three runs of the whole query path $0.141; tuning the rewrite $0.024;
-the conversation runs $0.036 and tuning the follow-ups $0.07; the composing comparison $0.98, $0.96 of it grading.
+the conversation runs $0.036 and tuning the follow-ups $0.07; the composing comparison $0.98, $0.96 of it grading; the
+complete answer from both $0.37.

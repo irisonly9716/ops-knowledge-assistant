@@ -277,7 +277,12 @@ about 3 ms a question for the two graphs. Little against 3 s, but CPU is what li
 excerpts as a documents answer does; its numbers come from the rows, which the asker gets with it, so an answer that
 cites no excerpt still stands. Answering from each and merging the answers would be a model call more, about a second,
 and the merge could drop citations. With rows and no excerpts the rows are explained; with no rows, the documents' answer
-is used. How hard the model reasons for it is `COMPOSE_REASONING_EFFORT`, none until the evaluation grades these answers.
+is used. It is asked to be complete rather than short: every part of the question, the figures and both ends of a target
+range behind each statement, the campaign by name and start date, and for advice every recommendation the sources
+support with the plan's risks and the review's next steps. On dev that took coverage from 62% to 75% of the reviewed
+points at twice the words and about 0.5 s more, so it has its own output limit, `COMPOSE_MAX_OUTPUT_TOKENS` (1,200).
+How hard the model reasons is `COMPOSE_REASONING_EFFORT`, none: low added 3.5 points to the short answers, less than
+the 5 set beforehand ("The answer from both" in [docs/eval-report.md](../docs/eval-report.md)).
 
 **What it returns.** The answer; `status`: answered, refused, or failed when no query that answers it could be written;
 the citations; the departments searched; the `paths` that ran; and `data`, the query an answer rests on with every row,

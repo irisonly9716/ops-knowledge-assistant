@@ -558,6 +558,9 @@ async def test_the_started_service_has_one_model_limit_for_every_call_sized_from
         assert limit._max_wait == 0.25
         assert flow._router._min_confidence == settings.router_min_confidence
         assert (flow._composer._reasoning_effort, flow._documents._model._reasoning_effort) == ("low", "none")
+        # The answer from both may be longer than the others (app/config.py)
+        assert (flow._composer._max_output_tokens, flow._documents._model._max_output_tokens) == (
+            settings.compose_max_output_tokens, settings.answer_max_output_tokens)
 
 
 @pytest.mark.anyio

@@ -1,5 +1,6 @@
-"""Composing the same inputs again at each reasoning effort: which questions are taken, what the judge is given, how a
-refusal counts, and the rule that decides between the efforts. Fake models and a fake flow; nothing is graded here."""
+"""Composing the same inputs again at each reasoning effort or with other instructions: which questions are taken,
+what the judge is given, how a refusal counts, and the rules that decide. Fake models and a fake flow; nothing is graded
+here."""
 from datetime import date
 
 import httpx
@@ -14,7 +15,8 @@ from app.router.routing import PATHS, Routing
 from app.sql_agent.execute import QueryResult
 from app.sql_agent.pipeline import Attempt, SqlAnswer, SqlTrace
 from evaluation import compose_run
-from evaluation.compose_run import ERROR, INVALID, Inputs, coverage_counting_misses, effort_numbers, verdict
+from evaluation.compose_run import (ERROR, INVALID, Inputs, Variant, coverage_counting_misses, effort_numbers,
+                                   instructions_verdict, verdict)
 from evaluation.dataset import Asker, Question, split_for
 
 CHUNK = RetrievedChunk(chunk_id=1, doc_id=11, doc_type="campaign_plan", title="Plan", department="Beauty",
@@ -40,10 +42,11 @@ def inputs(qid="q-both") -> Inputs:
 
 class FakeComposer:
     def __init__(self, *replies):
-        self.replies, self.prompts = list(replies), []
+        self.replies, self.prompts, self.instructions = list(replies), [], []
 
     async def answer(self, instructions, prompt, budget):
         self.prompts.append(prompt)
+        self.instructions.append(instructions)
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
@@ -93,8 +96,9 @@ async def test_the_inputs_are_what_the_query_path_wrote_the_answer_from_or_why_t
 @pytest.mark.anyio
 async def test_the_judge_gets_the_rows_as_one_more_excerpt_since_the_answer_rests_on_them_too():
     composer = FakeComposer("It converted 8.7%, below the 10% target [1].")
-    record = await compose_run.compose(composer, inputs(), "low", 1, 10)
-    assert (record["status"], record["effort"], record["repeat"], record["tokens"]) == (ANSWERED, "low", 1, [1200, 90])
+    record = await compose_run.compose(Variant("low", "low", composer), inputs(), 1, 10)
+    assert (record["status"], record["variant"], record["effort"], record["repeat"], record["tokens"]) == (
+        ANSWERED, "low", "low", 1, [1200, 90])
     assert record["excerpts"][0]["content"] == "Target: 10% conversion."
     assert record["excerpts"][1]["content"].startswith("Result of a database query on the campaign data:\n")
     assert "Beauty Summer Sale | 0.087" in record["excerpts"][1]["content"]
@@ -109,24 +113,38 @@ async def test_the_judge_gets_the_rows_as_one_more_excerpt_since_the_answer_rest
     (openai.APIConnectionError(request=httpx.Request("POST", "https://api.test")), ERROR),
 ])
 async def test_a_refusal_an_answer_that_fails_validation_and_a_failed_call_are_recorded_as_such(reply, status):
-    assert (await compose_run.compose(FakeComposer(reply), inputs(), "none", 1, 10))["status"] == status
+    assert (await compose_run.compose(Variant("none", "none", FakeComposer(reply)), inputs(), 1, 10))["status"] == status
 
 
 @pytest.mark.anyio
-async def test_every_effort_composes_each_question_in_turn_repeat_after_repeat():
-    composers = {"none": FakeComposer(*["a [1]."] * 4), "low": FakeComposer(*["b [1]."] * 4)}
-    records = await compose_run.compose_all(composers, [inputs("q-1"), inputs("q-2")], 2, 10)
-    assert [(r["repeat"], r["id"], r["effort"]) for r in records] == [
-        (1, "q-1", "none"), (1, "q-1", "low"), (1, "q-2", "none"), (1, "q-2", "low"),
-        (2, "q-1", "none"), (2, "q-1", "low"), (2, "q-2", "none"), (2, "q-2", "low")]
+async def test_every_variant_composes_each_question_in_turn_and_drops_out_after_its_last_repeat():
+    variants = [Variant("none", "none", FakeComposer(*["a [1]."] * 4), repeats=2),
+                Variant("none, earlier", "none", FakeComposer(*["b [1]."] * 2), "Be short.\n{department_scope}",
+                        repeats=1)]
+    records = await compose_run.compose_all(variants, [inputs("q-1"), inputs("q-2")], 10)
+    assert [(r["repeat"], r["id"], r["variant"]) for r in records] == [
+        (1, "q-1", "none"), (1, "q-1", "none, earlier"), (1, "q-2", "none"), (1, "q-2", "none, earlier"),
+        (2, "q-1", "none"), (2, "q-2", "none")]
+
+
+@pytest.mark.anyio
+async def test_a_files_instructions_get_the_askers_department_rule_and_the_codes_are_used_otherwise():
+    composer = FakeComposer("a [1].", "b [1].")
+    await compose_run.compose(Variant("none, earlier", "none", composer, "Rules:\n{department_scope}- Be short."),
+                              inputs(), 1, 10)
+    await compose_run.compose(Variant("none", "none", composer), inputs(), 1, 10)
+    earlier, code = composer.instructions
+    assert earlier.startswith("Rules:\n- The result covers only the Beauty department's data") and \
+        earlier.endswith("- Be short.")
+    assert code == compose_run.compose_instructions("Beauty")
 
 
 # ---- the numbers and the rule
 
 
-def graded(effort, repeat, status=ANSWERED, coverage=1.0, faithfulness=1.0, ms=1500.0, points=("x",)) -> dict:
-    record = {"id": f"q-{repeat}", "effort": effort, "repeat": repeat, "status": status, "ms": ms, "tokens": [1000, 100],
-              "answer_points": list(points), "question": "q"}
+def graded(variant, repeat, status=ANSWERED, coverage=1.0, faithfulness=1.0, ms=1500.0, points=("x",)) -> dict:
+    record = {"id": f"q-{repeat}", "variant": variant, "effort": variant.split(", ")[0], "repeat": repeat,
+              "status": status, "ms": ms, "tokens": [1000, 100], "answer_points": list(points), "question": "q"}
     return record | ({"coverage": coverage, "faithfulness": faithfulness} if status == ANSWERED else {})
 
 
@@ -173,3 +191,42 @@ def test_the_summary_shows_each_effort_its_repeats_and_the_rule_as_it_came_out()
     assert "| low | 2 | 2 / 0 / 0 | 81.0% | 80.0% / 82.0% |" in report
     assert "**The rule: low replaces none.**" in report
     assert "`q-gone` (written by documents this time)" in report and "grading $0.2100" in report
+
+
+@pytest.mark.parametrize(("code", "kept", "failed"), [
+    (numbers("none", [0.80, 0.84]), True, None),
+    (numbers("none", [0.62, 0.66]), False, "coverage +1.5 points"),   # within the 4 points they spread over
+    (numbers("none", [0.80, 0.84], faithfulness=0.85), False, "faithfulness -5.0 points"),
+])
+def test_new_instructions_are_kept_only_above_the_noise_and_without_losing_faithfulness(code, kept, failed):
+    earlier = numbers("none, earlier", [0.625], faithfulness=0.9)
+    decided, conditions = instructions_verdict(code, earlier)
+    assert decided is kept
+    if failed:
+        assert any(c.startswith("not met") and failed in c for c in conditions)
+
+
+def test_the_summary_compares_the_codes_instructions_with_the_files_and_shows_both():
+    records = [graded("none", r, coverage=c) for r, c in ((1, 0.84), (2, 0.86))]
+    records += [graded("none, earlier", 1, coverage=0.62)]
+    report = compose_run.summarize(records, {}, ["none", "none, earlier"], "dev", "t", "dev-flow-3",
+                                   compose_run.Decimal("0.5"), {"none, earlier": "Rules:\n{department_scope}- Be short."})
+    assert "| none, earlier | 1 | 1 / 0 / 0 | 62.0% | 62.0% |" in report
+    assert "**The rule: the code's instructions replace earlier's at none.**" in report
+    assert "Answer every part of the question" in report and "- Be short." in report   # both sets, for the record
+
+
+def test_an_earlier_runs_answers_are_compared_on_the_questions_both_runs_composed():
+    old = [{**graded("none", r, coverage=c), "id": qid} for qid, r, c in
+           (("q-a", 1, 0.5), ("q-a", 2, 0.5), ("q-b", 1, 0.6), ("q-b", 2, 0.6), ("q-gone", 1, 0.0), ("q-gone", 2, 0.0))]
+    for record in old:
+        del record["variant"]   # a run from before variants had only efforts
+    earlier = compose_run.earlier_variant(old, "dev-compose-1", "none")
+    assert {r["variant"] for r in earlier} == {"none, dev-compose-1"}
+    now = [{**graded("none", 1, coverage=c), "id": qid} for qid, c in (("q-a", 0.9), ("q-b", 1.0), ("q-new", 1.0))]
+    report = compose_run.summarize(now, {}, ["none"], "dev", "t", "dev-flow-3", compose_run.Decimal("0.3"),
+                                   earlier=earlier)
+    assert "Against none, dev-compose-1, on the 2 questions both runs composed:" in report
+    assert "| none | 2 | 95.0% | 95.0% |" in report and "| none, dev-compose-1 | 4 | 55.0% | 55.0% / 55.0% |" in report
+    assert "**The rule: the code's instructions replace none, dev-compose-1's.**" in report
+    assert "| `q-a` q | 90.0% | 50.0% / 50.0% |" in report and "q-gone" not in report
