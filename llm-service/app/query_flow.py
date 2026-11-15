@@ -132,19 +132,29 @@ class FlowTrace:
     restarted: bool = False              # the paths started again on the rewritten question
     cached: str = ""                     # the answer came from the cache: "as asked" or "rewritten"; "" when it didn't
 
+    def parts(self) -> dict[str, tuple[int, int]]:
+        """Input and output tokens by part of the path, of every model call that finished; a cancelled call's are
+        unknown. Each part's model: app.audit.part_models()."""
+        none = (0, 0)
+        return {"router": (self.routing.input_tokens, self.routing.output_tokens) if self.routing else none,
+                "rewriter": (self.rewritten.input_tokens, self.rewritten.output_tokens) if self.rewritten else none,
+                "documents": (self.documents.input_tokens, self.documents.output_tokens) if self.documents else none,
+                "writer": self.data.writer_tokens if self.data else none,
+                "explainer": self.data.explainer_tokens if self.data else none,
+                "compose": self.compose_tokens}
+
     @property
     def tokens(self) -> tuple[int, int]:
-        """Input and output tokens of every model call that finished; a cancelled call's are unknown."""
-        parts = [self.compose_tokens]
-        if self.routing:
-            parts.append((self.routing.input_tokens, self.routing.output_tokens))
-        if self.rewritten:
-            parts.append((self.rewritten.input_tokens, self.rewritten.output_tokens))
-        if self.documents:
-            parts.append((self.documents.input_tokens, self.documents.output_tokens))
-        if self.data:
-            parts += [self.data.writer_tokens, self.data.explainer_tokens]
+        """Input and output tokens of every model call that finished."""
+        parts = self.parts().values()
         return sum(p[0] for p in parts), sum(p[1] for p in parts)
+
+    @property
+    def model_calls(self) -> int:
+        """Model calls that finished, the query embedding left out. Each attempt at a query is one; any other part is
+        one when it reports tokens, so a router or a rewrite past its own limit, which reports none, isn't counted."""
+        calls = sum(1 for part, used in self.parts().items() if part != "writer" and any(used))
+        return calls + (len(self.data.attempts) if self.data else 0)
 
 
 class QueryFlow:
@@ -163,20 +173,21 @@ class QueryFlow:
         self._memory = memory
 
     async def answer(self, question: str, *, user_id: int, role: str, department: str | None, budget: TimeBudget,
-                     session_id: str | None = None) -> FlowAnswer:
-        """session_id: the conversation, whose turns the rewrite and the router read, and which keeps this one. None:
-        a question on its own."""
-        remembering = self._memory is not None and session_id is not None
-        turns = await self._memory.recent(user_id, session_id) if remembering else ()
+                     session_id: str | None = None, query_id: str = "-") -> FlowTrace:
+        """The trace: its answer goes back to the asker, or its error fails the query, and the audit records the rest
+        (app/query_api.py). session_id: the conversation, whose turns the rewrite and the router read. None: a question
+        on its own. This turn is kept by remember(), once the question is recorded."""
+        turns = await self._memory.recent(user_id, session_id) if self._memory and session_id else ()
         traced = await self.trace(question, role=role, department=department, today=date.today(), budget=budget,
                                   turns=turns)
         documents, data, routing = traced.documents, traced.data, traced.routing
-        # The question and the query stay out of the logs: what people ask is private (see the audit rules)
-        log.info("query user=%s role=%s cached=%s turns=%d route=%s decided_by=%s confidence=%s paths=%s rewritten=%s "
-                 "rewrite_reason=%r restarted=%s "
+        # The question and the query stay out of the logs: what people ask is private. The audit keeps them for the
+        # retention period (app/audit.py)
+        log.info("query id=%s user=%s role=%s cached=%s turns=%d route=%s decided_by=%s confidence=%s paths=%s "
+                 "rewritten=%s rewrite_reason=%r restarted=%s "
                  "basis=%s cancelled=%s written_by=%s status=%s chunks=%s top_score=%s reranked=%s sql_attempts=%s "
                  "rows=%s embed_ms=%.0f route_ms=%.0f rewrite_ms=%.0f paths_ms=%.0f compose_ms=%.0f total_ms=%.0f "
-                 "tokens_in=%d tokens_out=%d", user_id, role, traced.cached or "-", len(turns),
+                 "tokens_in=%d tokens_out=%d", query_id, user_id, role, traced.cached or "-", len(turns),
                  routing.route if routing else "-", routing.decided_by if routing else "-",
                  routing.confidence if routing else "-",
                  ",".join(path for path in PATH_ORDER if path in routing.paths) if routing else "-",
@@ -190,11 +201,13 @@ class QueryFlow:
                  len(data.answer.result.rows) if data and data.answer and data.answer.result else "-",
                  traced.embed_ms, traced.route_ms, traced.rewrite_ms, traced.paths_ms, traced.compose_ms,
                  traced.total_ms, *traced.tokens)
-        if traced.error:
-            raise traced.error
-        if remembering:
-            await self._memory.remember(user_id, session_id, question, traced.answer.text)
-        return traced.answer
+        return traced
+
+    async def remember(self, user_id: int, session_id: str | None, question: str, answer: FlowAnswer) -> None:
+        """Keeps a turn of the conversation: called once the question is recorded, so a turn whose answer the asker
+        never got isn't read back as if they had."""
+        if self._memory and session_id:
+            await self._memory.remember(user_id, session_id, question, answer.text)
 
     async def trace(self, question: str, *, role: str, department: str | None, today: date, budget: TimeBudget,
                     turns: Sequence[Turn] = ()) -> FlowTrace:

@@ -48,7 +48,7 @@ class QueryRateLimitTest {
     void setUp() {
         when(userRepository.findById(2L)).thenReturn(Optional.of(new User(2L, "Staff", 1L, "staff")));
         when(departmentRepository.findById(1L)).thenReturn(Optional.of(new Department(1L, "Beauty")));
-        when(queryClient.ask(any())).thenReturn(new LlmQueryResponse("refused", "no", List.of(), List.of("Beauty", "ALL"),
+        when(queryClient.ask(any())).thenReturn(new LlmQueryResponse("7c9e6679-7425-40de-944b-e07fc1f90ae7", "refused", "no", List.of(), List.of("Beauty", "ALL"),
                 List.of("documents"), null, null, null));
     }
 

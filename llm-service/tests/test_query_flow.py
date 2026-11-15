@@ -293,6 +293,25 @@ async def test_with_excerpts_and_rows_one_call_writes_the_answer_from_both():
 
 
 @pytest.mark.anyio
+async def test_each_part_of_the_path_reports_its_tokens_and_each_finished_call_counts_once():
+    traced = await trace(build("both")[0])
+    assert traced.parts() == {"router": (300, 25), "rewriter": (120, 8), "documents": (100, 20), "writer": (300, 30),
+                              "explainer": (0, 0), "compose": (200, 40)}   # the answer from both explains nothing
+    assert traced.model_calls == 5
+    retried = replace(data_trace(), attempts=(Attempt(SQL, None, "rejected", 1.0, 0.0), Attempt(SQL, SQL, None, 1.0, 1.0)))
+    traced = await trace(build("data", data=FakeData(retried))[0])
+    assert traced.parts()["explainer"] == (200, 40) and traced.model_calls == 2 + 2 + 1   # two queries written
+
+
+@pytest.mark.anyio
+async def test_a_call_past_its_own_limit_reports_no_tokens_and_isnt_counted():
+    keywords = FakeRouter("documents")
+    keywords.step.value = Routing("documents", None, "keywords", PATHS["documents"], "keywords")
+    traced = await trace(build("documents", router=keywords)[0])
+    assert traced.parts()["router"] == (0, 0) and traced.model_calls == 2   # the rewrite and the documents' answer
+
+
+@pytest.mark.anyio
 async def test_an_answer_from_both_may_rest_on_the_rows_alone():
     flow, _ = build("both", composer=FakeModel("It converted 8.7%."))
     answer = (await trace(flow)).answer
@@ -306,9 +325,9 @@ async def test_an_answer_from_both_citing_what_doesnt_exist_or_cut_off_is_an_err
     flow, _ = build("both", composer=FakeModel(reply))
     traced = await trace(flow)
     assert traced.answer is None and isinstance(traced.error, InvalidAnswer)
-    with pytest.raises(InvalidAnswer):
-        await build("both", composer=FakeModel(reply))[0].answer("Why?", user_id=2, role="staff", department="Beauty",
-                                                                  budget=TimeBudget(10))
+    answered = await build("both", composer=FakeModel(reply))[0].answer("Why?", user_id=2, role="staff",
+                                                                         department="Beauty", budget=TimeBudget(10))
+    assert answered.answer is None and isinstance(answered.error, InvalidAnswer)   # /query turns it into a 502
 
 
 @pytest.mark.anyio
@@ -417,10 +436,10 @@ async def test_an_impossible_user_stops_before_anything_costs_money(role, depart
 
 
 @pytest.mark.anyio
-async def test_an_explanation_that_failed_validation_is_raised_by_the_query_path():
+async def test_an_explanation_that_failed_validation_comes_back_as_the_error_with_no_answer():
     flow, _ = build("data", data=FakeData(explanation=ModelAnswer("", True, 1, 0)))
-    with pytest.raises(InvalidAnswer):
-        await flow.answer("How much?", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10))
+    traced = await flow.answer("How much?", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10))
+    assert traced.answer is None and isinstance(traced.error, InvalidAnswer)   # /query turns it into a 502
 
 
 # ---- the query log
@@ -430,10 +449,11 @@ async def test_an_explanation_that_failed_validation_is_raised_by_the_query_path
 async def test_the_query_log_has_one_line_with_the_route_and_each_paths_numbers_and_not_the_question(caplog):
     flow, _ = build("both", documents=FakeDocuments(replace(documents_trace(), reranked=True)))
     with caplog.at_level("INFO", logger="query"):
-        await flow.answer("my private question", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10))
+        await flow.answer("my private question", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10),
+                          query_id="q-1")
     [line] = [r.getMessage() for r in caplog.records]
     assert "my private question" not in line and SQL not in line
-    for part in ("route=both", "decided_by=model", "paths=documents,data", "written_by=both", "status=answered",
+    for part in ("id=q-1", "route=both", "decided_by=model", "paths=documents,data", "written_by=both", "status=answered",
                  "reranked=True", "sql_attempts=1", "rows=1", "tokens_in=1020", "tokens_out=123", "cancelled=-",
                  "rewritten=False", "rewrite_reason='stands on its own'", "restarted=False", "basis=-"):
         assert part in line
@@ -624,28 +644,31 @@ async def test_a_question_asked_back_is_not_kept():
 
 
 @pytest.mark.anyio
-async def test_a_conversations_turns_reach_the_rewrite_and_its_answer_is_kept_in_it():
+async def test_a_conversations_turns_reach_the_rewrite_and_its_answer_is_kept_in_it_only_when_remembered():
     memory = FakeMemory(FOLLOW_UP)
     flow, parts = build("documents", memory=memory)
-    answer = await flow.answer("Who signs off on it?", user_id=2, role="staff", department="Beauty",
+    traced = await flow.answer("Who signs off on it?", user_id=2, role="staff", department="Beauty",
                                budget=TimeBudget(10), session_id="s-1")
     assert memory.read == [(2, "s-1")] and parts["rewriter"].step.calls[0][1]["turns"] == FOLLOW_UP
-    assert memory.kept == [(2, "s-1", "Who signs off on it?", answer.text)]
+    assert memory.kept == []   # /query keeps the turn once the question is recorded
+    await flow.remember(2, "s-1", "Who signs off on it?", traced.answer)
+    assert memory.kept == [(2, "s-1", "Who signs off on it?", traced.answer.text)]
 
 
 @pytest.mark.anyio
 async def test_a_question_without_a_conversation_reads_and_keeps_no_turns():
     memory = FakeMemory(FOLLOW_UP)
     flow, parts = build("documents", memory=memory)
-    await flow.answer("Who owns the check?", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10))
+    traced = await flow.answer("Who owns the check?", user_id=2, role="staff", department="Beauty",
+                               budget=TimeBudget(10))
+    await flow.remember(2, None, "Who owns the check?", traced.answer)
     assert memory.read == [] and memory.kept == [] and parts["rewriter"].step.calls[0][1]["turns"] == ()
 
 
 @pytest.mark.anyio
-async def test_an_answer_that_failed_validation_is_not_kept_in_the_conversation():
+async def test_answering_keeps_no_turn_of_its_own_not_even_one_that_failed_validation():
     memory = FakeMemory()
     flow, _ = build("data", data=FakeData(explanation=ModelAnswer("", True, 1, 0)), memory=memory)
-    with pytest.raises(InvalidAnswer):
-        await flow.answer("How much?", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10),
-                          session_id="s-1")
-    assert memory.kept == []
+    traced = await flow.answer("How much?", user_id=2, role="staff", department="Beauty", budget=TimeBudget(10),
+                               session_id="s-1")
+    assert isinstance(traced.error, InvalidAnswer) and memory.kept == []

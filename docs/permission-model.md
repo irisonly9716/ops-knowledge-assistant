@@ -38,7 +38,8 @@ network or behind a firewall where only the backend can reach it.
 | `executive` | everything | everything | no: the audit log holds every question every employee asked, which is private |
 | `admin` | everything | everything | yes |
 
-Cross-department access by `executive` and `admin` is flagged separately in the audit table.
+Questions from `executive` and `admin` are marked in the audit table (`cross_department`), since they read every
+department; only `admin` reads the audit (`GET /audit/queries`), and `executive` gets 403 there too.
 
 ### What each role can change -- separation of duties
 
@@ -157,6 +158,11 @@ The database holds the department too (migration V11), so a query that gets past
   same, so the key has no user id; it would need one if permissions ever went down to the person.
 - **A conversation is kept under the user id as well as the session id.** The user id comes from the `users` table
   through the backend; the session id from the client, which can make one up. Someone else's session id reads nothing.
+- **Every question is recorded** (`query_audit`, V13), and an answer whose record can't be written is withheld. The
+  audit is system data: only `admin` reads it, `sql_reader` has no grant on it, and the question, its rewrite, its
+  SQL and feedback comments are cleared after `AUDIT_TEXT_RETENTION_DAYS` (30). The log never holds a question.
+- **Only the asker rates an answer** (`PUT /query/{queryId}/feedback`): someone else's is a 403, so a `queryId` seen
+  elsewhere can't be used to rate it.
 
 ## 4. Filtering documents (vector search)
 
@@ -203,6 +209,7 @@ A campaign may involve several departments. Two options; the simple one first:
 - [ ] The SQL the LLM generates is filtered by `department_id` even when the question doesn't mention a department
 - [x] "The last campaign" only resolves among campaigns the user can see: a newer campaign in another department changes nothing, and a question asked back never lists one (`tests/test_campaigns.py`)
 - [x] Asking about another department's campaign gets the same answer as one that doesn't exist (`tests/test_campaigns.py`, and end to end through the backend)
+- [x] Every question leaves an audit row, an answer without one is withheld, and only `admin` reads the audit (`tests/test_query_api.py`, `tests/test_audit.py`, `AuditControllerTest`, and end to end through the backend)
 
 ## 7. No permissions at the host level for now
 

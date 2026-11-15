@@ -24,6 +24,7 @@ import psycopg
 from openai import APIError
 
 from app import db
+from app.audit import part_models
 from app.config import settings
 from app.main import query_flow_from_settings
 from app.query_flow import QueryFlow
@@ -60,7 +61,7 @@ async def ask(flow: QueryFlow, question: Question, budget_seconds: float) -> dic
         return record | {"status": ERROR, "error": f"{type(error).__name__}: {error}"[:300],
                          "total_ms": (time.perf_counter() - started) * 1000}
 
-    routed, documents, data, answer = traced.routing, traced.documents, traced.data, traced.answer
+    routed, data, answer = traced.routing, traced.data, traced.answer
     rewritten = traced.rewritten
     sql_answer = data.answer if data else None
     rows = sql_answer.result.rows if sql_answer and sql_answer.result else None
@@ -85,12 +86,7 @@ async def ask(flow: QueryFlow, question: Question, budget_seconds: float) -> dic
         "embed_ms": traced.embed_ms, "route_ms": traced.route_ms, "paths_ms": traced.paths_ms,
         "compose_ms": traced.compose_ms, "total_ms": traced.total_ms,
         "explain_ms": data.explain_ms if data else None,
-        "tokens": {"router": [routed.input_tokens, routed.output_tokens] if routed else [0, 0],
-                   "rewriter": [rewritten.input_tokens, rewritten.output_tokens] if rewritten else [0, 0],
-                   "documents": [documents.input_tokens, documents.output_tokens] if documents else [0, 0],
-                   "writer": list(data.writer_tokens) if data else [0, 0],
-                   "explainer": list(data.explainer_tokens) if data else [0, 0],
-                   "compose": list(traced.compose_tokens)},
+        "tokens": {part: list(used) for part, used in traced.parts().items()},
     }
     record["cost_usd"] = str(cost(record["tokens"]))
     return record
@@ -98,10 +94,7 @@ async def ask(flow: QueryFlow, question: Question, budget_seconds: float) -> dic
 
 def cost(tokens: dict) -> Decimal:
     """The query embedding is left out: about 15 tokens, $0.0000003 a question."""
-    return (price(settings.router_model, *tokens["router"]) + price(settings.rewrite_model, *tokens["rewriter"])
-            + price(settings.chat_model, *tokens["documents"])
-            + price(settings.sql_model, *tokens["writer"]) + price(settings.chat_model, *tokens["explainer"])
-            + price(settings.chat_model, *tokens["compose"]))
+    return sum((price(model, *tokens[part]) for part, model in part_models().items()), Decimal(0))
 
 
 def ms(values: list[float]) -> str:

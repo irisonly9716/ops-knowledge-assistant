@@ -155,6 +155,14 @@ class Settings(BaseSettings):
     # An answer is kept up to this many characters: enough to say what "it" refers to, not the whole answer
     memory_answer_chars: int = 1000
 
+    # ---- the audit (app/audit.py) ----
+    # Connections per process for writing a question's audit row. One: 8 processes with their query and SQL pools and
+    # this leave room in the 100 Postgres allows for the backend and the consumer
+    audit_pool_size: int = 1
+    # How long a question waits for that connection before it fails for want of a record. The insert itself is bounded
+    # by the connection's statement limit (app/db.py)
+    audit_wait_seconds: float = 0.5
+
     llm_service_host: str = "127.0.0.1"
     llm_service_port: int = 8000
     # Processes of the API. One reaches about 100 QPS, and 4 met the 300 QPS peak

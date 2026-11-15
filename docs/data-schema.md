@@ -398,6 +398,40 @@ scope with no row reads as 0. The rows are locked in one order, department, `all
 tables alike, so two writers can't deadlock on them. `generate_mock_data` moves every scope on, since it rewrites the
 data without the consumer.
 
+### query_audit and query_feedback (V13)
+A row for every question `/query` takes in, written by llm-service once the question is done, answered or failed,
+before anything goes back (`llm-service/app/audit.py`). It is written once and never changed, except that the backend
+clears its text after `AUDIT_TEXT_RETENTION_DAYS` (30): what people ask is private, the numbers are what is kept.
+
+| Column | Type | Notes |
+|---|---|---|
+| query_id | uuid PK | made by llm-service, returned with the answer as `queryId` |
+| created_at | timestamptz | |
+| user_id | bigint FK | |
+| role, department | text | the asker's; department NULL for executive and admin |
+| cross_department | boolean, generated | `role IN ('executive', 'admin')`: they read every department |
+| session_id | uuid, nullable | the conversation |
+| outcome | text | the answer's status (`answered`, `refused`, `failed`, `clarify`), or what stopped it: `invalid`, `timeout`, `busy`, `rate_limited`, `model_error`, `database_error`, `error` |
+| cache_hit | text, nullable | `as_asked` or `rewritten` |
+| route, decided_by, confidence | | the router's decision |
+| paths, cancelled | text[] | the paths the answer rests on (a cache hit's, as cached); those the route ruled out while they ran |
+| written_by | text | `documents`, `data`, `both` or `cache` |
+| question, rewritten, sql | text | cleared after the retention period; `sql` is the query the answer rests on, or the last one tried |
+| campaign_id | bigint FK, nullable | the campaign "the last one" turned out to be |
+| sql_attempts, result_rows | int | |
+| cited_doc_ids | bigint[] | |
+| model_calls, input_tokens, output_tokens, tokens, cost_usd | | the calls that finished; NULL when nothing came back, since what was spent is unknown. `tokens` by part of the path; `cost_usd` NUMERIC at the prices it ran at |
+| total_ms, timings_ms | int, jsonb | the whole question, and each step from the start |
+
+Indexes serve the admin's listing (newest first; by user; executives' and admins' questions, a partial index) and
+the retention (`created_at WHERE question IS NOT NULL`, so rows already cleared aren't read again).
+
+`query_feedback` holds the asker's rating of one answer: `query_id` (PK, FK to `query_audit`), `rating` (`up` or
+`down`), `comment` (at most 1,000 characters, cleared after the retention period), `created_at`, `updated_at`. A table
+of its own because a second rating replaces the first, and the audit row must not change. Neither table is granted to
+`sql_reader`. Both have foreign keys to `users` (and `query_audit` to `campaigns`), so `generate_mock_data`, which
+empties those with `TRUNCATE ... CASCADE`, empties these too.
+
 ## Mock data (generated)
 
 The generator is reproducible: seeded `random` and Faker, every date computed from a fixed `AS_OF`

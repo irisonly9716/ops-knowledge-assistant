@@ -10,6 +10,7 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -43,6 +44,13 @@ public class ApiExceptionHandler {
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<Map<String, String>> unreadable(HttpMessageNotReadableException e) {
         return ResponseEntity.badRequest().body(Map.of("error", "the request body is not valid JSON"));
+    }
+
+    /** A path or query parameter that isn't its type, such as a queryId that isn't a UUID. Names it, never quotes it. */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<Map<String, String>> wrongType(MethodArgumentTypeMismatchException e) {
+        String type = e.getRequiredType() == null ? "of the right type" : "a valid " + e.getRequiredType().getSimpleName();
+        return ResponseEntity.badRequest().body(Map.of("error", e.getName() + " is not " + type));
     }
 
     /** Over the limit in application.yml. Thrown while the request is parsed, before any controller runs. */

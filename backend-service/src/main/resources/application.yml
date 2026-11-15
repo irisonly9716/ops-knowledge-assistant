@@ -109,6 +109,15 @@ query:
   # Per backend instance. Above it, 429 with Retry-After
   rate-limit-qps: ${QUERY_RATE_LIMIT_QPS:300}
 
+# The audit of questions, which llm-service writes (db/migration/V13__query_audit_and_feedback.sql): what people wrote
+# (questions, their rewrites and SQL, feedback comments) is cleared after this many days; the numbers are kept
+audit:
+  retention:
+    enabled: true          # tests switch it off and call it directly
+    days: ${AUDIT_TEXT_RETENTION_DAYS:30}
+    interval-ms: 3600000
+    batch-size: 1000       # rows per transaction
+
 # Transactional outbox: an upload's event is written to the outbox table together with the upload, and
 # OutboxRelay publishes it to Kafka afterwards (see db/migration/V6__outbox.sql)
 outbox:

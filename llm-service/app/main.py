@@ -1,7 +1,8 @@
 """HTTP entry point of llm-service (FastAPI). Start it with `python -m app.server` (see app/server.py).
 
 /health and POST /query (app/query_api.py), which answers through app/query_flow.py: routing, the documents and the
-campaign data, with the answer cache and the conversation memory in Redis (app/memory).
+campaign data, with the answer cache and the conversation memory in Redis (app/memory), and records every question
+(app/audit.py).
 
 Note: the Kafka consumer is NOT started here. It is a separate worker process
 (python -m app.consumers.upload_consumer); see app/consumers/upload_consumer.py for why.
@@ -18,6 +19,7 @@ from redis.asyncio import Redis
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import db
+from app.audit import AuditLog
 from app.config import settings
 from app.query_api import router as query_router
 from app.memory.cache import AnswerCache
@@ -77,16 +79,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise RuntimeError("INTERNAL_SERVICE_TOKEN is not set: add it to .env at the repository root; the backend uses the same value")
     client = openai_client_from_settings()
     pool, reader_pool = db.query_pool(), db.sql_pool()   # sql_pool refuses to be made without the reader's password
+    audit_pool = db.audit_pool()
     await pool.open()
     await reader_pool.open()
+    await audit_pool.open()
     reranker = tei_reranker_from_settings()   # not checked here: a reranker that is down only costs answer quality
     redis = redis_from_settings()   # nor this: without Redis, questions are answered with no cache and no conversation
     app.state.query_flow = query_flow_from_settings(client, pool, reader_pool, reranker, redis)
+    app.state.audit_log = AuditLog(audit_pool, settings.audit_wait_seconds)
     try:
         yield
     finally:
         await pool.close()
         await reader_pool.close()
+        await audit_pool.close()
         await redis.aclose()
         await client.close()
         if reranker:

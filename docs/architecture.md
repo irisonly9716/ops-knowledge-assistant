@@ -247,7 +247,8 @@ backend /query
       │ 5. documents → their answer, with citations; data → the rows explained in a few sentences;
       │    both → one answer written from the chunks and the rows together. A campaign found in step 2
       │    opens the answer ("Based on ..., which ran from ... to ..."), so a wrong reading is easy to spot
-      │ 6. write the cache + the conversation memory; the audit record is still to come
+      │ 6. write the cache; record the question in query_audit (no record, no answer); keep the turn in the
+      │    conversation
       ▼
    back to the user
 ```
@@ -262,18 +263,27 @@ version out again. Relative references are made concrete before the key is built
 the key changes; a question the rewrite couldn't judge isn't kept under the question as asked. The TTL, an hour, is
 only a backstop for what no write moves on, such as a campaign that finished today.
 
-**What exists today:** the backend's `/query`, the internal token, and steps 1 to 5 and the cache and memory of 6
-(`app/query_flow.py`, `app/memory`): the
+**What exists today:** the backend's `/query`, the internal token, and steps 1 to 6 (`app/query_flow.py`,
+`app/memory`, `app/audit.py`): the
 rewrite with the campaign search and the dates, asking back, the router, the search with its department filter and the
 reranker, the Text-to-SQL pipeline with its checks, department filter, read-only role and row-level security, and one
 answer from either or both, with citations, refusals and the campaign it is about. A client sends a `sessionId`
 with a conversation's questions, and its last turns reach the rewrite. A baseline agent for Text-to-SQL is measured on
-the evaluation dataset. The audit record of step 6 is still to come. Details
+the evaluation dataset. Every question leaves a row in `query_audit`, which the asker's feedback names and only admin
+reads (`backend-service`'s `audit/`). Details
 and measurements: "The query path" in [llm-service/README.md](../llm-service/README.md). How well it answers, measured on the evaluation
 dataset, and why the refusal threshold and the answer instructions are what they are:
 [eval-report.md](eval-report.md).
 
 Design decisions so far:
+- **Every question is recorded before its answer goes back, and no record means no answer.** An executive's
+  question about any department must leave a trace, and a row that silently isn't there can't be noticed later. The
+  cost was measured: an insert takes about 2 ms (p95 under 3 ms), and a cache hit through the backend stayed at p50
+  12 ms. llm-service writes it, because only it sees the route, the SQL and each step's time; the backend would need
+  them in the response. On a pool of one connection per process, because the query path's pool is read-only and
+  stays so; one connection wrote about 480 rows a second, about 6 times a process's share of the peak. Not taken:
+  answering anyway when the row fails (the acceptance is a record for every question), and writing rows in batches
+  in the background (lost when the process dies, and it couldn't hold an answer back).
 - **Looked up twice, kept carefully.** Before anything runs, the cache is looked up under the question as asked, and a
   hit makes no model call: measured through the backend, 15 ms against 2 to 4 s. Only questions the rewrite judged to
   stand alone are kept that way, so "last month's GMV" never is, and neither is a question whose rewrite timed out:

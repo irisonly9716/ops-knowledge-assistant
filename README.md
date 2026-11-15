@@ -102,7 +102,7 @@ Both paths start while the router decides, because routing is a model call: wait
 data at about 3.8 s, estimated from each step's measured time, against a 3 s target. The path the route rules out is
 cancelled. Answers are cached in Redis under the department, the role and a knowledge version that every document
 or table write moves on in its own transaction, so an answer is never served after what it rests on has changed; a
-conversation's last turns are kept in Redis for the rewrite. Not built yet: the audit table.
+conversation's last turns are kept in Redis for the rewrite. Every question is recorded before its answer goes back: who asked, which paths ran, the SQL, each step's time, the model calls and what they cost. An answer whose record can't be written is withheld. The asker can rate an answer; only admin reads the audit, and what people wrote is cleared after 30 days.
 
 ---
 
