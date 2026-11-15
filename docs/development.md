@@ -73,7 +73,7 @@ curl -X POST http://localhost:8081/query -H "X-User-Id: 2" -H "Content-Type: app
 
 The schema lives in versioned SQL files under `db/migration/` (`V1__...sql`, `V2__...sql`, ...), applied in version order by [Flyway](https://documentation.red-gate.com/flyway). Flyway records each applied file, with a checksum, in the `flyway_schema_history` table and only runs new ones.
 
-- To change the schema, add a new file with the next version number, e.g. `V4__add_query_audit.sql`, then run `docker compose run --rm flyway migrate` (or just `docker compose up -d`).
+- To change the schema, add a new file with the next version number, e.g. `V14__add_something.sql`, then run `docker compose run --rm flyway migrate` (or just `docker compose up -d`).
 - **Never edit a migration that has already been applied.** Its checksum would no longer match, and the next `migrate` stops with a validation error. Fix mistakes with a new migration instead.
 - Each file runs in one transaction: if any statement fails, the whole file is rolled back.
 - The Spring backend does not create or change tables (`ddl-auto: validate`); it only checks at startup that its entities match the schema.

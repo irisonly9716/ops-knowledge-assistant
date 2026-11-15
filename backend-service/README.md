@@ -158,6 +158,7 @@ token (`INTERNAL_SERVICE_TOKEN` in `.env`; both services read it).
 
 ```json
 {
+  "queryId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
   "status": "answered",
   "answer": "The launch converted 8.7% of its viewers, below the 10% its plan set [1].",
   "citations": [{"number": 1, "docId": 41, "docType": "campaign_plan", "title": "Electronics New Product Launch - Campaign plan",
@@ -177,7 +178,8 @@ it could be written: both `200` with no citations. `clarify` asks the question b
 a staff member their own department's latest; the answer opens with it. `searchedDepartments` is `null` for executive and admin, who search
 everything. `paths` are the sources that ran, `documents` and `data`; `data` is the query an answer rests on with every
 row it returned, or `null`. Its values stay text, `null` included, and this service passes them on without reading them
-as numbers, so an amount like `3000.50` arrives as it is in the database. Every case: `contracts/query.examples.json`.
+as numbers, so an amount like `3000.50` arrives as it is in the database. `queryId` names the question's audit row,
+written by llm-service before the answer comes back: feedback names it. Every case: `contracts/query.examples.json`.
 
 | Answer | When |
 |---|---|
@@ -185,7 +187,7 @@ as numbers, so an amount like `3000.50` arrives as it is in the database. Every 
 | `401` | unknown user. Never because of the internal token: a token the two services disagree on is a `502` and an error in the log, since the client can do nothing about it |
 | `429` | over the rate limit, with `Retry-After` |
 | `502` | the model failed, or its answer failed validation (for example it cited an excerpt that doesn't exist) |
-| `503` | llm-service is down or not configured, the search or this service's database is unavailable, or the provider is rate limiting. With `Retry-After` when every model call slot is taken or the provider gave a time |
+| `503` | llm-service is down or not configured, the search or this service's database is unavailable, the question couldn't be recorded in the audit (its answer is withheld), or the provider is rate limiting. With `Retry-After` when every model call slot is taken or the provider gave a time |
 | `504` | no answer in time: llm-service's own budget of 12 s, or the read timeout of 14 s here if it is stuck |
 
 `spring.jpa.open-in-view` is off. Its default holds a database connection until the response is written, which here
@@ -217,6 +219,34 @@ already running waited out the whole 25 s freeze; with these, a `503` after 2.04
 running. A query that needs both lookups can in theory take 23 s for each, if every round trip takes just under the limit,
 so the computed worst case is 61 s with the 15 s for llm-service. In that freeze 3 of 1,500 queries still got Spring's
 default `500`, because the rollback failed too (`JpaSystemException`).
+
+### `PUT /query/{queryId}/feedback`
+
+Body: `{"rating": "up", "comment": "..."}`; `rating` is `up` or `down`, `comment` is optional, at most 1,000
+characters, counted as Postgres counts them, and blank counts as none. Only the asker rates their own answer; a second
+rating replaces the first, comment included. `204` with no body.
+
+| Answer | When |
+|---|---|
+| `400` | a rating that isn't `up` or `down`, a comment that is too long, a `queryId` that isn't a UUID |
+| `401` | unknown user |
+| `403` | someone else's question |
+| `404` | no question was recorded with this id |
+
+### `GET /audit/queries`
+
+The audit of questions, newest first, with each one's feedback: admin only, `403` for everyone else, the executive
+included, since it holds what every employee asked. Optional filters: `userId`, `crossDepartment` (`true`: the
+questions of executives and admins, who read every department), `before` (an ISO time: pass the last row's
+`createdAt` for the next page) and `limit` (1 to 200, default 50). `question`, `rewritten`, `sql` and `comment` are
+null once the retention period is over; `tokens` and `timingsMs` are the JSON they are stored as, `costUsd` is
+text. Read with plain SQL (`QueryAuditRepository`), since a row is never changed through an object.
+
+### Audit retention
+
+`AuditRetention` clears what people wrote after `AUDIT_TEXT_RETENTION_DAYS` (default 30): the question, its rewrite
+and its SQL in `query_audit`, and feedback comments by when they were last written. The numbers stay. Once an hour,
+1,000 rows a transaction until a batch comes back short, skipping rows another instance has locked. Off in tests.
 
 ### Outbox relay
 
@@ -295,7 +325,7 @@ consumer running it moves on to `done`), or read the message with `llm-service/s
 ## Tests
 
 ```bash
-.\mvnw.cmd test                                                # default: 219 unit/slice tests, no Docker needed, a few seconds
+.\mvnw.cmd test                                                # default: 292 unit/slice tests, no Docker needed, a few seconds
 .\mvnw.cmd test -DexcludedGroups=none -Dgroups=integration     # integration tests: need the docker compose Postgres
 .\mvnw.cmd test -Dtest=UploadControllerTest                    # one class only
 ```
@@ -321,6 +351,10 @@ consumer running it moves on to `done`), or read the message with `llm-service/s
 | `UploadFlowIntegrationTest` (12) | integration, `@Tag("integration")` | whole requests against real Postgres: what the slices fake. The SOP natural key (case, spaces, Unicode forms, per department), the approval queues, what each decision commits, a void approval surviving as a commit with a `409` answer, data table versions, the campaign search |
 | `QueryConnectionIntegrationTest` (1) | integration, `@Tag("integration")` | waiting for llm-service holds no database connection: 6 queries at once on a pool of 2 |
 | `QueryThreadsIntegrationTest` (3) | integration, `@Tag("integration")` | a request in the real Tomcat runs on a virtual thread; the waits for the database have their limits |
+| `FeedbackControllerTest` (12) | `@WebMvcTest` slice | only the asker rates, unknown ids, what a rating and a comment may be (characters as Postgres counts them), a `queryId` that isn't a UUID in the usual error shape |
+| `AuditControllerTest` (10) | `@WebMvcTest` slice | admin only, the executive included; the filters and the page as asked; malformed filters named in the error; the stored JSON and the cost as text |
+| `AuditRetentionTest` (3) | plain unit, fixed clock | the cutoff, a backlog cleared batch after batch, a run without the database |
+| `QueryAuditIntegrationTest` (6) | integration, `@Tag("integration")` | real Postgres: who asked, a rating replaced, the listing and its filters and pages, the retention clearing only old text and keeping the numbers |
 | `BackendServiceApplicationTests` (1) | integration, `@Tag("integration")` | the full container + a real Postgres; with `ddl-auto: validate` it also detects **drift between the entities and the migrations in `db/migration/`** |
 
 Notes:
@@ -354,4 +388,6 @@ Notes:
 | `GET /documents/approvals`, `POST /documents/approvals/{id}/approve`, `.../reject` | implemented | the approval queue and the decision |
 | `GET /campaigns?month=` | implemented | finding a campaign to upload a plan, review or table for |
 | `POST /query` | implemented | looks up the user, forwards to llm-service with the internal token, returns the answer with its citations and the data it rests on, or a refusal |
+| `PUT /query/{queryId}/feedback` | implemented | the asker's thumbs up or down on an answer |
+| `GET /audit/queries` | implemented | the audit of questions, admin only |
 | read-only structured data endpoints | planned | campaigns / campaign_metrics / hosts queries (for a frontend dashboard, optional) |

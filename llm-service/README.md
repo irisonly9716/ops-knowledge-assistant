@@ -42,8 +42,11 @@ app/
 ├── main.py        the FastAPI app: startup checks, the query flow built from the settings, error shape, /health
 ├── query_api.py   POST /query: internal token, request and response format, time limit, failures to status codes
 ├── query_flow.py  the top of a query: route, both paths at once, cancel the one ruled out, one answer
+├── audit.py       a row in query_audit for every question, written before its answer goes back
+├── pricing.py     what model calls cost, for the audit and the evaluation
 ├── config.py      environment variables (the repository-root .env)
-├── db.py          Postgres: sync connections for ingestion, async read-only pools for queries and for generated SQL
+├── db.py          Postgres: sync connections for ingestion, async read-only pools for queries and for generated SQL,
+│                  and the audit's own pool, which writes
 ├── time_budget.py one time budget per message or query, shared by all its layers
 ├── consumers/     Kafka consumer (the document pipeline), a separate worker process
 │   ├── upload_consumer.py   consume loop: manual commits + retries + dead-letter topic + graceful shutdown; entry point main()
@@ -82,7 +85,9 @@ tests/             pytest; test_events (contract / cross-language drift) test_st
                    test_retrieval (real Postgres: who sees what, the approximate index, the pool)
                    test_answering (fake models: refusals, citations, nothing held while waiting)
                    test_query_models (fake client: retries inside the budget, the limit on calls at once)
-                   test_query_api (the real app with a fake service: who may call, failures, starting up)
+                   test_query_api (the real app with a fake service and audit log: who may call, failures, every
+                   question recorded, no row no answer, starting up)
+                   test_audit (real Postgres: what a row holds, its bounds, sql_reader reading neither table)
                    test_query_flow (fake paths and router: what starts before the route, what it cancels, which
                    answer reaches the asker, nothing left running, what a rewrite restarts and asks back)
                    test_rewriting (fake model: which replies are taken, falling back to the question as asked; dates)
@@ -475,7 +480,33 @@ question get their own answers and each is found again; a new Beauty document ma
 leaves Fresh Grocery's; a Beauty CSV does the same; a follow-up in a conversation is understood, and the same words in
 another conversation mean something else; and "our last campaign" moves to a campaign that has just finished.
 
-**Not built yet:** the audit table.
+### The audit
+
+Every question `/query` takes in, once the token and the request's checks pass, gets a row in `query_audit`
+(migration V13, `app/audit.py`), whatever became of it: who asked, the outcome, whether it came from the cache, the
+route and its confidence, the paths that ran and those cancelled, the question and its rewrite, the SQL, the campaign
+it turned out to be about, the documents cited, the model calls that finished with their tokens and cost, and each
+step's time. The response carries the row's id as `queryId`, which the asker's feedback names.
+
+- **No row, no answer.** The row is written after the flow and before the answer goes back. If it can't be written,
+  the answer is withheld (`503` with `Retry-After: 1`) and the conversation doesn't keep the turn: an executive's
+  question about any department must leave a trace. A failure (`504`, `502`, `503`) goes back as it was even when its
+  row can't be written, and the log says so.
+- **What nothing came back from spent is unknown, not zero:** a question past its time or stopped by an error has
+  no trace, so its calls, tokens and cost are NULL. A model with no price in `app/pricing.py` leaves the cost NULL
+  too, rather than failing the question.
+- **A pool of its own**, read-write, `AUDIT_POOL_SIZE` (1) connection a process: the query path's pool is read-only
+  so a bug in the path can't write. A question waits at most `AUDIT_WAIT_SECONDS` (0.5 s) for it, and the insert has
+  a 1 s statement limit, so the worst case is the budget plus 1.5 s. Measured on a development machine: an insert
+  takes p50 1.9 to 2.1 ms, p95 2.5 to 2.9 ms, and one connection writes about 480 a second (300 at once: 0.62 s),
+  against about 75 a second per process at the peak. A cache hit through the backend: p50 12 ms, p95 18 ms.
+- **Private:** the log line has the query id but never the question or the SQL. The backend clears the question,
+  its rewrite and its SQL after `AUDIT_TEXT_RETENTION_DAYS` (30), and only admin reads the rows.
+
+Verified end to end through the backend and Postgres: 115 questions, 115 rows (100 of them cache hits); an
+executive's question asked back, marked `cross_department`; a campaign found and recorded; feedback on one's own
+answer `204`, someone else's `403`; the audit read by admin and refused to the executive and to staff; and with the
+budget cut to 0.5 s, a `504` recorded as `timeout` with its spend unknown.
 
 ## Creating the Kafka topics
 
