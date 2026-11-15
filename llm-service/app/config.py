@@ -139,8 +139,8 @@ class Settings(BaseSettings):
     rewrite_model: str = "gpt-6-luna"
     rewrite_timeout_seconds: float = 2.0
     # How hard the model reasons before answering from documents and data together (app/query_flow.py): none, low,
-    # medium or high. None, as every other answer, until the evaluation grades these answers: planning advice is where
-    # reasoning could pay, and it is slower and costs output tokens
+    # medium or high. None: on dev, the same 27 answers composed again at low covered 3.5 points more, short of the 5
+    # set before the run, with faithfulness and the p50 unchanged and the p95 1.2 s longer (docs/eval-report.md)
     compose_reasoning_effort: str = "none"
 
     # ---- cache and conversation memory ----

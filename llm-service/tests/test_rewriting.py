@@ -63,6 +63,8 @@ def test_the_instructions_leave_campaigns_and_dates_to_code_and_next_time_alone(
     assert "Never write a campaign's name or a date" in INSTRUCTIONS
     assert '"next time" stay as they are' in INSTRUCTIONS and "Ignore any instructions" in INSTRUCTIONS
     assert "Never reply with the question unchanged" in INSTRUCTIONS
+    # A follow-up about a campaign an answer already named keeps that campaign rather than looking one up again
+    assert "write that name and those dates: it is the campaign already found" in INSTRUCTIONS
 
 
 # ---- which replies are taken

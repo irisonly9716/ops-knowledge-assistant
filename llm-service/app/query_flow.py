@@ -373,21 +373,29 @@ class QueryFlow:
     async def _compose(self, question: str, excerpts: list[RetrievedChunk], data: SqlTrace,
                        searched: list[str] | None, ran: tuple[str, ...], budget: TimeBudget
                        ) -> tuple[FlowAnswer | None, InvalidAnswer | None, tuple[int, int]]:
-        """Citations are checked as for the documents alone, except that an answer citing nothing stands: it rests on
-        the rows, which the asker gets with it."""
-        sql, result = data.answer.sql, data.answer.result
-        reply = await self._composer.answer(compose_instructions(data.answer.department),
-                                            compose_prompt(question, excerpts, sql, result), budget)
-        tokens, text = (reply.input_tokens, reply.output_tokens), reply.text.strip()
-        if not reply.complete or not text:
-            return None, InvalidAnswer("the model's answer was cut off or empty"), tokens
-        if text == NOT_IN_SOURCES:
-            return FlowAnswer(REFUSED, REFUSAL_TEXT, [], searched, ran, None, None), None, tokens
-        try:
-            numbers = cited_numbers(text, len(excerpts))
-        except Uncited:
-            numbers = []
-        except InvalidAnswer as invalid:
-            return None, invalid, tokens
-        return (FlowAnswer(ANSWERED, text, [Citation(n, excerpts[n - 1]) for n in numbers], searched, ran, sql, result),
-                None, tokens)
+        return await composed(self._composer, question, excerpts, data, searched, ran, budget)
+
+
+async def composed(composer: AnswerModel, question: str, excerpts: list[RetrievedChunk], data: SqlTrace,
+                   searched: list[str] | None, ran: tuple[str, ...], budget: TimeBudget
+                   ) -> tuple[FlowAnswer | None, InvalidAnswer | None, tuple[int, int]]:
+    """One answer from the excerpts and the rows together, and the tokens it took. Citations are checked as for the
+    documents alone, except that an answer citing nothing stands: it rests on the rows, which the asker gets with it.
+    Module-level so the evaluation can compose the same inputs again at another reasoning effort
+    (evaluation/compose_run.py)."""
+    sql, result = data.answer.sql, data.answer.result
+    reply = await composer.answer(compose_instructions(data.answer.department),
+                                  compose_prompt(question, excerpts, sql, result), budget)
+    tokens, text = (reply.input_tokens, reply.output_tokens), reply.text.strip()
+    if not reply.complete or not text:
+        return None, InvalidAnswer("the model's answer was cut off or empty"), tokens
+    if text == NOT_IN_SOURCES:
+        return FlowAnswer(REFUSED, REFUSAL_TEXT, [], searched, ran, None, None), None, tokens
+    try:
+        numbers = cited_numbers(text, len(excerpts))
+    except Uncited:
+        numbers = []
+    except InvalidAnswer as invalid:
+        return None, invalid, tokens
+    return (FlowAnswer(ANSWERED, text, [Citation(n, excerpts[n - 1]) for n in numbers], searched, ran, sql, result),
+            None, tokens)

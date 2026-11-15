@@ -1,7 +1,8 @@
 # Evaluation report
 
 **Draft.** Numbers from the `dev` split only: the baseline with vector search alone, reranking compared against it,
-the zero-shot Text-to-SQL baseline, the Text-to-SQL pipeline, routing and the whole query path. Hybrid search and the final `test` numbers come later. Every number below
+the zero-shot Text-to-SQL baseline, the Text-to-SQL pipeline, routing, the whole query path, conversations, and the
+reasoning effort of the answer from both. Hybrid search and the final `test` numbers come later. Every number below
 comes from a file in [eval/results/](../eval/results/), and every table can be rebuilt from the `.jsonl` next to it,
 except the comparison of reranking models, which says where it comes from.
 
@@ -9,6 +10,37 @@ except the comparison of reranking models, which says where it comes from.
 cd llm-service
 uv run python -m evaluation.run --split dev --name baseline   # needs Postgres with the corpus, OPENAI_API_KEY
 ```
+
+## Where things stand
+
+Each number comes from the runs named beside it, which are described further down. Parts whose code hasn't changed
+since their run weren't run again: the cache, the conversation memory and the audit aren't on the evaluation's path.
+
+| Kind | What is measured | On `dev` | Runs |
+|---|---|---|---|
+| Routing | the router's accuracy on the 102 questions that aren't follow-ups; a path missing at the 0.95 threshold | 84.3% / 83.3%; 2 and 2 | `dev-route-3`, `-4` (2026-11-11) |
+| Rewriting | conversations that came to what they should: follow-ups, "the last one", "last month", asking back, another department, questions to leave alone | dev 16 of 16 once tuned (15 of 16 before); check 16 of 16 | `conversations-dev-1` to `-4`, `conversations-check-1` (2026-11-14) |
+| Retrieval | Recall@5 / MRR of the 66 questions with labelled sections, with reranking (vector order alone) | 92.7% / 0.913 (80.3% / 0.743) | `dev-rerank-1`, `-2` (2026-11-06) |
+| Text-to-SQL | execution accuracy on the 27 data questions, the query path's pipeline as `sql_reader`; through the whole path, the 39 with a gold result | 92.6% / 88.9%; 33 of 39 | `dev-sql-pipeline-department-rule-1`, `-2` (2026-11-10); `dev-flow-3` (2026-11-13) |
+| Answers | from documents: answered of 54, faithfulness, coverage | 53 and 53; 99.6% / 96.5%; 88.9% / 85.3% | `dev-rerank-1`, `-2` |
+| | from documents and data together, as the query path writes them: answered of 54, faithfulness, coverage with refusals as 0 | 54; 96.0%; 62.5% | `dev-compose-1` (2026-11-14) |
+| | from data: not graded; their rows are scored as Text-to-SQL above | | |
+| Permissions | leaks of another department's data: Text-to-SQL check questions; sections the asker may not see among the 50 candidates; conversations | 0 of 20 twice; none; 0 in 32 | `sql-leak-3`, `-4` (2026-11-10); `dev-baseline`; `conversations-*` |
+| Performance | the whole path, one question at a time on a development machine: p50 and how many under 3 s, by the paths that ran; cost | documents 1.60 s, 36 of 37; data 2.76 s, 17 of 29; both 3.33 s, 17 of 42; $0.0005 a question | `dev-flow-3`, before the follow-up rules, which change only how follow-ups are written out |
+
+What each part is worth, each measured by changing it alone:
+
+| Part | Compared | Effect on `dev` | Runs |
+|---|---|---|---|
+| Reranking | with and without, two runs each | Recall@5 80.3% to 92.7%; answerable questions refused 8 and 7 to 1 and 1 of 54; coverage and faithfulness within the noise | `dev-prompt-v3*`, `dev-rerank-*` |
+| The data dictionary and the names in the data | added to zero-shot; taken out of the pipeline | +18.5 points; -13.0 | `dev-sql-ablation-*` |
+| The metric views | added; taken out | +16.7; -13.0 | `dev-sql-ablation-*` |
+| The 3 closest examples | added; taken out | within the noise | `dev-sql-ablation-*` |
+| 2 retries with the error | added; taken out | no question gained | `dev-sql-ablation-*` |
+| The rule for another department's data | before and after | answered with the asker's own rows: 4 of 4 to 0 (dev), 3 of 8 to 0 (check) | `sql-leak-*` |
+| Both paths below 0.95 confidence | the router alone, and at 0.95 | a path missing 3 to 2, at a third of questions running both | `dev-route-3`, `-4` |
+| The rewrite's tuning | first instructions, tuned | follow-ups written out 2 of 6 to 5 of 6; conversations 15 of 16 to 16 of 16 | `dev-flow-2`, `-3`, `dev-rewrite-*`, `conversations-dev-*` |
+| Reasoning for the answer from both | `none` and `low`, the same inputs | coverage +3.5 points, short of the 5 set before the run; faithfulness within the noise; p95 +1.2 s: `none` stays | `dev-compose-1` |
 
 ## What is measured, and how
 
@@ -651,6 +683,87 @@ everything else as asked. "Wrong" is a reference the question didn't make.
 - **Cost and time**: $0.024 for the six runs; the examples make the instructions about 800 tokens, so a question's
   rewrite costs about $0.00013. p50 about 1.0 s, p95 1.5 to 2.0 s: 1 of 16 went past the 2 s limit once.
 
+## Conversations
+
+```bash
+RERANKER_URL= uv run python -m evaluation.conversation_run --questions dev --name 4   # $0.008 a run
+```
+
+32 conversations written for this from the mock data, 16 to tune on (`eval/conversations-dev.jsonl`) and 16 that only
+check (`eval/conversations.jsonl`), each a kind the rewrite and the campaign search have to get right, through the whole
+query path as of 2026-10-15 with the turns before the question. Each has one expectation, checked by code: the campaign
+the answer is about, the departments a question asked back offers, a refusal, no rewrite, or words the question that
+ran must hold. A leak is another department's campaign in the basis, among the candidates, or named in the answer or
+its rows. "Right" is about the rewrite and the campaign, not the answer, which isn't graded here.
+
+| Kind | dev, runs 1 / 2 / 3 / 4 | check |
+|---|---|---|
+| a follow-up: about the campaign an answer named, the one before it, a question asked back, an SOP's topic | 4 / 4 / 4 / 5 of 5 | 5 of 5 |
+| "our last", "most recent", "second-to-last" campaign | 4 of 4 each time | 4 of 4 |
+| "last month", "this year", "the last three full months", "last year" | 2 of 2 each time | 2 of 2 |
+| an executive's "the last Black Friday": asked back with all four departments | 1 of 1 each time | 1 of 1 |
+| another department's campaign: refused, about nothing | 2 of 2 each time | 2 of 2 |
+| "next time", a batch, a campaign named by its date: left as asked | 2 of 2 each time | 2 of 2 |
+| **Leaks** | **0** | **0** |
+
+- **Two follow-ups failed the same way, every time they were tried alone.** "And how many units did it sell?", after
+  an answer that opened "Based on Beauty Anniversary Sale, which ran from 2026-09-07 to 2026-10-08", and "The Fresh
+  Grocery one.", after an executive was asked which Black Friday they meant. The rewrite wrote the conversation's
+  words, "our last campaign" or "the last Black Friday for Fresh Grocery", into the question and filled in a campaign
+  reference without the `{campaign}` it stands for, so the reply was refused and the question went on as asked: 3 of 3
+  and 4 of 5 times. The first had failed the same way end to end through the backend. Runs 1 and 2 got the second right
+  by chance, and the first was cut off once by the rewrite's 2 s.
+- **The fix, in the instructions:** a campaign an earlier answer named with its dates is written out with that name and
+  those dates, since it is the campaign already found, and a campaign the conversation only placed in time gets
+  `{campaign}` with that reference; one example of each, from other companies. Tried one at a time, each 4 of 4 after.
+  Writing the named campaign out was chosen over looking it up again (`{campaign}` with the same reference): both
+  fixed it and changed the rest equally (below), and writing it out keeps the very campaign the asker just saw.
+- **What it changed elsewhere**, the rewrite alone on all 108 `dev` questions: follow-ups written out 5 of 6 before and
+  4 of 6 after, the one less cut off by the 2 s once and written out 5 of 5 when tried alone; relative words 8 of 10
+  both times; of the 92 others, 3 rewritten instead of 1 in `dev-flow-3`. Of those 3, "the home black friday live" was taken as the
+  latest before too. "The Black Friday grocery livestream" and "the 2026 Summer Sale review" are now sometimes taken as
+  the latest, against the rule that a campaign named without a place in time is left as asked: each department has
+  one of each in the data, so the campaign is the same and the answer says which. The instructions are a fifth longer
+  (1,200 to 1,454 input tokens a question on average); the rewrite's p50 stayed at 0.85 to 0.95 s.
+- **The check file, run once after the tuning:** 16 of 16 and no leak. Its follow-up about a host's review was written
+  out right and then refused by the documents path; the answer isn't scored here.
+- **Cost**: $0.007 to $0.008 a run, $0.036 for the five; tuning, the rewrite alone on all of `dev` four times and on
+  single questions, $0.07.
+
+## The answer from both: does reasoning help?
+
+```bash
+RERANKER_URL= uv run python -m evaluation.compose_run --split dev --name 1 --from dev-flow-3 --efforts none,low --repeats 2
+```
+
+The 28 questions `dev-flow-3` answered from documents and data together. Each went through the query path once for
+what its answer is written from (the excerpts, the query and its rows); one was answered from documents alone this time
+and is left out. Then only the composing call ran again, at `none` and at `low`, twice each, every effort in turn for
+each question, so they differ in nothing else. Graded as the documents' answers are, with the rows given to the grader
+as one more excerpt. A refusal counts as covering nothing, so an effort can't gain by refusing what it finds hard.
+
+The rule was set before the run: `low` replaces `none` only if its coverage is at least 5 points higher and more than
+`none` differs from itself between repeats, its faithfulness isn't lower, and the composing call's p50 grows by at most
+1 s.
+
+| Effort | Answered, of 54 | Coverage, repeats 1 / 2 | Faithfulness, repeats 1 / 2 | Composing p50 / p95 | Output tokens |
+|---|---|---|---|---|---|
+| none | 54 | 62.5%: 62.8% / 62.2% | 96.0%: 96.0% / 96.1% | 1.77 / 2.79 s | 105 |
+| low | 54 | 66.0%: 67.0% / 65.1% | 96.9%: 95.4% / 98.4% | 1.62 / 3.98 s | 122 |
+
+- **`none` stays** (`COMPOSE_REASONING_EFFORT`). `low` covered 3.5 points more, short of the 5 set before the run,
+  though more than `none`'s own spread of 0.6. Of the 27 questions only one was better in both repeats (a lineup
+  question whose third point `low` said and `none` didn't); the rest moved together or swapped between repeats.
+  Faithfulness and the p50 didn't move beyond the noise; `low`'s p95 was 1.2 s longer.
+- **Reasoning cost little here**: 17 output tokens more an answer, and no answer was cut off by the 800-token limit it
+  shares with the answer.
+- **What the numbers say besides:** the 11 questions labelled for both sources cover about half their points (46% at
+  `none`, 53% at `low`); the 14 labelled for documents that the router sent to both, about 80%. The answers are short,
+  as their instructions ask, and on planning advice they leave points out. That is the composing instructions, not the
+  effort, and is tuned later on `dev`.
+- **Cost**: $0.98 for the run, $0.96 of it grading: about $0.009 an answer, against the $0.005 of a documents answer the
+  estimate was made from, because the grader reads the rows and more claims.
+
 ## What these numbers don't show
 
 - **Small samples.** 54 answerable questions, 15 to refuse, 12 keyword questions, 2 out of scope. One question is 2 to
@@ -662,8 +775,10 @@ everything else as asked. "Wrong" is a reference the question didn't make.
   word. On a few answers seen so far it is strict: it marked "the warehouse must have enough cold-storage capacity" as
   unsupported by "confirm cold-storage capacity".
 - **`test` hasn't been run.** It reports the final numbers once, after the choices above are made on `dev`.
-- **Answers to questions about numbers** aren't graded: Text-to-SQL is scored on its rows, not on the reply. Follow-ups
-  aren't either until there is conversation memory.
+- **Answers to questions about numbers** aren't graded: Text-to-SQL is scored on its rows, not on the reply. The
+  conversations check where a follow-up goes, not its answer.
+- **The conversations were written by the assistant that builds this project,** from the mock data and the rewrite's
+  known failures; 32 is a small sample, and one question is 6 points of a file.
 - **Latency** is one query at a time on a development machine, not under load. The reranker's was measured only on
   a CPU, where it can't be used.
 
@@ -698,10 +813,17 @@ everything else as asked. "Wrong" is a reference the question didn't make.
 | `dev-flow-2` | the rewrite's first instructions | the same, with the rewrite and each follow-up's turns |
 | `dev-rewrite-hard-1` to `-hard-4`, `-all-1` | earlier rewrite instructions | the rewrite alone, while tuning it |
 | `dev-rewrite-hard-5` | now in the code | the rewrite alone |
-| `dev-flow-3` | now in the code | the whole query path, with the tuned rewrite |
+| `dev-flow-3` | the rewrite before the follow-up rules | the whole query path, with the tuned rewrite |
+| `dev-rewrite-hard-6`, `-all-2` to `-all-4` | earlier follow-up rules | the rewrite alone, while tuning the follow-ups |
+| `dev-rewrite-all-5` | now in the code | the rewrite alone, on all of `dev` |
+| `conversations-dev-1`, `-2` | the rewrite before the follow-up rules | conversations, dev |
+| `conversations-dev-3` | the first follow-up rule | conversations, dev |
+| `conversations-dev-4`, `conversations-check-1` | now in the code | conversations, dev and check |
+| `dev-compose-1` | now in the code | the answer from both at each reasoning effort |
 
 Each run is a `.jsonl` of what every question went through, an `.md` of its tables with the instructions it used, and a
 spot-check file of 30 graded answers picked at random, except the SQL runs, which need no grader. The seven document
 runs cost about $1.98, $1.87 of it grading; the two SQL baseline runs $0.08, and the two they replace $0.06; the five
 pipeline runs $0.05, the run as `sql_reader` $0.011, the ablation's 15 runs $0.16, the two leak checks $0.012, and the rule for another department's questions, worked
-out and checked, $0.041; the four routing runs $0.027; the three runs of the whole query path $0.141; tuning the rewrite $0.024.
+out and checked, $0.041; the four routing runs $0.027; the three runs of the whole query path $0.141; tuning the rewrite $0.024;
+the conversation runs $0.036 and tuning the follow-ups $0.07; the composing comparison $0.98, $0.96 of it grading.
