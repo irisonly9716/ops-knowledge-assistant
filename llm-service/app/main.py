@@ -59,7 +59,7 @@ def query_flow_from_settings(client: AsyncOpenAI, pool: Any, reader_pool: Any, r
                                                       settings.rewrite_timeout_seconds, rewriting.MAX_OUTPUT_TOKENS),
                                 timeout_seconds=settings.rewrite_timeout_seconds)
     composer = OpenAIAnswerModel(client, settings.chat_model, limit, settings.query_model_timeout_seconds,
-                                 settings.answer_max_output_tokens, reasoning_effort=settings.compose_reasoning_effort)
+                                 settings.compose_max_output_tokens, reasoning_effort=settings.compose_reasoning_effort)
     timeout = settings.redis_timeout_seconds
     cache = (AnswerCache(redis, pool, ttl_seconds=settings.cache_ttl_seconds, timeout_seconds=timeout)
              if redis is not None else None)

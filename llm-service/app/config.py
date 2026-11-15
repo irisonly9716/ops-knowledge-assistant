@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     query_embedding_timeout_seconds: float = 3.0
     query_model_timeout_seconds: float = 10.0
     answer_max_output_tokens: int = 800
+    # The answer from documents and data together is asked to be complete rather than short (app/query_flow.py): on dev
+    # its answers averaged 240 output tokens and the longest took 661, too close to the 800 above for an answer cut off
+    # to be a rare 502. More tokens take longer, but the query's budget still stops it
+    compose_max_output_tokens: int = 1200
     query_top_k: int = 5
     # Below this similarity a question is refused without asking the model. Chosen on the evaluation's dev questions
     # (docs/eval-report.md): no question to refuse scored below 0.33, so no threshold up to the lowest answerable
