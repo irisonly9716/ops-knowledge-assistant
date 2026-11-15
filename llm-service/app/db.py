@@ -17,6 +17,8 @@ SQL_READER = "sql_reader"
 # A generated query runs after a model call of a second or more, so opening a connection then (about 11 ms) goes
 # unnoticed, and an idle one would count against the 100 Postgres allows
 SQL_POOL_MIN_SIZE = 1
+# An audit row is one insert, written while the asker waits for the answer
+AUDIT_STATEMENT_TIMEOUT_SECONDS = 1
 
 
 def connect(dbname: str | None = None) -> psycopg.Connection:
@@ -81,6 +83,23 @@ def sql_pool(dbname: str | None = None, *, user: str = SQL_READER, password: str
     )
     return AsyncConnectionPool(conninfo, min_size=SQL_POOL_MIN_SIZE, max_size=settings.sql_pool_size, open=False,
                                kwargs={"autocommit": True}, check=AsyncConnectionPool.check_connection)
+
+
+def audit_pool(dbname: str | None = None) -> AsyncConnectionPool:
+    """The connection a question's audit row is written on (app/audit.py), unopened. A pool of its own because the
+    query path's is read-only, so a bug in the path can't write, and the audit doesn't take that away. Opened with the
+    service: the first question shouldn't wait for it."""
+    conninfo = psycopg.conninfo.make_conninfo(
+        host=settings.postgres_host,
+        port=settings.postgres_port,
+        dbname=dbname or settings.postgres_db,
+        user=settings.postgres_user,
+        password=settings.postgres_password,
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
+        options=f"-c statement_timeout={AUDIT_STATEMENT_TIMEOUT_SECONDS * 1000}",
+    )
+    return AsyncConnectionPool(conninfo, min_size=settings.audit_pool_size, max_size=settings.audit_pool_size,
+                               open=False, kwargs={"autocommit": True}, check=AsyncConnectionPool.check_connection)
 
 
 def require_compatible_event_loop() -> None:

@@ -49,7 +49,7 @@ class QueryControllerTest {
 
     private static final String TOKEN = "test-internal-token";
     private static final String ANSWER = """
-            {"status":"answered","answer":"Do this [1].","citations":[{"number":1,"docId":3,"docType":"sop",
+            {"queryId":"7c9e6679-7425-40de-944b-e07fc1f90ae7","status":"answered","answer":"Do this [1].","citations":[{"number":1,"docId":3,"docType":"sop",
              "title":"Account Restriction Handling","department":"ALL","headingPath":["Steps"],"score":0.51}],
              "searchedDepartments":["Beauty","ALL"],"paths":["documents","data"],
              "data":{"sql":"SELECT campaign_name, total_gmv FROM campaign_summary","columns":["campaign_name","total_gmv"],
@@ -151,6 +151,7 @@ class QueryControllerTest {
     void the_answer_of_llm_service_comes_back_as_it_is() throws Exception {
         mockMvc.perform(ask("2"))
                 .andExpect(status().isOk())
+                .andExpect(jsonPath("$.queryId").value("7c9e6679-7425-40de-944b-e07fc1f90ae7"))   // what feedback names
                 .andExpect(jsonPath("$.status").value("answered"))
                 .andExpect(jsonPath("$.answer").value("Do this [1]."))
                 .andExpect(jsonPath("$.citations[0].number").value(1))

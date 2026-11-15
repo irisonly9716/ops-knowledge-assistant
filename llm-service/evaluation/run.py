@@ -32,6 +32,7 @@ from openai import APIError, AsyncOpenAI
 
 from app import db
 from app.config import settings
+from app.pricing import PRICE_PER_MILLION, price  # noqa: F401  the other runs import them from here
 from app.rag.answering import INSTRUCTIONS, QueryService
 from app.rag.chunking import TOKEN_ENCODING
 from app.rag.query_models import ModelBusy, ModelCallLimit, OpenAIAnswerModel, OpenAIQueryEmbedder, openai_client_from_settings
@@ -53,13 +54,6 @@ JUDGE_RETRIES = 2                   # the SDK's: a grading call isn't a user wai
 JUDGE_AT_ONCE = 4
 WRONG_ANSWER_COST = 2               # a wrong answer costs twice a wrong refusal
 SPOT_CHECK_SIZE = 30
-# OpenAI's prices per million tokens, as recorded in scripts/generate_corpus.py, scripts/generate_questions.py and
-# scripts/try_embedding.py. Only used for estimates
-PRICE_PER_MILLION = {
-    "gpt-6-luna": {"input": Decimal("0.10"), "output": Decimal("0.50")},
-    "gpt-6-sol": {"input": Decimal("2.00"), "output": Decimal("10.00")},
-    "text-embedding-3-small": {"input": Decimal("0.02"), "output": Decimal("0")},
-}
 # Ways of asking and what makes a question hard, the tags retrieval is broken down by
 RETRIEVAL_TAGS = ("direct", "keyword", "paraphrase", "colloquial", "vague", "cross_document", "multi_turn",
                   "planning_advice")
@@ -75,11 +69,6 @@ def scored_for_refusal(question: Question) -> bool:
     """A question in the threshold sweep: one to refuse, or one to answer from documents. A question about numbers
     the system can't answer yet would only count as a false refusal of something not built."""
     return question.expected == "refuse" or graded_for_answer(question)
-
-
-def price(model: str, input_tokens: int, output_tokens: int) -> Decimal:
-    p = PRICE_PER_MILLION[model]
-    return (Decimal(input_tokens) * p["input"] + Decimal(output_tokens) * p["output"]) / 1_000_000
 
 
 # ---------------------------------------------------------------------------

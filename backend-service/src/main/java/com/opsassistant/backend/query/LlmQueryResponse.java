@@ -4,12 +4,12 @@ import java.util.List;
 
 /**
  * An answer, a refusal with no citations, "failed" when no query that answers the question could be written, or
- * "clarify" when it is asked back. searchedDepartments is null when every department was searched. paths are the
+ * "clarify" when it is asked back. queryId names the question's audit row: the asker's feedback names it. searchedDepartments is null when every department was searched. paths are the
  * sources that ran, "documents" and "data"; data is the query an answer rests on with its rows, or null when it rests on
  * none. basis is the campaign a question like "the last Black Friday" turned out to mean; candidates, only when asked
  * back, are what it may mean. Examples: contracts/query.examples.json, checked by both test suites.
  */
-public record LlmQueryResponse(String status, String answer, List<Citation> citations, List<String> searchedDepartments,
+public record LlmQueryResponse(String queryId, String status, String answer, List<Citation> citations, List<String> searchedDepartments,
                                List<String> paths, Data data, Campaign basis, List<Campaign> candidates) {
 
     /** number is the [n] in the answer text. */

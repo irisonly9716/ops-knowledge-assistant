@@ -1,10 +1,12 @@
-"""POST /query through the real FastAPI app with a fake service: who may call it, what it accepts, how failures
-look. TestClient isn't used as a context manager, so the app's startup (real pool, real client) doesn't run."""
+"""POST /query through the real FastAPI app with a fake service and a fake audit log: who may call it, what it
+accepts, how failures look, and that every question it takes in is recorded. TestClient isn't used as a context
+manager, so the app's startup (real pool, real client) doesn't run."""
 import asyncio
 import json
 from datetime import date
 import sys
 from pathlib import Path
+from uuid import UUID
 
 import httpx
 import openai
@@ -13,11 +15,12 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app import db, server
+from app import audit, db, query_api, server
+from app.audit import AuditLog
 from app.config import settings
 from app.main import app, lifespan
 from app.query_api import MAX_QUESTION_CHARS, QueryRequest, QueryResponse
-from app.query_flow import FlowAnswer
+from app.query_flow import FlowAnswer, FlowTrace
 from app.rag.answering import ANSWERED, REFUSAL_TEXT, REFUSED, Citation, InvalidAnswer
 from app.rag.query_models import ModelBusy
 from app.rag.retrieval import RetrievedChunk
@@ -28,6 +31,7 @@ from app.sql_agent.pipeline import FAILED, FAILED_TEXT
 TOKEN = "test-internal-token"
 HEADERS = {"X-Internal-Token": TOKEN}
 CONTRACT = json.loads((Path(__file__).resolve().parents[2] / "contracts" / "query.examples.json").read_text(encoding="utf-8"))
+QUERY_ID = UUID(CONTRACT["responses"]["answered"]["queryId"])
 CHUNK = RetrievedChunk(chunk_id=7, doc_id=3, doc_type="sop", title="Account Restriction Handling", department="ALL",
                        heading_path=("Account Restriction Handling", "Steps"), content="...", score=0.51834)
 
@@ -36,27 +40,53 @@ def from_documents(status, text, citations, searched=("Beauty", "ALL")) -> FlowA
     return FlowAnswer(status, text, citations, None if searched is None else list(searched), ("documents",), None, None)
 
 
-class FakeService:
-    def __init__(self, result=None, error=None, delay=0.0):
-        self.result = result or from_documents(ANSWERED, "Do this [1].", [Citation(1, CHUNK)])
-        self.error = error
-        self.delay = delay
-        self.calls = []
+def traced(answer: FlowAnswer | None, error: InvalidAnswer | None = None) -> FlowTrace:
+    return FlowTrace(answer, error, None, "documents", None, None, (), 0.0, 0.0, 0.0, 0.0, (0, 0), 0.0)
 
-    async def answer(self, question, *, user_id, role, department, budget, session_id=None):
+
+class FakeService:
+    """error: raised from answer(); invalid: an answer that failed validation, which the flow returns in its trace."""
+
+    def __init__(self, result=None, error=None, delay=0.0, invalid=None, events=None):
+        self.result = result or from_documents(ANSWERED, "Do this [1].", [Citation(1, CHUNK)])
+        self.error, self.delay, self.invalid = error, delay, invalid
+        self.calls, self.remembered = [], []
+        self.events = [] if events is None else events
+
+    async def answer(self, question, *, user_id, role, department, budget, session_id=None, query_id="-"):
         self.calls.append({"question": question, "user_id": user_id, "role": role, "department": department, "budget": budget,
-                           "session_id": session_id})
+                           "session_id": session_id, "query_id": query_id})
         if self.delay:
             await asyncio.sleep(self.delay)
         if self.error:
             raise self.error
-        return self.result
+        return traced(None, self.invalid) if self.invalid else traced(self.result)
+
+    async def remember(self, user_id, session_id, question, answer):
+        self.events.append("remember")
+        if session_id:
+            self.remembered.append((user_id, session_id, question, answer.text))
+
+
+class FakeAudit(AuditLog):
+    def __init__(self, error=None, events=None):
+        super().__init__(None, 0.5)
+        self.records, self.error = [], error
+        self.events = [] if events is None else events
+
+    async def write(self, record):
+        self.events.append("write")
+        if self.error:
+            raise type(self.error)(*self.error.args)
+        self.records.append(record)
 
 
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setattr(settings, "internal_service_token", TOKEN)
+    monkeypatch.setattr(query_api, "uuid4", lambda: QUERY_ID)   # the contract's examples carry one
     app.state.query_flow = FakeService()
+    app.state.audit_log = FakeAudit()
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -72,7 +102,7 @@ def test_only_the_backends_token_gets_in(client, headers):
     r = client.post("/query", json=body(), headers=headers)
     assert r.status_code == 401
     assert r.json() == {"error": "this endpoint only accepts calls from the backend"}
-    assert app.state.query_flow.calls == []
+    assert app.state.query_flow.calls == [] and app.state.audit_log.records == []
 
 
 def test_an_unset_token_lets_nobody_in_not_even_with_an_empty_header(client, monkeypatch):
@@ -128,7 +158,7 @@ def test_a_malformed_request_is_a_400_with_a_reason_and_goes_no_further(client, 
     assert r.status_code == 400
     assert list(r.json()) == ["error"]
     assert r.json()["error"]
-    assert app.state.query_flow.calls == []
+    assert app.state.query_flow.calls == [] and app.state.audit_log.records == []
 
 
 @pytest.mark.parametrize("missing", ["question", "userId", "role", "department"])
@@ -237,7 +267,7 @@ def test_every_request_in_the_contract_is_accepted(example):
 @pytest.mark.parametrize("name", CONTRACT["responses"])
 def test_every_response_in_the_contract_round_trips(name):
     example = CONTRACT["responses"][name]
-    assert QueryResponse.model_validate(example).model_dump(by_alias=True) == example
+    assert QueryResponse.model_validate(example).model_dump(by_alias=True, mode="json") == example   # as sent
 
 
 # ---- how failures look
@@ -309,6 +339,96 @@ def test_the_service_gets_a_budget_of_the_configured_length(client):
     client.post("/query", json=body(), headers=HEADERS)
     remaining = app.state.query_flow.calls[0]["budget"].remaining()
     assert 0 < remaining <= settings.query_budget_seconds
+
+
+# ---- every question it takes in is recorded
+
+
+def test_an_answer_is_recorded_under_the_query_id_it_goes_back_with(client):
+    session = "5f0c1c9e-3c4e-4a3e-9d4e-2f1b7a6c8d90"
+    app.state.query_flow = FakeService(delay=0.05)
+    r = client.post("/query", json=body(sessionId=session), headers=HEADERS)
+    [record] = app.state.audit_log.records
+    assert r.json()["queryId"] == str(record.query_id) == str(QUERY_ID)
+    assert app.state.query_flow.calls[0]["query_id"] == str(QUERY_ID)   # the log line carries it too
+    assert (record.user_id, record.role, record.department, str(record.session_id), record.question) == (
+        2, "staff", "Beauty", session, "How do I handle a restriction?")
+    assert record.outcome == ANSWERED and record.trace.answer.text == "Do this [1]."
+    assert record.total_ms >= 50   # timed from when the request arrived
+
+
+@pytest.mark.parametrize("answer", [from_documents(REFUSED, REFUSAL_TEXT, []),
+                                    FlowAnswer(FAILED, FAILED_TEXT, [], ["Beauty"], ("data",), None, None),
+                                    FlowAnswer("clarify", "Which one?", [], None, (), None, None)])
+def test_a_refusal_a_failed_query_and_a_question_asked_back_are_recorded_with_their_status(client, answer):
+    app.state.query_flow = FakeService(answer)
+    assert client.post("/query", json=body(), headers=HEADERS).status_code == 200
+    assert [r.outcome for r in app.state.audit_log.records] == [answer.status]
+
+
+@pytest.mark.parametrize(("error", "outcome"), [
+    (TimeoutError("budget"), audit.TIMEOUT),
+    (openai.APITimeoutError(REQUEST), audit.TIMEOUT),
+    (InvalidAnswer("cites [9]"), audit.INVALID),
+    (ModelBusy("every model call slot is taken"), audit.BUSY),
+    (openai.RateLimitError("slow down", response=httpx.Response(429, request=REQUEST), body=None), audit.RATE_LIMITED),
+    (openai.APIConnectionError(request=REQUEST), audit.MODEL_ERROR),
+    (openai.APIStatusError("bad", response=httpx.Response(500, request=REQUEST), body=None), audit.MODEL_ERROR),
+    (psycopg.OperationalError("down"), audit.DATABASE_ERROR),
+    (RuntimeError("bug"), audit.ERROR),
+])
+def test_a_question_that_brought_no_answer_back_is_recorded_with_what_became_of_it(client, error, outcome):
+    app.state.query_flow = FakeService(error=error)
+    client.post("/query", json=body(), headers=HEADERS)
+    [record] = app.state.audit_log.records
+    assert (record.outcome, record.trace, record.question) == (outcome, None, "How do I handle a restriction?")
+
+
+def test_an_answer_that_failed_validation_is_a_502_recorded_with_its_trace(client):
+    app.state.query_flow = FakeService(invalid=InvalidAnswer("cites [9]"))
+    r = client.post("/query", json=body(sessionId="5f0c1c9e-3c4e-4a3e-9d4e-2f1b7a6c8d90"), headers=HEADERS)
+    assert r.status_code == 502 and "cites [9]" not in r.text
+    [record] = app.state.audit_log.records
+    assert record.outcome == audit.INVALID and isinstance(record.trace.error, InvalidAnswer)
+    assert app.state.query_flow.remembered == []
+
+
+def test_a_question_past_its_time_is_recorded_after_the_budget_not_cut_off_with_it(client, monkeypatch):
+    monkeypatch.setattr(settings, "query_budget_seconds", 0.05)
+    app.state.query_flow = FakeService(delay=5)
+    assert client.post("/query", json=body(), headers=HEADERS).status_code == 504
+    assert [r.outcome for r in app.state.audit_log.records] == [audit.TIMEOUT]
+
+
+def test_an_answer_that_cant_be_recorded_is_withheld_and_its_turn_not_kept(client):
+    app.state.audit_log = FakeAudit(error=psycopg.OperationalError("disk full"))
+    r = client.post("/query", json=body(sessionId="5f0c1c9e-3c4e-4a3e-9d4e-2f1b7a6c8d90"), headers=HEADERS)
+    assert r.status_code == 503 and r.headers["retry-after"] == "1"
+    assert r.json() == {"error": "the question couldn't be recorded; try again shortly"}
+    assert "Do this" not in r.text and app.state.query_flow.remembered == []
+
+
+def test_the_pools_timeout_withholds_the_answer_too(client):
+    from psycopg_pool import PoolTimeout
+    app.state.audit_log = FakeAudit(error=PoolTimeout("no connection"))
+    assert client.post("/query", json=body(), headers=HEADERS).status_code == 503
+
+
+def test_a_failure_that_cant_be_recorded_still_goes_back_as_the_failure_it_was(client):
+    app.state.query_flow = FakeService(error=openai.APIConnectionError(request=REQUEST))
+    app.state.audit_log = FakeAudit(error=psycopg.OperationalError("disk full"))
+    r = client.post("/query", json=body(), headers=HEADERS)
+    assert r.status_code == 502 and r.json() == {"error": "the model call failed"}
+
+
+def test_a_conversations_turn_is_kept_only_after_the_question_is_recorded(client):
+    events = []
+    app.state.query_flow = FakeService(events=events)
+    app.state.audit_log = FakeAudit(events=events)
+    session = "5f0c1c9e-3c4e-4a3e-9d4e-2f1b7a6c8d90"
+    client.post("/query", json=body(sessionId=session), headers=HEADERS)
+    assert events == ["write", "remember"]
+    assert app.state.query_flow.remembered == [(2, session, "How do I handle a restriction?", "Do this [1].")]
 
 
 # ---- starting up
@@ -391,7 +511,8 @@ def test_the_default_limit_on_model_calls_is_one_process_share_of_the_peak_not_a
 
 def test_the_pools_of_8_processes_leave_room_for_the_backend_in_the_connections_postgres_allows():
     fields = type(settings).model_fields
-    assert 8 * (fields["query_pool_size"].default + fields["sql_pool_size"].default) + 10 < 100
+    per_process = fields["query_pool_size"].default + fields["sql_pool_size"].default + fields["audit_pool_size"].default
+    assert 8 * per_process + 10 < 100
 
 
 def test_the_service_listens_on_localhost_unless_told_otherwise():
@@ -424,7 +545,10 @@ async def test_the_started_service_has_one_model_limit_for_every_call_sized_from
     monkeypatch.setattr(settings, "compose_reasoning_effort", "low")
     monkeypatch.setattr(db, "query_pool", FakePool)
     monkeypatch.setattr(db, "sql_pool", FakePool)
+    monkeypatch.setattr(db, "audit_pool", FakePool)
+    monkeypatch.setattr(settings, "audit_wait_seconds", 0.3)
     async with lifespan(app):
+        assert isinstance(app.state.audit_log._pool, FakePool) and app.state.audit_log._wait == 0.3
         flow = app.state.query_flow
         limits = {id(model._limit) for model in (flow._embedder, flow._router._model, flow._documents._model,
                                                   flow._data._writer, flow._data._explainer, flow._composer)}
